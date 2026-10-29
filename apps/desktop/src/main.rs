@@ -39,11 +39,10 @@ pub fn with_app(f: impl FnOnce(&mut state::App)) {
     });
 }
 
+/// Where a second start finds the window already open: in Dolphone's private
+/// runtime directory, never a shared /tmp where another user could answer.
 fn socket_path() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("dolphone/desktop.sock")
+    phone_bus::files::runtime_dir().join("desktop.sock")
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -59,9 +58,6 @@ fn main() -> Result<(), slint::PlatformError> {
     if let Ok(mut s) = UnixStream::connect(&sock) {
         let _ = s.write_all(args.join("\n").as_bytes());
         return Ok(());
-    }
-    if let Some(dir) = sock.parent() {
-        let _ = std::fs::create_dir_all(dir);
     }
     let _ = std::fs::remove_file(&sock);
     if let Ok(listener) = UnixListener::bind(&sock) {
@@ -258,6 +254,107 @@ mod tests {
         app.render();
         use slint::Model;
         assert_eq!(ui.get_bubbles().row_data(0).unwrap().code.as_str(), "735102");
+    }
+
+    #[test]
+    fn bubbles_say_who_and_keep_a_lost_picture() {
+        let _w = window();
+        let ui = AppWindow::new().expect("window");
+        let mut app = state::App::headless(ui.clone_strong());
+        state::sample(&mut app, 1);
+        app.messages.truncate(2);
+        app.messages[0].body = "Look".into();
+        app.messages[0].parts = vec![("image/jpeg".into(), "/nonexistent/picture.jpg".into())];
+        app.messages[1].state = phone_core::model::MessageState::Delivered as u8;
+        app.render();
+        use slint::Model;
+        let b = ui.get_bubbles();
+        let (theirs, mine) = (b.row_data(0).unwrap(), b.row_data(1).unwrap());
+        assert_eq!(theirs.parts.as_str(), "[Picture]", "a picture that will not load is still named");
+        assert!(
+            theirs.label.starts_with("Alex Example, ") && theirs.label.ends_with(": Look [Picture]"),
+            "{}",
+            theirs.label
+        );
+        assert!(
+            mine.label.starts_with("You, ") && mine.label.ends_with(", Delivered: Yes! 12:30 works."),
+            "{}",
+            mine.label
+        );
+    }
+
+    /// Keys as the window gets them, for the keyboard tests.
+    fn press(ui: &AppWindow, key: impl Into<slint::SharedString>) {
+        let text = key.into();
+        ui.window().dispatch_event(slint::platform::WindowEvent::KeyPressed { text: text.clone() });
+        ui.window().dispatch_event(slint::platform::WindowEvent::KeyReleased { text });
+    }
+
+    #[test]
+    fn the_call_card_keeps_the_keyboard() {
+        use slint::platform::Key;
+        let _w = window();
+        let ui = AppWindow::new().expect("window");
+        let mut app = state::App::headless(ui.clone_strong());
+        state::sample(&mut app, 0);
+        state::sample_call(&mut app, true);
+        app.render();
+        ui.show().expect("show");
+        let said = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+        let s = said.clone();
+        ui.on_answer(move || s.borrow_mut().push("answer".into()));
+        let s = said.clone();
+        ui.on_decline(move || s.borrow_mut().push("decline".into()));
+        let s = said.clone();
+        ui.on_reply(move |t| s.borrow_mut().push(t.to_string()));
+        slint::platform::update_timers_and_animations();
+
+        // Answer has the focus as the card opens.
+        press(&ui, Key::Return);
+        // Tab runs along the replies, then round to Decline rather than out to the
+        // page; Shift+Tab goes back round to the last reply.
+        press(&ui, Key::Tab);
+        press(&ui, " ");
+        for _ in 0..3 {
+            press(&ui, Key::Tab);
+        }
+        press(&ui, Key::Return);
+        press(&ui, Key::Backtab);
+        press(&ui, Key::Return);
+        assert_eq!(*said.borrow(), ["answer", "Can't talk now", "decline", "Call you back"]);
+    }
+
+    #[test]
+    fn lists_walk_with_the_arrows() {
+        use slint::platform::Key;
+        let _w = window();
+        let ui = AppWindow::new().expect("window");
+        let mut app = state::App::headless(ui.clone_strong());
+        state::sample(&mut app, 2);
+        app.render();
+        ui.show().expect("show");
+        let called = std::rc::Rc::new(std::cell::Cell::new(-1));
+        let c = called.clone();
+        ui.on_contact_call(move |i| c.set(i));
+        slint::platform::update_timers_and_animations();
+
+        // Tab past the search field to the first row; Space chooses it.
+        let mut tabs = 0;
+        while ui.get_contact_selected() < 0 {
+            assert!(tabs < 5, "Tab reaches the list");
+            press(&ui, Key::Tab);
+            tabs += 1;
+            press(&ui, " ");
+        }
+        assert_eq!(ui.get_contact_selected(), 0);
+        // Down twice and Space chooses the third; Up and Enter calls the second.
+        press(&ui, Key::DownArrow);
+        press(&ui, Key::DownArrow);
+        press(&ui, " ");
+        assert_eq!(ui.get_contact_selected(), 2);
+        press(&ui, Key::UpArrow);
+        press(&ui, Key::Return);
+        assert_eq!(called.get(), 1);
     }
 
     #[test]

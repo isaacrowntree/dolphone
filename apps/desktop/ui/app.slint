@@ -14,6 +14,8 @@ export struct Row {
     aside: string,
     // A dot: 0 none, 1 unread or missed, 2 a warning (failed, blocked).
     mark: int,
+    // What the dot means, in words, for a screen reader ("2 unread", "blocked").
+    note: string,
     key: string,
 }
 
@@ -27,6 +29,8 @@ export struct Bubble {
     // An MMS's first picture, and a line naming what else it carried.
     picture: image,
     parts: string,
+    // The whole bubble in words: who, when, how it went, then the text.
+    label: string,
 }
 
 // An ON/OFF setting: its key in phoned, what it says, whether it is on.
@@ -51,6 +55,57 @@ export global Brand {
     // Secondary text: the theme's own ink, lightened, so it holds about 4.5:1 in
     // both light and dark themes where a fixed grey would fail one of them.
     out property <color> muted: Palette.foreground.with-alpha(0.68);
+    // The keyboard focus ring on what is drawn here rather than by the style.
+    out property <color> focus: Palette.accent-background;
+}
+
+// A control drawn here rather than by the style, made to behave like a Button for
+// the keyboard: Tab stops on it, Enter or Space presses it, and a ring shows where
+// the focus is. The control's look goes inside; `hovered` and `down` are for it.
+component Pressable inherits FocusScope {
+    in property <length> radius;
+    in property <string> label;
+    out property <bool> hovered: touch.has-hover;
+    out property <bool> down: touch.pressed;
+    callback activated();
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { root.activated(); }
+    key-pressed(event) => {
+        // Ctrl+Enter and the like are the window's shortcuts, not a press.
+        if (root.enabled && !event.modifiers.control && (event.text == Key.Return || event.text == " ")) {
+            root.activated();
+            return accept;
+        }
+        reject
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.activated(); }
+    }
+    @children
+    if root.has-focus: Rectangle {
+        x: -3px;
+        y: -3px;
+        width: root.width + 6px;
+        height: root.height + 6px;
+        border-radius: root.radius + 3px;
+        border-width: 2px;
+        border-color: Brand.focus;
+    }
+}
+
+// Where Tab lands past an overlay's last control, or Shift+Tab before its first:
+// it hands the focus straight back inside, so the keyboard cannot wander off
+// behind the dim layer to the page underneath.
+component FocusWrap inherits FocusScope {
+    callback wrap();
+    x: 0;
+    y: 0;
+    width: 1px;
+    height: 1px;
+    focus-gained(reason) => { root.wrap(); }
 }
 
 component Badge inherits Rectangle {
@@ -63,7 +118,7 @@ component Badge inherits Rectangle {
     label := Text {
         text: count;
         color: white;
-        font-size: 11px;
+        font-size: 12px;
         font-weight: 700;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -98,18 +153,42 @@ component NavItem inherits Rectangle {
 component RowView inherits Rectangle {
     in property <Row> entry;
     in property <bool> selected;
+    // The keyboard is on this row: it takes the focus.
+    in property <bool> current;
+    in property <string> primary-label;
+    // A click or Space; a double click, Enter, or the row's button.
     callback clicked();
     callback primary();
-    in property <string> primary-label;
+    // Up or Down (-1, 1), for the list to move along; and the row took the focus.
+    callback step(int);
+    callback focused();
+    property <bool> button-focused;
+    property <bool> active: fs.has-focus || root.button-focused;
     height: 56px;
     border-radius: 8px;
-    accessible-role: list-item;
-    accessible-label: entry.title + ", " + entry.subtitle + ", " + entry.aside;
-    accessible-action-default => { root.primary(); }
-    background: selected ? Palette.selection-background : touch.has-hover ? Palette.alternate-background : transparent;
-    touch := TouchArea {
-        clicked => { root.clicked(); }
-        double-clicked => { root.primary(); }
+    background: selected ? Palette.selection-background : touch.has-hover || root.active ? Palette.alternate-background : transparent;
+    changed current => {
+        if (root.current) { fs.focus(); }
+    }
+    fs := FocusScope {
+        // On the scope, which is what has the focus. The dot's colour says
+        // unread, missed or blocked; the label says it in words.
+        accessible-role: list-item;
+        accessible-label: (entry.note != "" ? entry.note + ", " : "") + entry.title + ", " + entry.subtitle + ", " + entry.aside;
+        accessible-action-default => { root.primary(); }
+        key-pressed(event) => {
+            if (event.modifiers.control) { return reject; }
+            if (event.text == Key.Return) { root.primary(); return accept; }
+            if (event.text == " ") { root.clicked(); return accept; }
+            if (event.text == Key.UpArrow) { root.step(-1); return accept; }
+            if (event.text == Key.DownArrow) { root.step(1); return accept; }
+            reject
+        }
+        focus-gained(reason) => { root.focused(); }
+        touch := TouchArea {
+            clicked => { root.clicked(); }
+            double-clicked => { root.primary(); }
+        }
     }
     HorizontalLayout {
         padding: 8px;
@@ -129,31 +208,97 @@ component RowView inherits Rectangle {
             Text { text: entry.subtitle; font-size: 12px; overflow: elide; color: selected ? Palette.selection-foreground : Brand.muted; }
         }
         Text { text: entry.aside; font-size: 12px; vertical-alignment: center; color: selected ? Palette.selection-foreground : Brand.muted; }
-        if primary-label != "" && (touch.has-hover || selected): Button {
+        // Shown on hover, on the selected row, and on the row the keyboard is on
+        // (or on the button itself, which Tab reaches next).
+        if primary-label != "" && (touch.has-hover || selected || root.active): Button {
             text: primary-label;
             clicked => { root.primary(); }
+            changed has-focus => { root.button-focused = self.has-focus; }
+        }
+    }
+    if fs.has-focus: Rectangle {
+        border-radius: 8px;
+        border-width: 2px;
+        border-color: Brand.focus;
+    }
+}
+
+// A scrolling list of rows the keyboard can walk: Tab enters it, Up and Down move
+// along it (scrolling as they go), Enter does the row's main thing and Space
+// chooses it.
+component RowList inherits ListView {
+    in property <[Row]> rows;
+    in property <int> selected: -1;
+    in property <string> primary-label;
+    callback chosen(int);
+    callback primary(int);
+    // The row the keyboard is on, which the focus follows.
+    property <int> cursor: -1;
+    property <length> row-height: 56px;
+
+    function go(i: int) {
+        if (i < 0 || i >= root.rows.length) { return; }
+        // Scrolled to first, so the row is there to take the focus.
+        if (i * root.row-height < -root.content-y) {
+            root.content-y = -i * root.row-height;
+        }
+        if ((i + 1) * root.row-height > root.visible-height - root.content-y) {
+            root.content-y = root.visible-height - (i + 1) * root.row-height;
+        }
+        root.cursor = i;
+    }
+
+    for r[i] in root.rows: RowView {
+        entry: r;
+        selected: i == root.selected;
+        current: i == root.cursor;
+        primary-label: root.primary-label;
+        clicked => { root.chosen(i); }
+        primary => { root.primary(i); }
+        focused => { root.cursor = i; }
+        step(d) => { root.go(i + d); }
+    }
+}
+
+// The same for a short list laid out in a page rather than scrolling by itself.
+// The row's own button says what it does (its aside), when `aside-is-action`.
+component RowGroup inherits VerticalLayout {
+    in property <[Row]> rows;
+    in property <string> primary-label;
+    in property <bool> aside-is-action;
+    callback primary(int);
+    property <int> cursor: -1;
+    for r[i] in root.rows: RowView {
+        entry: r;
+        current: i == root.cursor;
+        primary-label: root.aside-is-action ? r.aside : root.primary-label;
+        primary => {
+            if (!root.aside-is-action || r.aside != "") { root.primary(i); }
+        }
+        focused => { root.cursor = i; }
+        step(d) => {
+            if (i + d >= 0 && i + d < root.rows.length) { root.cursor = i + d; }
         }
     }
 }
 
-component DialKey inherits Rectangle {
+component DialKey inherits Pressable {
     in property <string> digit;
     in property <string> letters;
     callback pressed(string);
     width: 72px;
     height: 56px;
-    border-radius: 28px;
-    accessible-role: button;
-    accessible-label: digit == "*" ? "star" : digit == "#" ? "hash" : digit;
-    accessible-action-default => { root.pressed(digit); }
-    background: touch.pressed ? Palette.selection-background : touch.has-hover ? Palette.alternate-background : Palette.control-background;
-    touch := TouchArea {
-        clicked => { root.pressed(digit); }
+    radius: 28px;
+    label: digit == "*" ? "star" : digit == "#" ? "hash" : digit;
+    activated => { root.pressed(digit); }
+    Rectangle {
+        border-radius: 28px;
+        background: root.down ? Palette.selection-background : root.hovered ? Palette.alternate-background : Palette.control-background;
     }
     VerticalLayout {
         alignment: center;
         Text { text: digit; font-size: 22px; horizontal-alignment: center; color: Palette.foreground; }
-        Text { text: letters; font-size: 9px; horizontal-alignment: center; color: Brand.muted; letter-spacing: 1px; }
+        Text { text: letters; font-size: 12px; horizontal-alignment: center; color: Brand.muted; letter-spacing: 1px; }
     }
 }
 
@@ -166,6 +311,7 @@ component Dialpad inherits VerticalLayout {
     alignment: start;
     LineEdit {
         text <=> root.number;
+        accessible-label: "Number to call";
         placeholder-text: "Number or *code#";
         font-size: 20px;
         horizontal-alignment: center;
@@ -184,18 +330,18 @@ component Dialpad inherits VerticalLayout {
         alignment: center;
         spacing: 14px;
         Rectangle { width: 72px; }
-        Rectangle {
-            width: 72px; height: 56px; border-radius: 28px;
-            accessible-role: button;
-            accessible-label: "Call";
-            accessible-action-default => { root.call(root.number); }
-            background: callt.has-hover ? Brand.ok.darker(10%) : Brand.ok;
-            callt := TouchArea { clicked => { root.call(root.number); } }
+        callk := Pressable {
+            width: 72px; height: 56px; radius: 28px;
+            label: "Call";
+            activated => { root.call(root.number); }
+            Rectangle { border-radius: 28px; background: callk.hovered ? Brand.ok.darker(10%) : Brand.ok; }
             Text { text: "Call"; color: white; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
         }
-        Rectangle {
-            width: 72px; height: 56px;
-            back := TouchArea { clicked => { root.number = ""; root.typed(""); } }
+        Pressable {
+            width: 72px; height: 56px; radius: 28px;
+            label: "Clear number";
+            enabled: root.number != "";
+            activated => { root.number = ""; root.typed(""); }
             Text { text: root.number == "" ? "" : "Clear"; color: Brand.muted; horizontal-alignment: center; vertical-alignment: center; }
         }
     }
@@ -247,48 +393,68 @@ component CallCard inherits Rectangle {
         Text { text: detail; horizontal-alignment: center; color: Brand.muted; visible: detail != ""; }
         if two-calls && !ringing: Text { text: "On hold: " + held-name; horizontal-alignment: center; color: Brand.muted; }
 
-        if ringing: HorizontalLayout {
-            spacing: 12px;
-            Button { text: "Decline"; clicked => { root.decline(); } }
-            Button { text: "Answer"; primary: true; clicked => { root.answer(); } }
-        }
-        if ringing: HorizontalLayout {
-            spacing: 6px;
-            for r in ["Can't talk now", "On my way", "Call you back"]: Button {
-                text: r;
-                clicked => { root.reply(r); }
+        // Ringing: the focus starts on Answer, and Tab goes round the card's own
+        // buttons rather than out to the page behind it.
+        if ringing: Rectangle {
+            init => { answer-button.focus(); }
+            FocusWrap { wrap => { reply-3.focus(); } }
+            VerticalLayout {
+                spacing: 12px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    decline-button := Button { text: "Decline"; clicked => { root.decline(); } }
+                    answer-button := Button { text: "Answer"; primary: true; clicked => { root.answer(); } }
+                }
+                HorizontalLayout {
+                    spacing: 6px;
+                    Button { text: "Can't talk now"; clicked => { root.reply(self.text); } }
+                    Button { text: "On my way"; clicked => { root.reply(self.text); } }
+                    reply-3 := Button { text: "Call you back"; clicked => { root.reply(self.text); } }
+                }
             }
+            FocusWrap { wrap => { decline-button.focus(); } }
         }
-        if !ringing && keypad: HorizontalLayout {
-            alignment: center;
-            spacing: 6px;
-            for d in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"]: Button {
-                text: d;
-                width: 28px;
-                clicked => { root.dtmf(d); }
-            }
-        }
-        if !ringing: HorizontalLayout {
-            spacing: 8px;
-            Button { text: muted ? "Unmute" : "Mute"; checkable: true; checked: muted; clicked => { root.mute(!muted); } }
-            Button { text: "Keypad"; checkable: true; checked: keypad; clicked => { root.toggle-keypad(); } }
-            if two-calls: Button { text: "Swap"; clicked => { root.swap(); } }
-            ComboBox {
-                horizontal-stretch: 1;
-                model: route-names;
-                current-index: route-index;
-                selected => { root.route(self.current-index); }
-            }
-        }
+
+        // Live: the focus starts on Keypad, which nothing harms (End is the last
+        // place for it, a moment after answering).
         if !ringing: Rectangle {
-            height: 44px;
-            border-radius: 22px;
-            accessible-role: button;
-            accessible-label: "End call";
-            accessible-action-default => { root.hangup(); }
-            background: endt.has-hover ? Brand.danger.darker(10%) : Brand.danger;
-            endt := TouchArea { clicked => { root.hangup(); } }
-            Text { text: "End call"; color: white; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+            init => { keypad-button.focus(); }
+            FocusWrap { wrap => { end-button.focus(); } }
+            VerticalLayout {
+                spacing: 12px;
+                if keypad: HorizontalLayout {
+                    alignment: center;
+                    spacing: 6px;
+                    for d in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"]: Button {
+                        text: d;
+                        width: 28px;
+                        accessible-label: d == "*" ? "star" : d == "#" ? "hash" : d;
+                        clicked => { root.dtmf(d); }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    mute-button := Button { text: muted ? "Unmute" : "Mute"; checkable: true; checked: muted; clicked => { root.mute(!muted); } }
+                    keypad-button := Button { text: "Keypad"; checkable: true; checked: keypad; clicked => { root.toggle-keypad(); } }
+                    if two-calls: Button { text: "Swap"; clicked => { root.swap(); } }
+                    ComboBox {
+                        horizontal-stretch: 1;
+                        accessible-label: "Call audio";
+                        model: route-names;
+                        current-index: route-index;
+                        selected => { root.route(self.current-index); }
+                    }
+                }
+                end-button := Pressable {
+                    height: 44px;
+                    radius: 22px;
+                    label: "End call";
+                    activated => { root.hangup(); }
+                    Rectangle { border-radius: 22px; background: end-button.hovered ? Brand.danger.darker(10%) : Brand.danger; }
+                    Text { text: "End call"; color: white; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                }
+            }
+            FocusWrap { wrap => { mute-button.focus(); } }
         }
     }
 }
@@ -307,6 +473,8 @@ export component AppWindow inherits Window {
     // The sidebar's view of the phone.
     in property <string> operator;
     in property <string> signal;
+    // The signal in words ("LTE, signal 3 of 4"), for a screen reader.
+    in property <string> signal-label;
     in property <int> unread;
     in property <int> missed;
     in property <bool> connected;
@@ -477,7 +645,7 @@ export component AppWindow inherits Window {
                     Text { text: "Dolphone"; font-size: 24px; font-weight: 800; color: Brand.accent; }
                 }
                 Text { text: connected ? operator : "Phone service not running"; color: Brand.muted; font-size: 12px; overflow: elide; }
-                Text { text: signal; color: Brand.muted; font-size: 12px; }
+                Text { text: signal; color: Brand.muted; font-size: 12px; accessible-label: root.signal-label; }
                 Rectangle { height: 14px; }
                 NavItem { label: "Calls"; glyph: "\u{260E}"; active: page == 0; badge: missed; clicked => { root.navigate(0); } }
                 NavItem { label: "Messages"; glyph: "\u{2709}"; active: page == 1; badge: unread; clicked => { root.navigate(1); } }
@@ -504,14 +672,12 @@ export component AppWindow inherits Window {
                 VerticalLayout {
                     spacing: 8px;
                     Text { text: "Recent calls"; font-size: 18px; font-weight: 700; color: Palette.foreground; }
-                    ListView {
-                        for r[i] in root.recents: RowView {
-                            entry: r;
-                            selected: i == root.recent-selected;
-                            primary-label: "Call";
-                            clicked => { root.recent-selected = i; }
-                            primary => { root.recent-call(i); }
-                        }
+                    RowList {
+                        rows: root.recents;
+                        selected: root.recent-selected;
+                        primary-label: "Call";
+                        chosen(i) => { root.recent-selected = i; }
+                        primary(i) => { root.recent-call(i); }
                     }
                     HorizontalLayout {
                         alignment: end;
@@ -535,21 +701,20 @@ export component AppWindow inherits Window {
                         }
                         LineEdit {
                             placeholder-text: "Search texts";
+                            accessible-label: "Search texts";
                             text <=> root.search-text;
                             edited => { root.search(self.text); }
                         }
-                        if root.search-text != "": ListView {
-                            for f[i] in root.found: RowView {
-                                entry: f;
-                                clicked => { root.open-found(i); }
-                            }
+                        if root.search-text != "": RowList {
+                            rows: root.found;
+                            chosen(i) => { root.open-found(i); }
+                            primary(i) => { root.open-found(i); }
                         }
-                        if root.search-text == "": ListView {
-                            for t[i] in root.threads: RowView {
-                                entry: t;
-                                selected: i == root.thread-selected;
-                                clicked => { root.thread-selected = i; root.open-thread(i); }
-                            }
+                        if root.search-text == "": RowList {
+                            rows: root.threads;
+                            selected: root.thread-selected;
+                            chosen(i) => { root.thread-selected = i; root.open-thread(i); }
+                            primary(i) => { root.thread-selected = i; root.open-thread(i); }
                         }
                     }
                 }
@@ -584,6 +749,10 @@ export component AppWindow inherits Window {
                                 max-width: 420px;
                                 border-radius: 14px;
                                 background: b.mine ? Brand.bubble : Palette.alternate-background;
+                                // Whose it is shows only in its colour and side; the
+                                // label says it, with the time and how it went.
+                                accessible-role: text;
+                                accessible-label: b.label;
                                 VerticalLayout {
                                     padding: 10px;
                                     padding-top: 7px;
@@ -605,23 +774,19 @@ export component AppWindow inherits Window {
                                             primary: true;
                                             clicked => { root.copy(b.code, true); }
                                         }
-                                        Text { text: b.time + (b.state == "" ? "" : "  " + b.state); font-size: 10px; color: b.mine ? #fffc : Brand.muted; horizontal-alignment: right; vertical-alignment: center; horizontal-stretch: 1; }
+                                        Text { text: b.time + (b.state == "" ? "" : "  " + b.state); font-size: 12px; color: b.mine ? #fffc : Brand.muted; horizontal-alignment: right; vertical-alignment: center; horizontal-stretch: 1; }
                                         // A quiet link rather than a button on every bubble.
-                                        Rectangle {
+                                        copy-link := Pressable {
                                             width: copy-label.preferred-width;
-                                            accessible-role: button;
-                                            accessible-label: "Copy message";
-                                            accessible-action-default => { root.copy(b.text, false); }
+                                            radius: 3px;
+                                            label: "Copy message";
+                                            activated => { root.copy(b.text, false); }
                                             copy-label := Text {
                                                 text: "Copy";
-                                                font-size: 10px;
+                                                font-size: 12px;
                                                 vertical-alignment: center;
                                                 color: b.mine ? #fffc : Brand.muted;
-                                                font-weight: copy-touch.has-hover ? 700 : 400;
-                                            }
-                                            copy-touch := TouchArea {
-                                                mouse-cursor: pointer;
-                                                clicked => { root.copy(b.text, false); }
+                                                font-weight: copy-link.hovered || copy-link.has-focus ? 700 : 400;
                                             }
                                         }
                                     }
@@ -633,11 +798,12 @@ export component AppWindow inherits Window {
                         spacing: 8px;
                         LineEdit {
                             text <=> root.draft;
+                            accessible-label: "Text message";
                             placeholder-text: "Text message";
                             edited => { root.draft-edited(self.text); }
                             accepted => { root.send(root.draft); }
                         }
-                        Text { text: root.draft-cost; color: Brand.muted; font-size: 11px; vertical-alignment: center; }
+                        Text { text: root.draft-cost; color: Brand.muted; font-size: 12px; vertical-alignment: center; }
                         Button { text: "Send"; primary: true; enabled: root.draft != ""; clicked => { root.send(root.draft); } }
                     }
                 }
@@ -651,32 +817,31 @@ export component AppWindow inherits Window {
                     Text { text: "Contacts"; font-size: 18px; font-weight: 700; horizontal-stretch: 1; color: Palette.foreground; }
                     LineEdit {
                         width: 240px;
+                        accessible-label: "Search contacts";
                         placeholder-text: "Search";
                         text <=> root.contact-filter;
                         edited => { root.contacts-filtered(self.text); }
                     }
                 }
-                ListView {
-                    for c[i] in root.contacts: RowView {
-                        entry: c;
-                        selected: i == root.contact-selected;
-                        primary-label: "Call";
-                        clicked => { root.contact-selected = i; }
-                        primary => { root.contact-call(i); }
-                    }
+                RowList {
+                    rows: root.contacts;
+                    selected: root.contact-selected;
+                    primary-label: "Call";
+                    chosen(i) => { root.contact-selected = i; }
+                    primary(i) => { root.contact-call(i); }
                 }
                 HorizontalLayout {
                     alignment: end;
                     spacing: 8px;
-                    Text { text: "Contacts are .vcf files in ~/.local/share/dolphone/contacts"; color: Brand.muted; font-size: 11px; vertical-alignment: center; horizontal-stretch: 1; }
+                    Text { text: "Contacts are .vcf files in ~/.local/share/dolphone/contacts"; color: Brand.muted; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
                     Button { text: "Delete"; enabled: root.contact-selected >= 0; clicked => { root.remove-contact(root.contact-selected); } }
                     Button { text: "Text"; enabled: root.contact-selected >= 0; clicked => { root.contact-text(root.contact-selected); } }
                     Button { text: "Call"; primary: true; enabled: root.contact-selected >= 0; clicked => { root.contact-call(root.contact-selected); } }
                 }
                 HorizontalLayout {
                     spacing: 8px;
-                    LineEdit { placeholder-text: "Name"; text <=> root.new-contact-name; }
-                    LineEdit { placeholder-text: "Number"; text <=> root.new-contact-number; accepted => { root.add-contact(root.new-contact-name, root.new-contact-number); } }
+                    LineEdit { placeholder-text: "Name"; accessible-label: "New contact's name"; text <=> root.new-contact-name; }
+                    LineEdit { placeholder-text: "Number"; accessible-label: "New contact's number"; text <=> root.new-contact-number; accepted => { root.add-contact(root.new-contact-name, root.new-contact-number); } }
                     Button {
                         text: "Add contact";
                         enabled: root.new-contact-name != "" && root.new-contact-number != "";
@@ -700,17 +865,17 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         spacing: 12px;
                         Text { text: "Ringer"; width: 180px; vertical-alignment: center; color: Palette.foreground; }
-                        ComboBox { model: ["Ring", "Vibrate", "Silent"]; current-index: root.ringer-index; selected => { root.set-ringer(self.current-index); } }
+                        ComboBox { accessible-label: "Ringer"; model: ["Ring", "Vibrate", "Silent"]; current-index: root.ringer-index; selected => { root.set-ringer(self.current-index); } }
                     }
                     HorizontalLayout {
                         spacing: 12px;
                         Text { text: "Hold time on the panel"; width: 180px; vertical-alignment: center; color: Palette.foreground; }
-                        ComboBox { model: ["0.4 s", "0.6 s", "0.8 s", "1 s", "1.5 s"]; current-index: root.hold-index; selected => { root.set-hold(self.current-index); } }
+                        ComboBox { accessible-label: "Hold time on the panel"; model: ["0.4 s", "0.6 s", "0.8 s", "1 s", "1.5 s", "2 s", "3 s"]; current-index: root.hold-index; selected => { root.set-hold(self.current-index); } }
                     }
                     HorizontalLayout {
                         spacing: 12px;
                         Text { text: "Call audio"; width: 180px; vertical-alignment: center; color: Palette.foreground; }
-                        ComboBox { model: root.route-names; current-index: root.route-index; selected => { root.route(self.current-index); } }
+                        ComboBox { accessible-label: "Call audio"; model: root.route-names; current-index: root.route-index; selected => { root.route(self.current-index); } }
                     }
                     Text { text: "Calls"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
                     HorizontalLayout {
@@ -719,6 +884,7 @@ export component AppWindow inherits Window {
                         LineEdit {
                             width: 200px;
                             text <=> root.voicemail;
+                            accessible-label: "Voicemail number";
                             placeholder-text: "Your carrier's, e.g. 101";
                             input-type: InputType.text;
                             accepted => { root.set-voicemail(self.text); }
@@ -733,13 +899,14 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         spacing: 12px;
                         Text { text: "Account"; width: 180px; vertical-alignment: center; color: Palette.foreground; }
-                        LineEdit { text <=> root.sip-account; placeholder-text: "sip:you@voip.example.net"; }
+                        LineEdit { text <=> root.sip-account; accessible-label: "SIP account"; placeholder-text: "sip:you@voip.example.net"; }
                     }
                     HorizontalLayout {
                         spacing: 12px;
                         Text { text: "Password"; width: 180px; vertical-alignment: center; color: Palette.foreground; }
                         LineEdit {
                             text <=> root.sip-password;
+                            accessible-label: root.sip-password-set ? "SIP password, saved; type to change" : "SIP password";
                             input-type: InputType.password;
                             placeholder-text: root.sip-password-set ? "Saved; type to change" : "The account's password";
                         }
@@ -747,15 +914,23 @@ export component AppWindow inherits Window {
                     HorizontalLayout {
                         spacing: 12px;
                         Text { text: "Outbound proxy"; width: 180px; vertical-alignment: center; color: Palette.foreground; }
-                        LineEdit { text <=> root.sip-proxy; placeholder-text: "Only if your provider gives one"; }
+                        LineEdit { text <=> root.sip-proxy; accessible-label: "SIP outbound proxy"; placeholder-text: "Only if your provider gives one"; }
                     }
                     sip-always-box := CheckBox { text: "Use it for every call, not only when there is no mobile signal"; checked: root.sip-always; }
                     HorizontalLayout {
                         spacing: 12px;
-                        Text { text: root.sip-status == "" ? "Off" : root.sip-status; color: root.sip-status == "registered" ? Brand.ok : Brand.muted; vertical-alignment: center; horizontal-stretch: 1; }
+                        // Registered says so with a mark and in words, not by its green alone.
+                        Text {
+                            text: root.sip-status == "" ? "Off" : root.sip-status == "registered" ? "\u{2713} Registered" : root.sip-status;
+                            accessible-label: "SIP account: " + (root.sip-status == "" ? "off" : root.sip-status);
+                            color: root.sip-status == "registered" ? Brand.ok : Brand.muted;
+                            font-weight: root.sip-status == "registered" ? 600 : 400;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
                         Button { text: "Save account"; clicked => { root.save-sip(root.sip-account, root.sip-password, root.sip-proxy, sip-always-box.checked); } }
                     }
-                    Text { text: "Emergency calls always go over the mobile network."; color: Brand.muted; font-size: 11px; }
+                    Text { text: "Emergency calls always go over the mobile network."; color: Brand.muted; font-size: 12px; }
 
                     Text { text: "Texts"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
                     for t in root.text-toggles: CheckBox { text: t.label; checked: t.on; toggled => { root.set-flag(t.key, self.checked); } }
@@ -764,8 +939,8 @@ export component AppWindow inherits Window {
                     Text { text: "Text a number when the network link drops, and when it comes back."; color: Brand.muted; }
                     HorizontalLayout {
                         spacing: 12px;
-                        LineEdit { width: 200px; text <=> root.uplink-to; placeholder-text: "Number to text (empty: off)"; }
-                        LineEdit { width: 160px; text <=> root.uplink-iface; placeholder-text: "Interface (any)"; }
+                        LineEdit { width: 200px; text <=> root.uplink-to; accessible-label: "Number to text when the link drops"; placeholder-text: "Number to text (empty: off)"; }
+                        LineEdit { width: 160px; text <=> root.uplink-iface; accessible-label: "Interface to watch"; placeholder-text: "Interface (any)"; }
                         Button { text: "Save"; width: 90px; clicked => { root.save-uplink(root.uplink-to, root.uplink-iface); } }
                         Rectangle { horizontal-stretch: 1; }
                     }
@@ -773,7 +948,7 @@ export component AppWindow inherits Window {
                     Text { text: "Emergency alerts"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
                     CheckBox { text: "National alerts (always on)"; checked: true; enabled: false; }
                     for t in root.alert-toggles: CheckBox { text: t.label; checked: t.on; toggled => { root.set-flag(t.key, self.checked); } }
-                    for a in root.alerts: RowView { entry: a; }
+                    RowGroup { rows: root.alerts; }
 
                     Text { text: "Bluetooth"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
                     if !root.bt-available: Text { text: "No Bluetooth adapter."; color: Brand.muted; }
@@ -782,18 +957,18 @@ export component AppWindow inherits Window {
                         Switch { text: "Bluetooth"; checked: root.bt-powered; toggled => { root.bt-power(self.checked); } }
                         Button { text: "Scan for headsets and speakers"; enabled: root.bt-powered; clicked => { root.bt-scan(); } }
                     }
-                    for d[i] in root.bt-devices: RowView {
-                        entry: d;
-                        primary-label: d.aside;
-                        primary => { root.bt-action(i); }
+                    RowGroup {
+                        rows: root.bt-devices;
+                        aside-is-action: true;
+                        primary(i) => { root.bt-action(i); }
                     }
 
                     Text { text: "Blocked numbers"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
                     if root.blocked.length == 0: Text { text: "Nobody is blocked."; color: Brand.muted; }
-                    for b[i] in root.blocked: RowView {
-                        entry: b;
+                    RowGroup {
+                        rows: root.blocked;
                         primary-label: "Unblock";
-                        primary => { root.unblock(i); }
+                        primary(i) => { root.unblock(i); }
                     }
 
                     Text { text: "Laptops (KDE Connect)"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
@@ -802,10 +977,10 @@ export component AppWindow inherits Window {
                         checked: root.kdeconnect;
                         toggled => { root.set-flag("kdeconnect", self.checked); }
                     }
-                    for l[i] in root.laptops: RowView {
-                        entry: l;
-                        primary-label: l.aside;
-                        primary => { root.unpair-laptop(i); }
+                    RowGroup {
+                        rows: root.laptops;
+                        aside-is-action: true;
+                        primary(i) => { root.unpair-laptop(i); }
                     }
 
                     Text { text: "Programs allowed to text"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
@@ -814,15 +989,15 @@ export component AppWindow inherits Window {
                         color: Brand.muted;
                         wrap: word-wrap;
                     }
-                    for g[i] in root.grants: RowView {
-                        entry: g;
+                    RowGroup {
+                        rows: root.grants;
                         primary-label: "Revoke";
-                        primary => { root.revoke(i); }
+                        primary(i) => { root.revoke(i); }
                     }
 
                     Text { text: "What programs asked for"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
                     if root.audit.length == 0: Text { text: "Nothing yet."; color: Brand.muted; }
-                    for e in root.audit: RowView { entry: e; }
+                    RowGroup { rows: root.audit; }
 
                     Text { text: "Modem"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
                     Text { text: root.modem-text; color: Brand.muted; wrap: word-wrap; }
@@ -832,7 +1007,13 @@ export component AppWindow inherits Window {
                         spacing: 12px;
                         alignment: start;
                         Button { text: "Export texts..."; clicked => { root.export-texts(); } }
-                        Text { text: "An SMS Backup & Restore file in Documents, which Android phones can import."; color: Brand.muted; vertical-alignment: center; }
+                        Text {
+                            text: "An SMS Backup & Restore file in Documents, which Android phones can import. It is not encrypted, and only you can open it: delete it once it is copied over.";
+                            color: Brand.muted;
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                        }
                     }
 
                     Text { text: "Danger zone"; font-size: 15px; font-weight: 700; color: Brand.danger; }
@@ -845,9 +1026,9 @@ export component AppWindow inherits Window {
         }
     }
 
-    }
-
     // A dim layer under the card and the confirmation, so they read as on top.
+    // These are inside the shortcuts' scope, so Ctrl+Enter and Ctrl+Backspace
+    // still work while the focus is on the card.
     if call-visible || confirm-visible || alert-visible: Rectangle {
         background: #0005;
         TouchArea {}
@@ -890,6 +1071,10 @@ export component AppWindow inherits Window {
         border-color: Brand.accent;
         drop-shadow-blur: 24px;
         drop-shadow-color: #0006;
+        // The focus starts on Deny, the answer that does nothing, and Tab stays
+        // on the two buttons.
+        init => { deny-button.focus(); }
+        FocusWrap { wrap => { allow-button.focus(); } }
         cbox := VerticalLayout {
             padding: 20px;
             spacing: 10px;
@@ -899,10 +1084,11 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 alignment: end;
                 spacing: 8px;
-                Button { text: "Deny"; clicked => { root.deny(); } }
-                Button { text: "Allow"; primary: true; clicked => { root.allow(); } }
+                deny-button := Button { text: "Deny"; clicked => { root.deny(); } }
+                allow-button := Button { text: "Allow"; primary: true; clicked => { root.allow(); } }
             }
         }
+        FocusWrap { wrap => { deny-button.focus(); } }
     }
 
     if alert-visible && !call-visible: Rectangle {
@@ -916,6 +1102,9 @@ export component AppWindow inherits Window {
         drop-shadow-color: #0008;
         accessible-role: groupbox;
         accessible-label: root.alert-title;
+        // Dismiss has the focus, and keeps it.
+        init => { dismiss-button.focus(); }
+        FocusWrap { wrap => { dismiss-button.focus(); } }
         abox := VerticalLayout {
             padding: 24px;
             spacing: 12px;
@@ -926,9 +1115,10 @@ export component AppWindow inherits Window {
             Text { text: root.alert-text; font-size: 16px; wrap: word-wrap; color: white; }
             HorizontalLayout {
                 alignment: end;
-                Button { text: "Dismiss"; primary: true; clicked => { root.dismiss-alert(); } }
+                dismiss-button := Button { text: "Dismiss"; primary: true; clicked => { root.dismiss-alert(); } }
             }
         }
+        FocusWrap { wrap => { dismiss-button.focus(); } }
     }
 
     if toast != "": Rectangle {
@@ -939,5 +1129,6 @@ export component AppWindow inherits Window {
         border-radius: 20px;
         background: #222e;
         tt := Text { text: root.toast; color: white; horizontal-alignment: center; vertical-alignment: center; }
+    }
     }
 }

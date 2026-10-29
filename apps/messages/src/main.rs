@@ -4,7 +4,8 @@ mod model;
 mod view;
 
 use std::cell::RefCell;
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use std::time::{Duration, Instant, SystemTime};
 
 use flipctl_app::keyboard::{Exit, TextInput};
 use flipctl_app::{Key, StatusSource};
@@ -22,7 +23,23 @@ struct App {
     frame: u32,
     #[cfg(feature = "device")]
     motor: Option<flipctl_app::Haptic>,
-    contacts_loaded: Instant,
+    /// phoned's ringer: on Silent a text arrives without a buzz.
+    ringer: String,
+    /// The vibration being played, and the timer for its next pulse (running
+    /// only while there is one).
+    player: phone_bus::haptics::Player,
+    haptics: slint::Timer,
+    /// When the contacts directory was last looked at, and how it looked.
+    contacts_checked: Instant,
+    contacts_stamp: Option<(SystemTime, usize)>,
+    /// Where the Dialer leaves a number to text, and the change time of the last
+    /// one read, so a file that could not be removed is not read again.
+    handoff: PathBuf,
+    handoff_seen: Option<SystemTime>,
+    /// Whether the window had the keyboard at the last tick, and the clock
+    /// minute of the last draw (the dates in the lists move on by the minute).
+    focused: bool,
+    drawn_minute: i64,
 }
 
 thread_local! {
@@ -38,11 +55,30 @@ fn with_app(f: impl FnOnce(&mut App)) {
 }
 
 /// Where the Dialer leaves a number to text.
-fn handoff() -> std::path::PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("dolphone/compose")
+fn handoff() -> PathBuf {
+    phone_bus::files::runtime_dir().join("compose")
+}
+
+/// The tick while the keyboard is up and in front (the touchpad types, the
+/// caret blinks, the keys animate), and otherwise.
+const KEYBOARD_TICK: Duration = Duration::from_millis(100);
+const IDLE_TICK: Duration = Duration::from_secs(1);
+
+/// Whether this window has the keyboard, which is how flipctl marks the app in
+/// front. Slint's public API does not say; the window's own state does, and the
+/// lock file pins the Slint it belongs to. A window never once told it is active
+/// (a compositor that does not say) counts as in front, so nothing that used to
+/// work goes quiet.
+fn window_focused(ui: &AppWindow) -> bool {
+    use slint::ComponentHandle;
+    thread_local! {
+        static EVER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    let active = slint::private_unstable_api::re_exports::WindowInner::from_pub(ui.window()).active();
+    EVER.with(|ever| {
+        ever.set(ever.get() || active);
+        active || !ever.get()
+    })
 }
 
 fn main() -> Result<(), slint::PlatformError> {
@@ -52,18 +88,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let bus = Bus::start(|e| {
         let _ = slint::invoke_from_event_loop(move || with_app(|app| app.event(e)));
     });
-    APP.with(|a| {
-        *a.borrow_mut() = Some(App {
-            ui: ui.clone_strong(),
-            model: Model::new(&region, book),
-            bus,
-            kb: None,
-            frame: 0,
-            #[cfg(feature = "device")]
-            motor: flipctl_app::Haptic::open().ok(),
-            contacts_loaded: Instant::now(),
-        })
-    });
+    APP.with(|a| *a.borrow_mut() = Some(App::new(ui.clone_strong(), Model::new(&region, book), bus)));
     with_app(|app| {
         app.reload();
         app.check_handoff();
@@ -74,13 +99,23 @@ fn main() -> Result<(), slint::PlatformError> {
     flipctl_app::apply_status!(&ui, PanelStatus, status.current());
     #[cfg(feature = "device")]
     let mut pad = flipctl_app::TouchpadSource::open().ok();
-    let tick = slint::Timer::default();
-    tick.start(slint::TimerMode::Repeated, Duration::from_millis(100), move || {
+    let tick = std::rc::Rc::new(slint::Timer::default());
+    let timer = std::rc::Rc::downgrade(&tick);
+    tick.start(slint::TimerMode::Repeated, IDLE_TICK, move || {
         with_app(|app| {
             app.frame = app.frame.wrapping_add(1);
+            let focused = window_focused(&app.ui);
+            let refocused = focused && !app.focused;
+            app.focused = focused;
+            let typing = focused && app.kb.is_some();
+            // The pad is read straight from evdev, so it reports strokes meant for
+            // whichever app is in front: they type only into this app's keyboard
+            // while it is in front, and are thrown away otherwise rather than
+            // saved up for the next time the keyboard opens.
             #[cfg(feature = "device")]
-            if let (Some(pad), Some((_, field))) = (pad.as_mut(), app.kb.as_mut()) {
+            if let Some(pad) = pad.as_mut() {
                 while let Some(t) = pad.poll() {
+                    let Some((_, field)) = app.kb.as_mut().filter(|_| typing) else { continue };
                     if field.touch(t) {
                         if let Some(m) = app.motor.as_mut() {
                             m.play(3, 8);
@@ -88,28 +123,35 @@ fn main() -> Result<(), slint::PlatformError> {
                     }
                 }
             }
-            if app.frame % 5 == 0 {
+            // The rest, about once a second.
+            let second = !typing || app.frame % 10 == 0;
+            if second {
+                app.check_contacts();
+            }
+            if focused && (second || refocused) {
                 app.check_handoff();
                 if let Some(now) = status.poll() {
                     flipctl_app::apply_status!(&app.ui, PanelStatus, now);
                 }
-                if app.contacts_loaded.elapsed() > Duration::from_secs(20) {
-                    app.model.book =
-                        phone_core::contacts::Book::load(&phone_core::store::contacts_dir(), &app.model.region);
-                    app.contacts_loaded = Instant::now();
-                }
             }
-            // The caret blinks and the keyboard animates; nothing else moves on its own.
-            if app.kb.as_mut().is_some_and(|(_, f)| f.animating())
-                || app.kb.is_some() && app.frame % 5 == 0
-                || app.frame % 50 == 0
-            {
+            // Keys and phoned's events draw as they come. The tick draws only the
+            // keyboard, whose caret blinks and whose keys animate, and the dates
+            // once a minute, and only while it is in front.
+            let keyboard = typing && (app.kb.as_mut().is_some_and(|(_, f)| f.animating()) || app.frame % 5 == 0);
+            if refocused || keyboard || focused && phone_core::now() / 60 != app.drawn_minute {
                 app.draw();
+            }
+            let want = if typing { KEYBOARD_TICK } else { IDLE_TICK };
+            if let Some(t) = timer.upgrade().filter(|t| t.interval() != want) {
+                t.set_interval(want);
             }
         });
     });
 
+    // A key can open the keyboard, which wants the quick tick straight away.
+    let pace = std::rc::Rc::downgrade(&tick);
     ui.on_keyed(move |text, down| {
+        let mut typing = false;
         with_app(|app| {
             let key = Key::from_slint(text.as_str());
             if let Some(k) = key {
@@ -119,17 +161,43 @@ fn main() -> Result<(), slint::PlatformError> {
                 });
             }
             app.key(key, text.as_str(), down);
+            typing = app.kb.is_some();
         });
+        if let Some(t) = pace.upgrade().filter(|t| typing && t.interval() != KEYBOARD_TICK) {
+            t.set_interval(KEYBOARD_TICK);
+        }
     });
 
     ui.run()
 }
 
 impl App {
+    fn new(ui: AppWindow, model: Model, bus: Bus) -> Self {
+        Self {
+            ui,
+            model,
+            bus,
+            kb: None,
+            frame: 0,
+            #[cfg(feature = "device")]
+            motor: flipctl_app::Haptic::open().ok(),
+            ringer: "ring".into(),
+            player: Default::default(),
+            haptics: slint::Timer::default(),
+            contacts_checked: Instant::now(),
+            contacts_stamp: phone_bus::files::stamp(&phone_core::store::contacts_dir()),
+            handoff: handoff(),
+            handoff_seen: None,
+            focused: true,
+            drawn_minute: 0,
+        }
+    }
+
     fn reload(&mut self) {
         self.bus.refresh_threads();
         self.bus.run(|c| async move {
             Ok(vec![
+                Event::Ringer(c.audio.ringer().await?),
                 Event::Blocked(c.settings.blocked().await?),
                 Event::Setting("region".into(), c.settings.get("region").await?),
                 Event::Missed(c.calls.missed().await?),
@@ -140,8 +208,31 @@ impl App {
         }
     }
 
+    /// The book is files anyone may drop in; phoned says when it changes them, and
+    /// for the rest a look at the directory (a stat, not a parse) every 20 s says
+    /// whether there is anything to read again.
+    fn check_contacts(&mut self) {
+        if self.contacts_checked.elapsed() < Duration::from_secs(20) {
+            return;
+        }
+        self.contacts_checked = Instant::now();
+        let dir = phone_core::store::contacts_dir();
+        let stamp = phone_bus::files::stamp(&dir);
+        if stamp != self.contacts_stamp {
+            self.contacts_stamp = stamp;
+            self.model.book = phone_core::contacts::Book::load(&dir, &self.model.region);
+        }
+    }
+
+    /// A number the Dialer left to text. Looked for with a stat; read only when
+    /// there is a file, and one not already read.
     fn check_handoff(&mut self) {
-        let path = handoff();
+        let Some(changed) = std::fs::metadata(&self.handoff).ok().and_then(|m| m.modified().ok()) else { return };
+        if self.handoff_seen == Some(changed) {
+            return;
+        }
+        self.handoff_seen = Some(changed);
+        let path = self.handoff.clone();
         if let Ok(peer) = std::fs::read_to_string(&path) {
             let _ = std::fs::remove_file(&path);
             let peer = peer.trim().to_string();
@@ -221,19 +312,23 @@ impl App {
             Event::Threads(t) => self.model.set_threads(t),
             Event::Conversation(peer, m) => self.model.set_conversation(&peer, m),
             Event::MessageAdded(m) => {
-                if m.direction == 0 {
-                    self.buzz(120);
+                // Two short, as the Dialer buzzes for a text, and not on Silent.
+                if m.direction == 0 && self.ringer != "silent" {
+                    self.player.start(phone_bus::haptics::TEXT);
+                    self.haptics.stop();
+                    self.step_buzz();
                 }
                 actions = self.model.message_added(m);
             }
+            Event::Ringer(r) => self.ringer = r,
             Event::MessageChanged(id, state) => self.model.message_changed(id, state),
             Event::Blocked(b) => self.model.blocked = b,
             Event::Missed(n) => self.model.missed = n,
             Event::Found(q, found) if q == self.model.query => self.model.found = found,
             Event::ContactsChanged | Event::ContactsImported { .. } => {
-                self.model.book =
-                    phone_core::contacts::Book::load(&phone_core::store::contacts_dir(), &self.model.region);
-                self.contacts_loaded = Instant::now();
+                let dir = phone_core::store::contacts_dir();
+                self.contacts_stamp = phone_bus::files::stamp(&dir);
+                self.model.book = phone_core::contacts::Book::load(&dir, &self.model.region);
             }
             Event::Setting(k, v) if k == "region" => self.model.region = v,
             Event::Placed { kind: "sms", placed } if placed.pending != 0 => {
@@ -287,15 +382,23 @@ impl App {
         }
     }
 
-    fn buzz(&mut self, ms: u16) {
+    /// Play the pattern's next pulse, and set the timer for the one after, if
+    /// there is one.
+    fn step_buzz(&mut self) {
+        let Some((on, wait)) = self.player.pulse() else { return };
         #[cfg(feature = "device")]
         if let Some(m) = self.motor.as_mut() {
-            m.play(3, ms);
+            // Effect 3 is the driver's plain buzz; the length is ours.
+            m.play(3, on);
         }
-        let _ = ms;
+        let _ = on;
+        if let Some(wait) = wait {
+            self.haptics.start(slint::TimerMode::SingleShot, wait, || with_app(App::step_buzz));
+        }
     }
 
     fn draw(&mut self) {
+        self.drawn_minute = phone_core::now() / 60;
         let cursor = self.kb.as_ref().map(|(_, f)| f.cursor_visible()).unwrap_or(false);
         apply(
             &self.ui,
@@ -571,16 +674,11 @@ mod tests {
             let bus = Bus::start(move |e| {
                 let _ = tx.send(e);
             });
-            let app = App {
-                ui: AppWindow::new().expect("window"),
-                model: Model::new("AU", phone_core::contacts::Book::load(&phone_core::store::contacts_dir(), "AU")),
-                bus,
-                kb: None,
-                frame: 0,
-                #[cfg(feature = "device")]
-                motor: None,
-                contacts_loaded: Instant::now(),
-            };
+            let model = Model::new("AU", phone_core::contacts::Book::load(&phone_core::store::contacts_dir(), "AU"));
+            let app = App::new(AppWindow::new().expect("window"), model, bus);
+            // The live test leaves the motor alone.
+            #[cfg(feature = "device")]
+            let app = App { motor: None, ..app };
             let mut l = Self { app, rx };
             l.until("phoned connects", |a| a.model.connected);
             Some(l)

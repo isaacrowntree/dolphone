@@ -2,12 +2,17 @@
 
 Dolphone keeps FlipCTL's roles for the five soft keys everywhere: **Escape** backs out
 or cancels, **View** switches view or shows information, **Edit** edits, **Run** does
-the main thing. **Power** is never ours: it is the MCU's, and opens the power menu.
-**Back** and the **app switcher** never reach an app either: Back leaves the app (on a
-call, the call carries on; come back to it with the switcher), and the switcher lists
-running apps, a live call among them.
+the main thing. The middle soft key, silkscreened **power**, does reach the app in
+front (flipctl forwards it like the other four), but Dolphone leaves its slot empty
+on purpose: a press meant for the phone's power is never taken as Answer, End or
+Allow. **Back** and the **app switcher** never reach an app: flipctl keeps them. Back
+leaves the app (on a call, the call carries on; come back to it with the switcher),
+and the switcher lists running apps, a live call among them.
 
-A **hold** is 0.6 s or more by default (the `long_press_ms` setting, 300–1500 ms).
+A **hold** is 0.6 s or more by default (the `long_press_ms` setting, 300–3000 ms).
+
+The touchpad is read by the app that has the keyboard, the one in front; an app in
+the background ignores it.
 
 ## Dialer
 
@@ -28,13 +33,18 @@ A **hold** is 0.6 s or more by default (the `long_press_ms` setting, 300–1500 
 
 Keys are ignored for 400 ms after a call, an alert or a confirmation appears unasked,
 so a press meant for whatever was on screen cannot answer a call or allow a request.
+A press ignored like this, End in the 1.5 s after answering, and a short press of
+Decline when it needs a hold each give the "refused" stutter, so a press that did
+nothing does not feel like one that did.
 
 The touchpad works as a keypad once it has learnt its own size from a few strokes;
 until then it moves the selection like the D-pad.
 
 ### Vibrations
 
-Each kind of news has its own feel, so it can be told in a pocket:
+Each kind of news has its own feel, so it can be told in a pocket. Messages uses
+the same feel for a text. Everything but a key, a thump, a refused press and an
+emergency alert stays still when the ringer is on Silent.
 
 | | |
 |---|---|
@@ -46,6 +56,7 @@ Each kind of news has its own feel, so it can be told in a pocket:
 | a call dropped (not ended here) | one long |
 | a text not sent | short, short, long |
 | an emergency alert | three long, even on silent |
+| a press ignored on purpose | a quick stutter (three very short) |
 
 ## Messages
 
@@ -84,3 +95,10 @@ conversation is one thread, named after everyone on it; a reply goes to all of t
 | Ctrl+Enter | answer the ringing call |
 | Ctrl+Backspace | decline the ringing call, or end the live one |
 | Ctrl+M | mute or unmute |
+| Tab, Shift+Tab | the next or last control; over a call, a confirmation or an alert, round that card's own buttons only |
+| Up, Down | along a list (calls, conversations, contacts, the lists in Settings) |
+| Enter | a list row's main thing (call, open, unblock...), or press the control with the focus |
+| Space | choose a list row, or press the control with the focus |
+
+The call card opens with the focus on **Answer** (on **Keypad** once the call is
+live, away from End); a confirmation on **Deny**; an alert on **Dismiss**.

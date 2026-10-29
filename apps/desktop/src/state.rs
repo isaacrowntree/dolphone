@@ -1,6 +1,6 @@
 //! The desktop app's state, and how it is drawn and changed.
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use phone_api::{
     keys, AlertInfo, AuditEntry, BtDevice, CallInfo, CallRecordInfo, Grant, MessageInfo, ModemStatus, Request,
@@ -39,8 +39,9 @@ const ALERT_FLAGS: [Flag; 4] = [
     (keys::ALERTS_TEST, "Test alerts"),
 ];
 
-/// The panel's hold times, in milliseconds, as the desktop's menu lists them.
-const HOLDS: [&str; 5] = ["400", "600", "800", "1000", "1500"];
+/// The panel's hold times, in milliseconds, as the desktop's menu lists them (the
+/// labels are in app.slint): up to three seconds, for hands that press slowly.
+const HOLDS: [&str; 7] = ["400", "600", "800", "1000", "1500", "2000", "3000"];
 
 fn all_flags() -> impl Iterator<Item = &'static Flag> {
     CALL_FLAGS.iter().chain(TEXT_FLAGS.iter()).chain(ALERT_FLAGS.iter())
@@ -86,7 +87,12 @@ pub struct App {
     pub missed: u32,
     toast: Option<(String, Instant)>,
     contacts_view: Vec<usize>,
-    contacts_loaded: Instant,
+    /// When the contacts directory was last looked at, and how it looked.
+    contacts_checked: Instant,
+    contacts_stamp: Option<(SystemTime, usize)>,
+    /// The clock minute of the last draw, so the tick redraws for the dates in
+    /// the lists only when they could have changed.
+    drawn_minute: i64,
 }
 
 impl App {
@@ -135,7 +141,9 @@ impl App {
             missed: 0,
             toast: None,
             contacts_view: Vec::new(),
-            contacts_loaded: Instant::now(),
+            contacts_checked: Instant::now(),
+            contacts_stamp: phone_bus::files::stamp(&phone_core::store::contacts_dir()),
+            drawn_minute: 0,
         }
     }
 
@@ -228,15 +236,42 @@ impl App {
         self.render();
     }
 
+    /// Once a second. phoned's events and the window's own callbacks draw as they
+    /// come, so this draws only what time changes: a toast running out, a live
+    /// call's timer, and the dates in the lists (looked at once a minute). Hidden
+    /// in the tray, it draws nothing; showing the window draws it fresh.
     pub fn tick(&mut self) {
+        let mut changed = false;
         if self.toast.as_ref().is_some_and(|(_, t)| t.elapsed() > Duration::from_secs(4)) {
             self.toast = None;
+            changed = true;
         }
-        if self.contacts_loaded.elapsed() > Duration::from_secs(20) {
-            self.book = Book::load(&phone_core::store::contacts_dir(), &self.region);
-            self.contacts_loaded = Instant::now();
+        // The book is files anyone may drop in; phoned says when it changes them,
+        // and for the rest a look at the directory (a stat, not a parse) every
+        // 20 s says whether there is anything to read again.
+        if self.contacts_checked.elapsed() > Duration::from_secs(20) {
+            self.contacts_checked = Instant::now();
+            let dir = phone_core::store::contacts_dir();
+            let stamp = phone_bus::files::stamp(&dir);
+            if stamp != self.contacts_stamp {
+                self.contacts_stamp = stamp;
+                self.book = Book::load(&dir, &self.region);
+                changed = true;
+            }
         }
-        self.render();
+        if !self.ui.window().is_visible() {
+            return;
+        }
+        let timing = self.calls.iter().any(|c| CallState::from_u8(c.state) == CallState::Active && c.connected_at > 0);
+        if changed || timing || phone_core::now() / 60 != self.drawn_minute {
+            self.render();
+        }
+    }
+
+    fn reload_contacts(&mut self) {
+        let dir = phone_core::store::contacts_dir();
+        self.contacts_stamp = phone_bus::files::stamp(&dir);
+        self.book = Book::load(&dir, &self.region);
     }
 
     pub fn name_for(&self, n: &str) -> String {
@@ -416,11 +451,9 @@ impl App {
             Event::Alerts(a) => self.alerts = a,
             Event::Laptops(l) => self.laptops = l,
             Event::Found(q, found) if q == self.ui.get_search_text().trim() => self.found = found,
-            Event::ContactsChanged => {
-                self.book = Book::load(&phone_core::store::contacts_dir(), &self.region);
-            }
+            Event::ContactsChanged => self.reload_contacts(),
             Event::ContactsImported { added, merged, unchanged, error } => {
-                self.book = Book::load(&phone_core::store::contacts_dir(), &self.region);
+                self.reload_contacts();
                 if error.is_empty() {
                     self.say(format!("Contacts copied: {added} new, {merged} updated, {unchanged} already here"));
                 } else {
@@ -456,25 +489,25 @@ impl App {
     pub fn render(&mut self) {
         let ui = &self.ui;
         let now = phone_core::now();
+        self.drawn_minute = now / 60;
         ui.set_connected(self.connected);
         match &self.status {
             Some(s) if s.present => {
                 ui.set_operator(if s.operator.is_empty() { "Searching...".into() } else { s.operator.as_str().into() });
                 let bars = (s.quality as usize).div_ceil(25).min(4);
+                let roaming = if s.roaming { "  roaming" } else { "" };
                 ui.set_signal(
-                    format!(
-                        "{} {}{}{}",
-                        s.tech,
-                        "\u{25AE}".repeat(bars),
-                        "\u{25AF}".repeat(4 - bars),
-                        if s.roaming { "  roaming" } else { "" }
-                    )
-                    .into(),
+                    format!("{} {}{}{roaming}", s.tech, "\u{25AE}".repeat(bars), "\u{25AF}".repeat(4 - bars)).into(),
+                );
+                // The bars are drawn; a screen reader says them.
+                ui.set_signal_label(
+                    format!("{}, signal {bars} of 4{}", s.tech, if s.roaming { ", roaming" } else { "" }).into(),
                 );
             }
             Some(_) => {
                 ui.set_operator("No modem".into());
                 ui.set_signal("".into());
+                ui.set_signal_label("".into());
             }
             None => {}
         }
@@ -507,11 +540,14 @@ impl App {
                         Outcome::Blocked => 2,
                         _ => 0,
                     },
+                    // The dot's meaning, for a screen reader (the subtitle already
+                    // says missed or blocked; the dot says it has not been seen).
+                    note: if o == Outcome::Missed && !r.seen { "not seen yet".into() } else { SharedString::new() },
                     key: r.peer.as_str().into(),
                 }
             })
             .collect();
-        ui.set_recents(ModelRc::new(VecModel::from(recents)));
+        sync(ui.get_recents(), recents, |m| ui.set_recents(m));
 
         let threads: Vec<Row> = self
             .threads
@@ -526,10 +562,15 @@ impl App {
                 .into(),
                 aside: when::short(t.last_at, now).into(),
                 mark: if t.unread > 0 { 1 } else { 0 },
+                note: match t.unread {
+                    0 => SharedString::new(),
+                    1 => "1 unread".into(),
+                    n => format!("{n} unread").into(),
+                },
                 key: t.peer.as_str().into(),
             })
             .collect();
-        ui.set_threads(ModelRc::new(VecModel::from(threads)));
+        sync(ui.get_threads(), threads, |m| ui.set_threads(m));
         let found: Vec<Row> = self
             .found
             .iter()
@@ -543,10 +584,11 @@ impl App {
                 .into(),
                 aside: when::short(m.at, now).into(),
                 mark: 0,
+                note: SharedString::new(),
                 key: m.peer.as_str().into(),
             })
             .collect();
-        ui.set_found(ModelRc::new(VecModel::from(found)));
+        sync(ui.get_found(), found, |m| ui.set_found(m));
 
         if self.peer.is_empty() {
             ui.set_thread_title("".into());
@@ -554,45 +596,67 @@ impl App {
             ui.set_thread_title(self.name_for(&self.peer).into());
             ui.set_thread_number(number::display_peer(&self.peer, &self.region).into());
         }
+        let peer_name = self.name_for(&self.peer);
         let bubbles: Vec<Bubble> = self
             .messages
             .iter()
-            .map(|m| Bubble {
-                text: m.body.as_str().into(),
-                time: when::short(m.at, now).into(),
-                mine: m.direction == 1,
-                state: match MessageState::from_u8(m.state) {
-                    MessageState::Sending => "Sending".into(),
-                    MessageState::Failed => "Not sent".into(),
-                    MessageState::Delivered => "Delivered".into(),
-                    _ => SharedString::new(),
-                },
-                code: if m.direction == 0 {
-                    text::one_time_code(&m.body).unwrap_or_default().into()
-                } else {
-                    "".into()
-                },
-                // The first picture is shown; anything else is named.
-                picture: m
+            .map(|m| {
+                let state = match MessageState::from_u8(m.state) {
+                    MessageState::Sending => "Sending",
+                    MessageState::Failed => "Not sent",
+                    MessageState::Delivered => "Delivered",
+                    _ => "",
+                };
+                // The first picture is shown; anything else is named, and so is a
+                // picture that will not load, rather than leaving a bubble with
+                // nothing in it.
+                let first_pic = m.parts.iter().position(|(mime, _)| mime.starts_with("image/"));
+                let picture = first_pic
+                    .and_then(|i| slint::Image::load_from_path(std::path::Path::new(&m.parts[i].1)).ok())
+                    .filter(|p| p.size().width > 0);
+                let parts = m
                     .parts
                     .iter()
-                    .find(|(mime, _)| mime.starts_with("image/"))
-                    .and_then(|(_, path)| slint::Image::load_from_path(std::path::Path::new(path)).ok())
-                    .unwrap_or_default(),
-                parts: {
-                    let first_pic = m.parts.iter().position(|(mime, _)| mime.starts_with("image/"));
-                    m.parts
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| Some(*i) != first_pic)
-                        .map(|(_, (mime, _))| format!("[{}]", phone_core::model::kind_of(mime)))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                        .into()
-                },
+                    .enumerate()
+                    .filter(|(i, _)| Some(*i) != first_pic || picture.is_none())
+                    .map(|(_, (mime, _))| format!("[{}]", phone_core::model::kind_of(mime)))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let time = when::short(m.at, now);
+                // What a screen reader says for the bubble: who, when, how it went,
+                // then the text, since its colour and side are all that say whose
+                // it is.
+                let mut label = if m.direction == 1 {
+                    format!("You, {time}{}", if state.is_empty() { String::new() } else { format!(", {state}") })
+                } else {
+                    format!("{peer_name}, {time}")
+                };
+                label.push_str(": ");
+                label.push_str(&m.body);
+                if picture.is_some() {
+                    label.push_str(" [Picture]");
+                }
+                if !parts.is_empty() {
+                    label.push(' ');
+                    label.push_str(&parts);
+                }
+                Bubble {
+                    text: m.body.as_str().into(),
+                    time: time.into(),
+                    mine: m.direction == 1,
+                    state: state.into(),
+                    code: if m.direction == 0 {
+                        text::one_time_code(&m.body).unwrap_or_default().into()
+                    } else {
+                        "".into()
+                    },
+                    picture: picture.unwrap_or_default(),
+                    parts: parts.into(),
+                    label: label.into(),
+                }
             })
             .collect();
-        ui.set_bubbles(ModelRc::new(VecModel::from(bubbles)));
+        sync(ui.get_bubbles(), bubbles, |m| ui.set_bubbles(m));
         let draft = ui.get_draft().to_string();
         ui.set_draft_cost(if draft.is_empty() {
             "".into()
@@ -626,11 +690,12 @@ impl App {
                         .into(),
                     aside: SharedString::new(),
                     mark: 0,
+                    note: SharedString::new(),
                     key: c.numbers.first().map(|p| p.number.as_str()).unwrap_or("").into(),
                 }
             })
             .collect();
-        ui.set_contacts(ModelRc::new(VecModel::from(contacts)));
+        sync(ui.get_contacts(), contacts, |m| ui.set_contacts(m));
         let phones: Vec<Row> = self
             .devices
             .iter()
@@ -640,10 +705,11 @@ impl App {
                 subtitle: SharedString::new(),
                 aside: SharedString::new(),
                 mark: 0,
+                note: SharedString::new(),
                 key: d.address.as_str().into(),
             })
             .collect();
-        ui.set_phones(ModelRc::new(VecModel::from(phones)));
+        sync(ui.get_phones(), phones, |m| ui.set_phones(m));
 
         // Settings.
         // The routes phoned offers, in its order (an earpiece only on phones).
@@ -665,28 +731,27 @@ impl App {
             })
             .collect();
         let names: Vec<SharedString> = choices.iter().map(|c| c.label.clone()).collect();
-        ui.set_route_names(ModelRc::new(VecModel::from(names)));
+        sync(ui.get_route_names(), names, |m| ui.set_route_names(m));
         ui.set_route_index(offered.iter().position(|r| *r as u8 == self.route).unwrap_or(0) as i32);
-        ui.set_routes(ModelRc::new(VecModel::from(choices)));
+        sync(ui.get_routes(), choices, |m| ui.set_routes(m));
         ui.set_ringer_index(match self.ringer.as_str() {
             "vibrate" => 1,
             "silent" => 2,
             _ => 0,
         });
-        let toggles = |group: &[Flag]| {
-            let t: Vec<Toggle> = group
+        let toggles = |group: &[Flag]| -> Vec<Toggle> {
+            group
                 .iter()
                 .map(|((k, d), label)| Toggle {
                     key: (*k).into(),
                     label: (*label).into(),
                     on: self.flags.iter().find(|(n, _)| n == k).map(|f| f.1).unwrap_or(*d == "true"),
                 })
-                .collect();
-            ModelRc::new(VecModel::from(t))
+                .collect()
         };
-        ui.set_call_toggles(toggles(&CALL_FLAGS));
-        ui.set_text_toggles(toggles(&TEXT_FLAGS));
-        ui.set_alert_toggles(toggles(&ALERT_FLAGS));
+        sync(ui.get_call_toggles(), toggles(&CALL_FLAGS), |m| ui.set_call_toggles(m));
+        sync(ui.get_text_toggles(), toggles(&TEXT_FLAGS), |m| ui.set_text_toggles(m));
+        sync(ui.get_alert_toggles(), toggles(&ALERT_FLAGS), |m| ui.set_alert_toggles(m));
         let grants: Vec<Row> = self
             .grants
             .iter()
@@ -701,10 +766,11 @@ impl App {
                 .into(),
                 aside: SharedString::new(),
                 mark: 0,
+                note: SharedString::new(),
                 key: g.id.to_string().into(),
             })
             .collect();
-        ui.set_grants(ModelRc::new(VecModel::from(grants)));
+        sync(ui.get_grants(), grants, |m| ui.set_grants(m));
         let laptops: Vec<Row> = self
             .laptops
             .iter()
@@ -717,10 +783,11 @@ impl App {
                 },
                 aside: if *paired { "Unpair".into() } else { SharedString::new() },
                 mark: 0,
+                note: SharedString::new(),
                 key: id.as_str().into(),
             })
             .collect();
-        ui.set_laptops(ModelRc::new(VecModel::from(laptops)));
+        sync(ui.get_laptops(), laptops, |m| ui.set_laptops(m));
         let audit: Vec<Row> = self
             .audit
             .iter()
@@ -729,10 +796,11 @@ impl App {
                 subtitle: e.result.as_str().into(),
                 aside: when::short(e.at, now).into(),
                 mark: if matches!(e.result.as_str(), "denied" | "refused" | "over its grant's limit") { 2 } else { 0 },
+                note: SharedString::new(),
                 key: SharedString::new(),
             })
             .collect();
-        ui.set_audit(ModelRc::new(VecModel::from(audit)));
+        sync(ui.get_audit(), audit, |m| ui.set_audit(m));
         let alerts: Vec<Row> = self
             .alerts
             .iter()
@@ -741,10 +809,11 @@ impl App {
                 subtitle: a.text.as_str().into(),
                 aside: when::short(a.at, now).into(),
                 mark: 2,
+                note: "emergency alert".into(),
                 key: a.id.to_string().into(),
             })
             .collect();
-        ui.set_alerts(ModelRc::new(VecModel::from(alerts)));
+        sync(ui.get_alerts(), alerts, |m| ui.set_alerts(m));
         ui.set_sip_password_set(self.sip_password_set);
         ui.set_hold_index(HOLDS.iter().position(|h| *h == self.hold_ms).unwrap_or(1) as i32);
         ui.set_sip_always(self.sip_always);
@@ -792,10 +861,11 @@ impl App {
                 }
                 .into(),
                 mark: 0,
+                note: SharedString::new(),
                 key: d.address.as_str().into(),
             })
             .collect();
-        ui.set_bt_devices(ModelRc::new(VecModel::from(devices)));
+        sync(ui.get_bt_devices(), devices, |m| ui.set_bt_devices(m));
         let blocked: Vec<Row> = self
             .blocked
             .iter()
@@ -807,11 +877,12 @@ impl App {
                     title: shown.into(),
                     aside: SharedString::new(),
                     mark: 2,
+                    note: "blocked".into(),
                     key: n.as_str().into(),
                 }
             })
             .collect();
-        ui.set_blocked(ModelRc::new(VecModel::from(blocked)));
+        sync(ui.get_blocked(), blocked, |m| ui.set_blocked(m));
         ui.set_modem_text(
             match &self.status {
                 Some(s) if s.present => format!(
@@ -901,6 +972,28 @@ impl App {
     }
 }
 
+/// Bring a list the window shows up to date row by row. A new model every draw
+/// would have Slint rebuild every row of it, and with them whichever row or
+/// checkbox had the keyboard focus, which would then be lost each second a call
+/// runs and each time phoned says anything.
+fn sync<T: Clone + PartialEq + 'static>(current: ModelRc<T>, rows: Vec<T>, set: impl FnOnce(ModelRc<T>)) {
+    use slint::Model;
+    let Some(m) = current.as_any().downcast_ref::<VecModel<T>>() else {
+        set(ModelRc::new(VecModel::from(rows)));
+        return;
+    };
+    for (i, r) in rows.iter().enumerate() {
+        if i >= m.row_count() {
+            m.push(r.clone());
+        } else if m.row_data(i).as_ref() != Some(r) {
+            m.set_row_data(i, r.clone());
+        }
+    }
+    while m.row_count() > rows.len() {
+        m.remove(m.row_count() - 1);
+    }
+}
+
 fn clipboard_tool() -> (&'static str, &'static [&'static str], &'static [&'static str]) {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         ("wl-copy", &[], &["--clear"])
@@ -955,6 +1048,18 @@ fn export_path() -> std::path::PathBuf {
     let _ = std::fs::create_dir_all(&docs);
     let t = when::local(phone_core::now());
     docs.join(format!("dolphone-texts-{}-{:02}-{:02}.xml", t.year, t.month + 1, t.day))
+}
+
+/// Write a file only its owner can read (0600): an export is every text in the
+/// clear, in a folder that is often synced or shared. A file left from an earlier
+/// export the same day is tightened before it is overwritten.
+fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+    f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    f.write_all(data)?;
+    f.sync_all()
 }
 
 /// Percent-decoding for tel: and sms: links. `+` is a space only in a query value;
@@ -1061,8 +1166,11 @@ pub fn wire(ui: &AppWindow) {
                 b.run(|c| async move {
                     let xml = c.messages.export().await?;
                     let path = export_path();
-                    let msg = match std::fs::write(&path, xml) {
-                        Ok(()) => format!("Texts saved to {}", path.display()),
+                    let msg = match write_private(&path, xml.as_bytes()) {
+                        Ok(()) => format!(
+                            "Texts saved to {}. It is not encrypted: delete it once it is copied over",
+                            path.display()
+                        ),
                         Err(e) => format!("Could not save the texts: {e}"),
                     };
                     Ok(vec![Event::Notice(msg)])
@@ -1336,7 +1444,7 @@ pub fn wire(ui: &AppWindow) {
     });
     ui.on_set_hold(|i| {
         with_app(|a| {
-            let ms = HOLDS[i.clamp(0, 4) as usize].to_string();
+            let ms = HOLDS[(i.max(0) as usize).min(HOLDS.len() - 1)].to_string();
             a.hold_ms = ms.clone();
             if let Some(b) = a.bus() {
                 b.run(move |c| async move { c.settings.set("long_press_ms", &ms).await.map(|_| vec![]) });

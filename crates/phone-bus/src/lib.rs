@@ -10,6 +10,9 @@
 //! [`Event::Connected`] each time it comes and goes, which is a front end's cue to
 //! reload what it shows.
 
+pub mod files;
+pub mod haptics;
+
 use std::future::Future;
 use std::pin::Pin;
 
@@ -290,6 +293,9 @@ async fn listen(conn: zbus::Connection, c: Clients, deliver: std::sync::Arc<dyn 
     let mut missed = c.calls.receive_missed_changed().await;
     let mut unread = c.messages.receive_unread_changed().await;
     let mut route = c.audio.receive_route_changed().await;
+    // The ringer is changed from more than one place (the Dialer's PTT hold, either
+    // settings app), and every app that buzzes has to know when it went silent.
+    let mut ringer = c.audio.receive_ringer_changed().await;
     let (Ok(mut alerts), Ok(mut book), Ok(mut imported)) = (
         c.messages.receive_alert_received().await,
         c.contacts.receive_changed().await,
@@ -321,6 +327,7 @@ async fn listen(conn: zbus::Connection, c: Clients, deliver: std::sync::Arc<dyn 
             Some(p) = missed.next() => match p.get().await { Ok(n) => Event::Missed(n), Err(_) => continue },
             Some(p) = unread.next() => match p.get().await { Ok(n) => Event::Unread(n), Err(_) => continue },
             Some(p) = route.next() => match p.get().await { Ok(n) => Event::Route(n), Err(_) => continue },
+            Some(p) = ringer.next() => match p.get().await { Ok(r) => Event::Ringer(r), Err(_) => continue },
             Some(s) = alerts.next() => match s.args() { Ok(a) => Event::Alert(a.alert), Err(_) => continue },
             Some(_) = book.next() => Event::ContactsChanged,
             Some(s) = imported.next() => match s.args() {
