@@ -22,8 +22,8 @@ The package brings:
 | `dolphone-install-apps` | copies the panel apps (Phone, Messages, Phone Settings) into `~/Apps/Phone` |
 | device profiles | `/usr/share/dolphone/devices/`: how each machine's audio is wired ([Devices](DEVICES.md)) |
 | PipeWire and WirePlumber config | an echo canceller for speakerphone; Bluetooth hands-free |
-| udev rules | let the modem wake the board for a call or a text, and the `dolphone` group flash the Flipper One's LEDs |
-| `dolphone-modem-access` | turns ModemManager's debug mode on or off (see below) |
+| udev rules | let the modem wake the board for a call or a text, the `dolphone` group flash the Flipper One's LEDs, and (when chosen) give that group a spare AT port of the modem's |
+| `dolphone-modem-access` | turns ModemManager's debug mode on or off, or gives Dolphone a spare AT port instead (see below) |
 | a polkit rule | lets your active local session use the modem's calls, texts, USSD and device control (which, in debug mode, includes AT commands) |
 
 It needs ModemManager, PipeWire and WirePlumber (pulled in by apt), and conflicts
@@ -55,6 +55,19 @@ default there; elsewhere it is no. Change it any time:
 sudo dolphone-modem-access on        # or off, or status
 sudo dpkg-reconfigure dolphone       # ask again
 ```
+
+On a Quectel RM520N-GL there is another way, not yet tried on a real modem: a spare
+AT port that ModemManager is told to leave alone, which phoned uses itself, so debug
+mode can stay off. It is not part of the question, since it depends on the modem:
+
+```sh
+sudo dolphone-modem-access port on   # or port off
+sudo dolphone-modem-access off       # debug mode, if it was on
+sudo adduser $USER dolphone          # the port's group; then log in again
+phonectl modem setup                 # says which way the commands go
+```
+
+[Devices](DEVICES.md) has the details, and how to do it for another modem.
 
 Phone Settings > Modem shows **Turn on** when it is off, with a password prompt.
 

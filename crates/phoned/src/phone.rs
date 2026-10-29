@@ -157,6 +157,8 @@ impl Phone {
         let chosen = store.setting(phone_api::keys::DEVICE_PROFILE.0).ok().flatten().unwrap_or_default();
         let (profile, why) = crate::devices::choose(&crate::devices::all(), &crate::devices::Facts::read(), &chosen);
         tracing::info!(device = %profile.id, status = %profile.status, why = %why, "device profile");
+        let at_port = store.setting(phone_api::keys::AT_PORT.0).ok().flatten().unwrap_or_default();
+        crate::atport::configure(&at_port, &profile.at_port);
         let audio = Audio::new(crate::devices::audio_config(&profile));
         Arc::new(Self {
             notify: notify::Notifier::new(session.clone()),
@@ -2066,6 +2068,7 @@ impl Phone {
         let (profile, why) = crate::devices::choose(&crate::devices::all(), &crate::devices::Facts::read(), id);
         tracing::info!(device = %profile.id, why = %why, "device profile");
         self.audio.set_config(crate::devices::audio_config(&profile));
+        crate::atport::configure(&self.setting(phone_api::keys::AT_PORT), &profile.at_port);
         if let Ok(mut d) = self.device.lock() {
             *d = (profile, why);
         }
@@ -2304,6 +2307,9 @@ impl Phone {
         if key == keys::DEVICE_PROFILE.0 && value != "auto" && !crate::devices::all().iter().any(|p| p.id == value) {
             return Err(zbus::fdo::Error::InvalidArgs(format!("no device profile {value}; see phonectl device list")));
         }
+        if key == keys::AT_PORT.0 && !crate::atport::valid_setting(value) {
+            return Err(zbus::fdo::Error::InvalidArgs("auto, modemmanager, or a port such as /dev/ttyUSB3".into()));
+        }
         if key == keys::SIP_USE.0 && !matches!(value, "fallback" | "always") {
             return Err(zbus::fdo::Error::InvalidArgs("fallback or always".into()));
         }
@@ -2312,6 +2318,10 @@ impl Phone {
         self.kdeconnect.changed.notify_one();
         if key == keys::DEVICE_PROFILE.0 {
             self.choose_device(value);
+        }
+        if key == keys::AT_PORT.0 {
+            let profile = self.device.lock().map(|d| d.0.at_port.clone()).unwrap_or_default();
+            crate::atport::configure(value, &profile);
         }
         // The modem follows these at once; a new profile may have start-up commands.
         if key == keys::DISABLE_2G.0 || key == keys::DEVICE_PROFILE.0 {

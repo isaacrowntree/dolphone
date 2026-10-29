@@ -12,4 +12,7 @@ Description: Let Dolphone send setup commands to the modem?
  as you send the modem AT commands. On the Flipper One, call audio needs it.
  .
  You can change this later: sudo dolphone-modem-access on (or off), or
- sudo dpkg-reconfigure dolphone.
+ sudo dpkg-reconfigure dolphone. On a Quectel RM520N-GL there is another way,
+ not yet tried on a real modem: sudo dolphone-modem-access port on gives
+ Dolphone a spare AT port that ModemManager leaves alone, and debug mode can
+ stay off.

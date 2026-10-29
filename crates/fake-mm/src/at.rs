@@ -21,6 +21,10 @@ pub struct At {
     pub restarts: u32,
     /// AT+CPCMREG: a SIM7600's serial PCM, on or off.
     pub cpcmreg: u8,
+    /// The spare AT port's pty, once one is asked for (crate::atport).
+    pub port: Option<String>,
+    /// The last command that came on it.
+    pub port_last: String,
 }
 
 impl Default for At {
@@ -35,6 +39,8 @@ impl Default for At {
             clir: 0,
             restarts: 0,
             cpcmreg: 0,
+            port: None,
+            port_last: String::new(),
         }
     }
 }
@@ -149,7 +155,7 @@ impl At {
         let fwd: Vec<String> =
             self.ccfc.iter().map(|(r, (on, n))| format!("{r}:{}{n}", if *on { "" } else { "off:" })).collect();
         format!(
-            "at uac={} ims={} autosel={} qpcmv={} clir={} cpcmreg={} restarts={} forward=[{}]\n",
+            "at uac={} ims={} autosel={} qpcmv={} clir={} cpcmreg={} restarts={} forward=[{}] port_last={}\n",
             self.uac as u8,
             self.ims,
             self.autosel as u8,
@@ -157,7 +163,8 @@ impl At {
             self.clir,
             self.cpcmreg,
             self.restarts,
-            fwd.join(" ")
+            fwd.join(" "),
+            self.port_last
         )
     }
 }

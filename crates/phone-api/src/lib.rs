@@ -632,6 +632,10 @@ pub mod keys {
     pub const SIP_USE: (&str, &str) = ("sip_use", "fallback");
     /// The device profile by id, or "auto" to detect it (see Settings.Devices).
     pub const DEVICE_PROFILE: (&str, &str) = ("device_profile", "auto");
+    /// Where phoned's AT commands go: "auto" (the device profile's spare AT port
+    /// once ModemManager is told to ignore it, otherwise ModemManager's Command),
+    /// "modemmanager" (always ModemManager), or a port's path (`/dev/ttyUSB3`).
+    pub const AT_PORT: (&str, &str) = ("at_port", "auto");
     /// Speed dial: the number Hold-2 .. Hold-9 calls.
     pub const SPEED: [(&str, &str); 8] = [
         ("speed_2", ""),
@@ -681,6 +685,7 @@ pub mod keys {
         SIP_PASSWORD,
         SIP_USE,
         DEVICE_PROFILE,
+        AT_PORT,
         SPEED[0],
         SPEED[1],
         SPEED[2],

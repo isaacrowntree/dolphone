@@ -25,6 +25,14 @@ audio. What only a board can confirm:
   its RP2350 reports the headset jack.
 - **MMS on a carrier**: mmsd-tng fetches over mobile data with the carrier's MMSC
   and APN, which it mostly finds by itself; nothing here has met a real MMSC.
+- **AT commands without ModemManager's debug mode.** Built: a spare AT port that
+  ModemManager is told to ignore (`ID_MM_PORT_IGNORE`), which phoned talks to itself
+  (`sudo dolphone-modem-access port on`; the Flipper One profile names the
+  RM520N-GL's interface 3). Tested only against a pty. A board must confirm that
+  interface 3 is an AT port on the RM520N's firmware, that ModemManager still calls,
+  texts and sees `RING` without it (which port gets the modem's unsolicited
+  messages, `AT+QURCCFG="urcport"`, is not in any manual found), and the numbers
+  under other USB compositions.
 
 ## 1. Optional, later
 
@@ -33,11 +41,6 @@ audio. What only a board can confirm:
   Cyrillic (Dolphone draws with FlipCTL's fonts, and shows the number where a name
   cannot be drawn). FlipCTL has none of these today; Dolphone can add them as
   options of its own later, without waiting for FlipCTL.
-- **AT commands without ModemManager's debug mode.** ModemManager passes a client's
-  AT commands only with `--debug` (or when built with `at_command_via_dbus`), which
-  also raises its log level. Dolphone asks at install and makes it one command to
-  change, but a ModemManager API for the few commands it needs, or a spare AT port
-  it leaves alone, would be better. Both need upstream ModemManager or a real board.
 - No RCS: there is no route to it from Linux. Bridges to Matrix and others belong
   outside Dolphone, on its D-Bus API.
 

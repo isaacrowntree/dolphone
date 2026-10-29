@@ -21,8 +21,10 @@
 //!   note §3), so it is not a setup step: the profile's `modem_at` sends it each
 //!   time the modem appears.
 //!
-//! The commands go through ModemManager ([`mm::at`]), which passes them only in
-//! debug mode.
+//! The commands go on phoned's own AT port when the device profile names one and
+//! ModemManager has been told to leave it alone ([`crate::atport`]), and otherwise
+//! through ModemManager ([`mm::at`]), which passes them only in debug mode. The
+//! setup's second line says which.
 
 use zbus::Connection;
 
@@ -139,7 +141,10 @@ pub async fn setup(system: &Connection, apply: bool, usb_audio: bool) -> Vec<Ste
     }
     checks.push(("AT+QCFG=\"ims\"", ims_step));
     checks.push(("AT+QMBNCFG=\"AutoSel\"", autosel_step));
-    let mut out = vec![step("modem", "ok", format!("{manufacturer} {model}"))];
+    let mut out = vec![
+        step("modem", "ok", format!("{manufacturer} {model}")),
+        step("at commands", "ok", crate::atport::route().await.describe()),
+    ];
     let mut changed = false;
     for (query, judge) in checks {
         let answer = match mm::at(system, &path, query).await {

@@ -1,7 +1,9 @@
 #!/bin/sh
-# Turn ModemManager's debug mode on or off for Dolphone.
+# Turn ModemManager's debug mode on or off for Dolphone, or give phoned a spare AT
+# port of the modem's instead.
 #
 #     sudo dolphone-modem-access on | off | status
+#     sudo dolphone-modem-access port on | port off
 #
 # ModemManager passes AT commands from its clients (Modem.Command, mmcli
 # --command) only with --debug (handle_command in src/mm-iface-modem.c). Dolphone
@@ -14,9 +16,18 @@
 # (src/mm-context.c). ModemManager hides numbers and message text from its QMI and
 # MBIM log lines unless --log-personal-info is given (NEWS, 1.20), but not from AT
 # traffic, so with an AT modem the journal can hold them.
+#
+# The spare port (port on): /usr/lib/udev/rules.d/70-dolphone-at-port.rules tags
+# one AT port of a Quectel RM520N-GL or RM500Q with ID_MM_PORT_IGNORE, so
+# ModemManager leaves it alone, and gives it to the dolphone group, whose members'
+# phoned then sends its AT commands there (crates/phoned/src/atport.rs). The rule
+# does nothing until this creates its flag file. Debug mode can then be off. Not
+# yet tried on a real modem; other modems need the rule copied to
+# /etc/udev/rules.d and changed, and an [at_port] in the device profile.
 set -e
 DROPIN=/etc/systemd/system/ModemManager.service.d/dolphone-debug.conf
 SOURCE=/usr/share/dolphone/modemmanager/dolphone-debug.conf
+PORT_FLAG=/etc/dolphone/at-port
 
 restart() {
     systemctl daemon-reload
@@ -35,7 +46,46 @@ remember() {
         debconf-communicate dolphone >/dev/null 2>&1 || true
 }
 
+# udev applies the port rule again (with or without the flag), then ModemManager
+# probes the ports afresh.
+retag() {
+    if command -v udevadm >/dev/null; then
+        udevadm control --reload-rules >/dev/null 2>&1 || true
+        udevadm trigger --subsystem-match=tty --action=change >/dev/null 2>&1 || true
+        udevadm settle >/dev/null 2>&1 || true
+    fi
+    if systemctl -q is-active ModemManager; then
+        systemctl restart ModemManager
+    fi
+}
+
 case "${1:-status}" in
+port)
+    [ "$(id -u)" = 0 ] || { echo "run it with sudo" >&2; exit 1; }
+    case "${2:-}" in
+    on)
+        if [ ! -e "$PORT_FLAG" ]; then
+            mkdir -p "$(dirname "$PORT_FLAG")"
+            echo "# Read by 70-dolphone-at-port.rules: remove with dolphone-modem-access port off." >"$PORT_FLAG"
+            retag
+        fi
+        echo "port on: ModemManager leaves the modem's spare AT port to Dolphone (members of the dolphone group)"
+        [ -e "$DROPIN" ] && echo "debug mode is still on; sudo dolphone-modem-access off, unless something else needs it"
+        ;;
+    off)
+        if [ -e "$PORT_FLAG" ]; then
+            rm -f "$PORT_FLAG"
+            rmdir --ignore-fail-on-non-empty "$(dirname "$PORT_FLAG")" 2>/dev/null || true
+            retag
+        fi
+        echo "port off: ModemManager has every port of the modem again"
+        ;;
+    *)
+        echo "usage: dolphone-modem-access port on | port off" >&2
+        exit 2
+        ;;
+    esac
+    ;;
 on)
     [ "$(id -u)" = 0 ] || { echo "run it with sudo" >&2; exit 1; }
     # Already on: leave ModemManager (and any call) alone, as an upgrade should.
@@ -57,10 +107,12 @@ off)
     echo "off: ModemManager runs as before; the modem setup and service codes will not work"
     ;;
 status)
+    # The first line as before: debug mode.
     if [ -e "$DROPIN" ]; then echo on; else echo off; fi
+    if [ -e "$PORT_FLAG" ]; then echo "port on"; else echo "port off"; fi
     ;;
 *)
-    echo "usage: dolphone-modem-access on | off | status" >&2
+    echo "usage: dolphone-modem-access on | off | status | port on | port off" >&2
     exit 2
     ;;
 esac

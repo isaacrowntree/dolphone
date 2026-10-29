@@ -1289,6 +1289,7 @@ name = "fake-mm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -3705,6 +3706,7 @@ dependencies = [
  "anyhow",
  "evdev",
  "futures-util",
+ "libc",
  "phone-api",
  "phone-core",
  "rcgen",

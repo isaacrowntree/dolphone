@@ -378,17 +378,24 @@ pub fn tech_label(bits: u32) -> &'static str {
 pub fn explain_at(e: &zbus::Error) -> String {
     let s = e.to_string();
     if s.contains("Unauthorized") || s.contains("debug mode") {
-        "ModemManager passes AT commands only in debug mode: sudo dolphone-modem-access on".into()
+        "ModemManager passes AT commands only in debug mode: sudo dolphone-modem-access on \
+         (or, where the device profile names a spare AT port, sudo dolphone-modem-access port on)"
+            .into()
     } else {
         s
     }
 }
 
-/// Send one AT command through ModemManager and return the modem's answer
-/// (ModemManager drops the final OK and turns ERROR into an error). It allows this
-/// only when it runs with `--debug` (mm-iface-modem.c, handle_command);
-/// docs/HARDWARE.md has the drop-in.
+/// Send one AT command and return the modem's answer, without the final OK; ERROR
+/// is an error. It goes on phoned's own AT port when there is one (crate::atport),
+/// and otherwise through ModemManager, which allows it only when it runs with
+/// `--debug` (mm-iface-modem.c, handle_command); docs/HARDWARE.md has both.
 pub async fn at(system: &zbus::Connection, modem: &OwnedObjectPath, cmd: &str) -> zbus::Result<String> {
+    if let Some(answer) = crate::atport::command(cmd).await {
+        let out = answer.map_err(zbus::Error::Failure)?;
+        tracing::info!(cmd, answer = %out.trim(), "AT (own port)");
+        return Ok(out);
+    }
     let m = ModemProxy::builder(system).path(modem.clone()).build().await?;
     let out = m.command(cmd, 10).await?;
     tracing::info!(cmd, answer = %out.trim(), "AT");

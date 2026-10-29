@@ -19,6 +19,7 @@
 //! XML, so a client written against fake-mm needs no change for a real modem.
 
 mod at;
+mod atport;
 mod call;
 mod control;
 mod modem;

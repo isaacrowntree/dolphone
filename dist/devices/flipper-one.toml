@@ -14,7 +14,8 @@ front_ends = ["flipctl", "desktop"]
 # The RM520N-GL forgets where call audio goes when it restarts: AT+QPCMV=1,2
 # sends it to the USB sound card (Quectel LTE Standard UAC Application Note §3;
 # reported working on the RM520N on Quectel's forum). phoned sends it each time the
-# modem appears; ModemManager must be in debug mode to pass it (docs/HARDWARE.md).
+# modem appears, on the spare AT port below or through ModemManager in debug
+# mode (docs/HARDWARE.md).
 modem_at = ["AT+QPCMV=1,2"]
 ring_leds = ["flipper-one:rgb:eth0", "flipper-one:rgb:eth1", "flipper-one:rgb:wifi", "flipper-one:rgb:link"]
 
@@ -27,3 +28,16 @@ priority = 100
 speaker_commands = [["amixer", "-q", "sset", "Speaker", "unmute"], ["amixer", "-q", "sset", "Headphone", "mute"]]
 wired_commands = [["amixer", "-q", "sset", "Speaker", "mute"], ["amixer", "-q", "sset", "Headphone", "unmute"]]
 modem_match = ["Quectel", "RM520", "RM500"]
+
+# A spare AT port, so the commands above need no ModemManager debug mode. The
+# RM520N-GL's (2c7c:0801) interface 2 is the AT port ModemManager makes its
+# primary, and interface 3 the modem port, which takes AT commands too and which
+# ModemManager uses only as its secondary (Quectel's UMTS/LTE/5G Linux USB Driver
+# User Guide V3.1, Table 1; ModemManager's 77-mm-quectel-port-types.rules); the
+# RM500Q (0800) is laid out the same. phoned takes 3, and only once udev tells
+# ModemManager to ignore it: sudo dolphone-modem-access port on. Not yet tried on
+# a real RM520N.
+[at_port]
+usb_vendor = "2c7c"
+usb_products = ["0801", "0800"]
+usb_interface = "03"
