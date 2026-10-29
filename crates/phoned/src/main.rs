@@ -213,23 +213,19 @@ async fn modem_events(system: zbus::Connection, poke: Arc<tokio::sync::Notify>) 
     // The modem's own properties only: a call's or a text's changing (many a
     // second while ringing) says nothing about the modem. ModemManager coming and
     // going is watched by name, since a crashed one sends no InterfacesRemoved.
-    let modem_props = (|| -> zbus::Result<zbus::MatchRule<'static>> {
-        Ok(zbus::MatchRule::builder()
-            .msg_type(zbus::message::Type::Signal)
-            .sender(mm::SERVICE)
-            .interface("org.freedesktop.DBus.Properties")
-            .member("PropertiesChanged")
-            .path_namespace("/org/freedesktop/ModemManager1/Modem")
-            .build()?)
-    })();
-    let owner = (|| -> zbus::Result<zbus::MatchRule<'static>> {
-        Ok(zbus::MatchRule::builder()
-            .msg_type(zbus::message::Type::Signal)
-            .sender("org.freedesktop.DBus")
-            .member("NameOwnerChanged")
-            .arg(0, mm::SERVICE)
-            .build()?)
-    })();
+    let modem_props = zbus::MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .sender(mm::SERVICE)
+        .interface("org.freedesktop.DBus.Properties")
+        .member("PropertiesChanged")
+        .path_namespace("/org/freedesktop/ModemManager1/Modem")
+        .build();
+    let owner = zbus::MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .sender("org.freedesktop.DBus")
+        .member("NameOwnerChanged")
+        .arg(0, mm::SERVICE)
+        .build();
     let rules = [
         rule("InterfacesAdded", "org.freedesktop.DBus.ObjectManager"),
         rule("InterfacesRemoved", "org.freedesktop.DBus.ObjectManager"),
@@ -323,6 +319,10 @@ async fn follow_audio(phone: Arc<Phone>) {
         // Quick during a call, when a headset going on or off should move the call
         // at once; relaxed otherwise, which is most of the time.
         let busy = !phone.state.lock().await.calls.is_empty();
+        if busy {
+            // Bring back a call's audio links if PipeWire restarted under them.
+            phone.audio.check_call();
+        }
         tokio::time::sleep(Duration::from_secs(if busy { 2 } else { 10 })).await;
     }
 }

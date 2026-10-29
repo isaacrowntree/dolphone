@@ -79,9 +79,8 @@ fn front_end_where(exe: &Path, trust_appimages: bool, is_fuse_mount: impl Fn(&Pa
     // AppImages, squashfs-root and the like, are plain directories, so they do not
     // count.) A program that mounts a FUSE filesystem of its own still gets past
     // this; SECURITY.md says so.
-    dir.ancestors().any(|a| {
-        a.file_name().is_some_and(|n| n.to_string_lossy().starts_with(".mount_")) && is_fuse_mount(a)
-    })
+    dir.ancestors()
+        .any(|a| a.file_name().is_some_and(|n| n.to_string_lossy().starts_with(".mount_")) && is_fuse_mount(a))
 }
 
 /// Whether `dir` is a mount point of a FUSE filesystem, from /proc/self/mountinfo

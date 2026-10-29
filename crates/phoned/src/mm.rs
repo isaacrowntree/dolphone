@@ -66,6 +66,9 @@ pub trait Modem {
     fn model(&self) -> zbus::Result<String>;
     #[zbus(property)]
     fn manufacturer(&self) -> zbus::Result<String>;
+    /// The IMEI.
+    #[zbus(property)]
+    fn equipment_identifier(&self) -> zbus::Result<String>;
     /// An AT command, answered without the final OK. Only in debug mode.
     fn command(&self, cmd: &str, timeout: u32) -> zbus::Result<String>;
     /// (allowed, preferred) MMModemMode pairs the modem accepts.
@@ -140,6 +143,10 @@ pub trait Call {
     /// the RM520N-GL). Empty when there is no host-side audio to bridge.
     #[zbus(property)]
     fn audio_port(&self) -> zbus::Result<String>;
+    /// The call audio's format, when the modem sends it over a port (a SIM7600:
+    /// "rate", 8000 or 16000).
+    #[zbus(property)]
+    fn audio_format(&self) -> zbus::Result<HashMap<String, zbus::wire::OwnedVariant>>;
 }
 
 #[proxy(interface = "org.freedesktop.ModemManager1.Modem.Messaging", default_service = "org.freedesktop.ModemManager1")]
@@ -186,12 +193,23 @@ pub trait Ussd {
 #[proxy(interface = "org.freedesktop.ModemManager1.Sim", default_service = "org.freedesktop.ModemManager1")]
 pub trait Sim {
     fn send_pin(&self, pin: &str) -> zbus::Result<()>;
+    fn send_puk(&self, puk: &str, pin: &str) -> zbus::Result<()>;
+    fn change_pin(&self, old: &str, new: &str) -> zbus::Result<()>;
     /// MCC and MNC of the SIM's own network, "50501".
     #[zbus(property)]
     fn operator_identifier(&self) -> zbus::Result<String>;
     /// The ICCID.
     #[zbus(property)]
     fn sim_identifier(&self) -> zbus::Result<String>;
+}
+
+/// A call's audio sample rate from its AudioFormat property (a{sv} with "rate"),
+/// or 0 when the modem says none.
+pub async fn audio_rate(call: &CallProxy<'_>) -> u32 {
+    match call.audio_format().await {
+        Ok(f) => f.get("rate").and_then(|v| u32::try_from(v).ok()).unwrap_or(0),
+        Err(_) => 0,
+    }
 }
 
 /// Cell broadcast, in its own module: its Added signal would otherwise share

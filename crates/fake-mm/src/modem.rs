@@ -65,13 +65,40 @@ impl Sim {
         }
         if pin != w.pin {
             w.pin_retries -= 1;
-            return Err(zbus::fdo::Error::Failed(format!("incorrect PIN, {} tries left", w.pin_retries)));
+            // As ModemManager: no count in the error; UnlockRetries has it.
+            return Err(zbus::fdo::Error::Failed("incorrect password".into()));
         }
         w.locked = false;
         w.pin_retries = 3;
         drop(w);
         unlock_interfaces(conn, &self.world).await;
         tracing::info!("SIM unlocked");
+        Ok(())
+    }
+
+    async fn change_pin(&self, old: &str, new: &str) -> zbus::fdo::Result<()> {
+        let mut w = self.world.lock().await;
+        if old != w.pin {
+            w.pin_retries = w.pin_retries.saturating_sub(1);
+            return Err(zbus::fdo::Error::Failed("incorrect password".into()));
+        }
+        w.pin = new.to_string();
+        tracing::info!("SIM PIN changed");
+        Ok(())
+    }
+
+    async fn send_puk(&self, puk: &str, pin: &str, #[zbus(connection)] conn: &Connection) -> zbus::fdo::Result<()> {
+        if puk != "12345678" {
+            return Err(zbus::fdo::Error::Failed("incorrect password".into()));
+        }
+        let mut w = self.world.lock().await;
+        w.pin = pin.to_string();
+        w.pin_retries = 3;
+        let was_locked = std::mem::replace(&mut w.locked, false);
+        drop(w);
+        if was_locked {
+            unlock_interfaces(conn, &self.world).await;
+        }
         Ok(())
     }
 

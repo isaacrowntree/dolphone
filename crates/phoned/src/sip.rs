@@ -145,7 +145,15 @@ pub fn number_from(uri: &str, account: &str, proxy: &str) -> String {
     if ours || n.starts_with("sip:") {
         n
     } else {
-        format!("sip:{}", uri.trim_start_matches('<').trim_end_matches('>').trim_start_matches("sip:").split(';').next().unwrap_or(""))
+        format!(
+            "sip:{}",
+            uri.trim_start_matches('<')
+                .trim_end_matches('>')
+                .trim_start_matches("sip:")
+                .split(';')
+                .next()
+                .unwrap_or("")
+        )
     }
 }
 
@@ -529,7 +537,10 @@ mod tests {
             "sip:+61491570156@203.0.113.9",
             "a number claimed from elsewhere stays an address"
         );
-        assert_eq!(number_from("sip:+61491570156@proxy.example", acct, "sip:proxy.example;transport=tls"), "+61491570156");
+        assert_eq!(
+            number_from("sip:+61491570156@proxy.example", acct, "sip:proxy.example;transport=tls"),
+            "+61491570156"
+        );
         assert_eq!(
             uri_for("+61491570156", "sip:me@voip.example.net;transport=tls"),
             "sip:+61491570156@voip.example.net"

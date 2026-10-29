@@ -622,6 +622,17 @@ out=$("$P" threads)
 refute "with mmsd-tng running, phoned leaves the MMS notice to it" "$out" "0491 570 165"
 
 echo "service codes and the modem's setup"
+out=$("$P" ussd '*#06#')
+expect "*#06# shows the IMEI, on the device" "$out" "IMEI: 350000000000001"
+out=$("$P" ussd '**04*1234*4321*4321#')
+expect "**04*old*new*new# changes the SIM PIN through ModemManager, not as USSD" "$out" "SIM PIN changed"
+"$P" ussd '**04*4321*1234*1234#' >/dev/null
+out=$("$P" ussd '**04*1234*4321*9999#' 2>&1 || true)
+expect "and two different new PINs are refused before anything is sent" "$out" "not the same"
+"$P" ussd '*31#' >/dev/null
+out=$("$P" get clir)
+expect "hiding caller ID is remembered, to put back after a modem restart" "$out" "1"
+"$P" ussd '#31#' >/dev/null
 out=$("$P" ussd '**21*0491570199#')
 expect "**21*n# forwards calls, through +CCFC" "$out" "Forwarding all calls to 0491570199"
 out=$("$P" ussd '*#21#')
@@ -885,10 +896,10 @@ print(written, heard, flush=True)
     expect "with pw-cat at 8 kHz, raw, into the call" "$out" "pw-cat --playback --raw --rate 8000 --channels 1 --format s16"
     expect "and from the microphone" "$out" "pw-cat --record --raw --rate 8000"
     out=$("$P" fake dump)
-    expect "after AT+CPCMREG=1, once the call connected" "$out" "cpcmreg=1"
+    # ModemManager's SIMCom plugin sends AT+CPCMREG=1 and =0 itself
+    # (mm-shared-simtech.c); a second one from phoned would only fail.
+    refute "phoned leaves AT+CPCMREG to ModemManager's SIMCom plugin" "$out" "cpcmreg=1"
     "$P" hangup
-    out=$(until_has "cpcmreg=0" "$P" fake dump)
-    expect "and AT+CPCMREG=0 when it ends" "$out" "cpcmreg=0"
     for _ in $(seq 1 50); do pgrep -x pw-cat >/dev/null || break; sleep 0.1; done
     out=$(pgrep -a pw-cat || true)
     [ -z "$out" ] && pass "the bridge stops with the call" || fail "the bridge stops with the call" "$out"

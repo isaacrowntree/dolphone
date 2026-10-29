@@ -26,7 +26,8 @@ pub fn dialer() {
         // flipctl open: 0 on the panel, 1 refused, 2 nothing listening (flipctl
         // restarting). A ring must reach the screen, so try once more after a pause.
         for attempt in 0..2 {
-            let run = Command::new("flipctl").arg("open").arg(&bundle).stdout(Stdio::null()).stderr(Stdio::null()).status();
+            let run =
+                Command::new("flipctl").arg("open").arg(&bundle).stdout(Stdio::null()).stderr(Stdio::null()).status();
             match run.map(|s| s.code()) {
                 Ok(Some(0)) => return,
                 Ok(code) if attempt == 0 => {

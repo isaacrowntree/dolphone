@@ -743,18 +743,12 @@ impl Audio {
     /// Start a call's audio, without waiting: it is done on the audio thread, in
     /// order with every other request. `pcm_rate` is the rate ModemManager reports
     /// in the call's AudioFormat, or 0 when it reports none (see pcm_rate).
-    // For phone.rs and main.rs, in place of start_call and stop_call on a blocking
-    // task, whose order tokio does not keep.
-    #[allow(dead_code)]
     pub fn request_start_call(&self, audio_port: &str, pcm_rate: u32) {
         let request = self.s.requests.fetch_add(1, Ordering::SeqCst) + 1;
         let _ = self.jobs.send(Job::Start { port: audio_port.to_string(), rate: pcm_rate, request });
     }
 
     /// Stop a call's audio, without waiting, after any start asked for before it.
-    // For phone.rs and main.rs, in place of start_call and stop_call on a blocking
-    // task, whose order tokio does not keep.
-    #[allow(dead_code)]
     pub fn request_stop_call(&self) {
         self.s.requests.fetch_add(1, Ordering::SeqCst);
         let _ = self.jobs.send(Job::Stop);
@@ -763,17 +757,8 @@ impl Audio {
     /// Restart a call's loopbacks if they have died (PipeWire restarted, a device
     /// went away under them). Cheap and does not wait: call it every few seconds
     /// during a call.
-    // For phone.rs and main.rs, in place of start_call and stop_call on a blocking
-    // task, whose order tokio does not keep.
-    #[allow(dead_code)]
     pub fn check_call(&self) {
         let _ = self.jobs.send(Job::Check);
-    }
-
-    /// Start a call's audio now, on this thread.
-    pub fn start_call(&self, audio_port: &str) {
-        self.s.requests.fetch_add(1, Ordering::SeqCst);
-        start_call(&self.s, audio_port, 0);
     }
 
     /// Stop a call's audio now, on this thread.
@@ -1516,7 +1501,9 @@ fn synth_cadence(c: tones::Cadence, cycles: u32) -> Vec<i16> {
                 let edge = (n.min(len - n) as f32 / ms(5) as f32).min(1.0);
                 let s: f32 =
                     c.freqs.iter().map(|f| (t * f * std::f32::consts::TAU).sin()).sum::<f32>() / c.freqs.len() as f32;
-                out.push((s * 0.3 * edge * i16::MAX as f32) as i16);
+                // Some countries' tones alternate levels (Australia's congestion).
+                let level = c.level(i / 2);
+                out.push((s * 0.3 * level * edge * i16::MAX as f32) as i16);
             }
         }
     }

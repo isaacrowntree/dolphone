@@ -130,6 +130,9 @@ pub struct Live {
     /// Where its audio is (the modem's audio port, or SIP_PORT), once connected,
     /// so a swap between networks can move the audio with it.
     pub port: String,
+    /// The sample rate of its serial audio, from the call's AudioFormat (0: not
+    /// said, 8 kHz): ModemManager may switch a SIM7600 to 16 kHz.
+    pub rate: u32,
 }
 
 /// An action waiting for a press.
@@ -241,6 +244,10 @@ impl Phone {
     /// the second step of a confirmation.
     pub async fn dial(self: &Arc<Self>, raw: &str, caller: &Caller, confirmed: bool) -> zbus::fdo::Result<Placed> {
         let region = self.region();
+        // "#31#0412…" hides the number for this one call, "*31#…" shows it: the
+        // number itself is what is classified and dialled (000 behind it is still
+        // an emergency call).
+        let (clir_once, raw) = phone_core::ss::strip_clir_prefix(raw);
         let canonical = number::canonical(raw, &region);
         if canonical.is_empty() {
             return Err(zbus::fdo::Error::InvalidArgs("empty number".into()));
@@ -269,6 +276,9 @@ impl Phone {
         let modem = self.modem().await?;
         if !modem.voice {
             return Err(zbus::fdo::Error::NotSupported("this modem has no voice support".into()));
+        }
+        if let Some(hide) = clir_once.filter(|_| class != Class::Emergency) {
+            self.clir_for_one_call(&modem, hide).await;
         }
         let voice = mm::VoiceProxy::builder(&self.system).path(modem.path.clone()).build().await?;
         let path = voice.create_call(HashMap::from([("number", Variant::from(canonical.as_str()))])).await?;
@@ -332,6 +342,7 @@ impl Phone {
                     silenced: false,
                     sip: sip.clone(),
                     port: String::new(),
+                    rate: 0,
                 },
             );
         }
@@ -388,7 +399,53 @@ impl Phone {
         } else {
             String::new()
         };
+        if new == CallState::Active {
+            let rate = mm::audio_rate(call).await;
+            if let Some(live) = self.state.lock().await.calls.get_mut(&id) {
+                live.rate = rate;
+            }
+            if port.is_empty() {
+                // ModemManager fills in AudioPort only once its own in-call setup
+                // is done, just after the call goes active: look again shortly.
+                let me = self.clone();
+                let path = call.inner().path().to_owned();
+                tokio::spawn(async move { me.recheck_port(id, path.into()).await });
+            }
+        }
         self.set_state(id, new, refused, port).await
+    }
+
+    /// Read a connected call's audio port again, and move its audio there when it
+    /// turns up.
+    async fn recheck_port(self: &Arc<Self>, id: u32, path: OwnedObjectPath) {
+        for wait in [500, 1500] {
+            tokio::time::sleep(Duration::from_millis(wait)).await;
+            let Ok(call) = mm::CallProxy::builder(&self.system)
+                .path(path.clone())
+                .cache_properties(zbus::proxy::CacheProperties::No)
+                .build()
+                .await
+            else {
+                return;
+            };
+            let port = call.audio_port().await.unwrap_or_default();
+            let rate = mm::audio_rate(&call).await;
+            let moved = {
+                let mut st = self.state.lock().await;
+                let Some(live) = st.calls.get_mut(&id) else { return };
+                let moved = !port.is_empty() && live.port != port;
+                if moved {
+                    live.port = port.clone();
+                    live.rate = rate;
+                }
+                moved
+            };
+            if moved {
+                tracing::info!(id, "the call's audio port appeared; moving its audio there");
+                self.audio.request_start_call(&port, rate);
+                return;
+            }
+        }
     }
 
     /// A call moved to `new`, whichever network it is on. `refused` is how the
@@ -417,7 +474,7 @@ impl Phone {
         } else if new == CallState::Active {
             self.audio.stop_progress();
         }
-        let (info, became_active, any_ringing) = {
+        let (info, became_active, any_ringing, rate) = {
             let mut st = self.state.lock().await;
             let Some(live) = st.calls.get_mut(&id) else { return false };
             let was = CallState::from_u8(live.info.state);
@@ -448,8 +505,9 @@ impl Phone {
             let early_media = new == CallState::RingingOut && live.info.direction == Direction::Outgoing as u8;
             let became_active = became_active || early_media;
             let info = live.info.clone();
+            let rate = live.rate;
             let any_ringing = st.calls.values().any(|c| CallState::from_u8(c.info.state).ringing_in());
-            (info, became_active, any_ringing)
+            (info, became_active, any_ringing, rate)
         };
         if !any_ringing {
             self.stop_ringing();
@@ -457,9 +515,10 @@ impl Phone {
         if became_active {
             // Audio is subprocesses (PipeWire's tools), so it runs off the async
             // threads: a slow pw-dump must never hold up call signals.
-            let me = self.clone();
             let sip = port == SIP_PORT;
-            tokio::task::spawn_blocking(move || me.audio.start_call(&port));
+            // In order with any stop that follows: Audio runs its requests on one
+            // worker, so a call that ends at once cannot leave its audio running.
+            self.audio.request_start_call(&port, rate);
             self.notify.withdraw_call(id).await;
             if new == CallState::Active {
                 self.kdeconnect.talking(&info.number, &self.name_for(&info.number));
@@ -492,8 +551,7 @@ impl Phone {
             self.stop_ringing();
         }
         if !others_active {
-            let me = self.clone();
-            tokio::task::spawn_blocking(move || me.audio.stop_call());
+            self.audio.request_stop_call();
             if live.sip.is_none() && live.info.connected_at > 0 {
                 self.call_at(false);
             }
@@ -787,13 +845,10 @@ impl Phone {
             .values()
             .find(|c| CallState::from_u8(c.info.state) == CallState::Active)
             .map(|c| if c.sip.is_some() { SIP_PORT.to_string() } else { c.port.clone() });
-        let me = self.clone();
-        tokio::task::spawn_blocking(move || {
-            me.audio.stop_call();
-            if let Some(p) = port {
-                me.audio.start_call(&p);
-            }
-        });
+        self.audio.request_stop_call();
+        if let Some(p) = port {
+            self.audio.request_start_call(&p, 0);
+        }
     }
 
     pub async fn send_dtmf(&self, id: u32, tones: &str) -> zbus::fdo::Result<()> {
@@ -1427,10 +1482,37 @@ impl Phone {
     /// A supplementary-service code from the dialer: call waiting through
     /// ModemManager, forwarding and caller ID as the 3GPP AT commands.
     async fn supplementary(&self, code: &str) -> zbus::fdo::Result<String> {
-        use phone_core::ss::{self, Ss};
-        let s = ss::parse(code)
-            .ok_or_else(|| zbus::fdo::Error::NotSupported("Dolphone does not know this service code".into()))?;
+        use phone_core::ss::{self, Code, Ss};
+        let parsed = ss::parse_code(code)
+            .ok_or_else(|| zbus::fdo::Error::NotSupported("Dolphone does not know this service code".into()))?
+            .map_err(|why| zbus::fdo::Error::InvalidArgs(why.to_string()))?;
         let modem = self.modem().await?;
+        // The SIM's codes are the phone's, not the network's: sent as USSD they
+        // would carry the PIN and PUK off the device (TS 22.030 §6.6).
+        let sim = || async {
+            let m = mm::ModemProxy::builder(&self.system).path(modem.path.clone()).build().await?;
+            mm::SimProxy::builder(&self.system).path(m.sim().await?).build().await
+        };
+        let s = match parsed {
+            Code::Service(s) => s,
+            Code::Imei => {
+                let m = mm::ModemProxy::builder(&self.system).path(modem.path.clone()).build().await?;
+                return Ok(format!("IMEI: {}", m.equipment_identifier().await?));
+            }
+            Code::Pin { which: 1, old, new } => {
+                sim().await?.change_pin(&old, &new).await?;
+                return Ok("SIM PIN changed".into());
+            }
+            Code::Puk { which: 1, puk, new } => {
+                sim().await?.send_puk(&puk, &new).await?;
+                return Ok("SIM unblocked; the new PIN is set".into());
+            }
+            Code::Pin { .. } | Code::Puk { .. } => {
+                return Err(zbus::fdo::Error::NotSupported(
+                    "PIN2 is not reachable through ModemManager; change it in another phone".into(),
+                ))
+            }
+        };
         let at = |cmd: String| {
             let path = modem.path.clone();
             async move { mm::at(&self.system, &path, &cmd).await.map_err(|e| zbus::fdo::Error::Failed(mm::explain_at(&e))) }
@@ -1460,9 +1542,33 @@ impl Phone {
             }
             Ss::CallerId(show) => {
                 let out = at(ss::clir_command(*show)).await?;
+                if let Some(show) = show {
+                    // The modem forgets it at a restart; apply_modem_settings puts
+                    // it back, so "hidden" stays hidden.
+                    let n = if *show { "2" } else { "1" };
+                    self.store_read(|st| st.set_setting(phone_api::keys::CLIR.0, n))?;
+                }
                 Ok(if show.is_none() { ss::describe_clir(&out) } else { ss::describe_change(&s) })
             }
         }
+    }
+
+    /// Caller ID for the next call only (`#31#number`): ModemManager's CreateCall
+    /// has no such option, so CLIR is set for the call and the owner's own setting
+    /// put back once the network has the call.
+    async fn clir_for_one_call(self: &Arc<Self>, modem: &mm::Found, hide: bool) {
+        let cmd = phone_core::ss::clir_command(Some(!hide));
+        if let Err(e) = mm::at(&self.system, &modem.path, &cmd).await {
+            tracing::warn!("caller ID for this call not set: {}", mm::explain_at(&e));
+            return;
+        }
+        let me = self.clone();
+        let path = modem.path.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            let n = me.setting(phone_api::keys::CLIR);
+            let _ = mm::at(&me.system, &path, &format!("AT+CLIR={n}")).await;
+        });
     }
 
     /// The profile's AT commands for a mobile call connecting or ending. A
@@ -1642,6 +1748,14 @@ impl Phone {
                 }
             } else if no_2g {
                 tracing::warn!("this modem offers no way to leave 2G out");
+            }
+        }
+        // Caller ID as the owner set it: only when it is not the network's default,
+        // since it needs ModemManager's AT passthrough.
+        let clir = self.setting(phone_api::keys::CLIR);
+        if clir != "0" {
+            if let Err(e) = mm::at(&self.system, &modem.path, &format!("AT+CLIR={clir}")).await {
+                tracing::warn!("caller ID setting not applied: {}", mm::explain_at(&e));
             }
         }
         if modem.voice {
@@ -1920,7 +2034,8 @@ impl Phone {
         let id = {
             let mut st = self.state.lock().await;
             let id = st.calls.iter().find(|(_, c)| c.sip.as_deref() == Some(&e.id)).map(|(i, _)| *i);
-            if id.is_none() && matches!(e.kind.as_str(), "CALL_RINGING" | "CALL_PROGRESS" | "CALL_ESTABLISHED" | "CALL_CLOSED")
+            if id.is_none()
+                && matches!(e.kind.as_str(), "CALL_RINGING" | "CALL_PROGRESS" | "CALL_ESTABLISHED" | "CALL_CLOSED")
             {
                 // About a call dial_sip has not tracked yet (baresip answered its
                 // dial command after sending this): kept for it to replay.
@@ -2084,7 +2199,8 @@ impl Phone {
         // This phone's own number, to leave it out of the thread: mmsd-tng's, or the
         // modem's when the SIM does not say. Unknown, a message to one recipient
         // (this phone) is between the sender and us.
-        let own = if r.own.trim().is_empty() { self.state.lock().await.status.own_number.clone() } else { r.own.clone() };
+        let own =
+            if r.own.trim().is_empty() { self.state.lock().await.status.own_number.clone() } else { r.own.clone() };
         let recipients: &[String] = if own.trim().is_empty() && r.recipients.len() <= 1 { &[] } else { &r.recipients };
         let peer = crate::mms::peer_of(&r.sender, recipients, &own, canon);
         let (text_part, parts) = crate::mms::read_parts(&file, &r.attachments);
@@ -2118,7 +2234,11 @@ impl Phone {
         if saved.len() == parts.len() {
             crate::mms::forget(&self.session, &path).await;
         } else {
-            tracing::warn!(saved = saved.len(), of = parts.len(), "not all of an MMS's parts were saved; mmsd-tng keeps it");
+            tracing::warn!(
+                saved = saved.len(),
+                of = parts.len(),
+                "not all of an MMS's parts were saved; mmsd-tng keeps it"
+            );
         }
         tracing::info!(from = %number::mask(&sender), parts = saved.len(), "MMS received");
         let shown = if body.is_empty() {

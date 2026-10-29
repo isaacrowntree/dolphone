@@ -643,7 +643,8 @@ impl Settings {
         use phone_api::keys;
         // Settings that name people (speed dial, who uplink alerts go to) or say
         // who may read: for callers that may read, as messages are.
-        let personal = key == keys::READ_GRANTS.0 || key == keys::UPLINK_ALERT_TO.0 || keys::SPEED.iter().any(|k| k.0 == key);
+        let personal =
+            key == keys::READ_GRANTS.0 || key == keys::UPLINK_ALERT_TO.0 || keys::SPEED.iter().any(|k| k.0 == key);
         if personal {
             reader(conn, &hdr).await?;
         }

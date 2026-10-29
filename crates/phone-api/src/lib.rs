@@ -502,6 +502,10 @@ pub mod keys {
     pub const VOICEMAIL: (&str, &str) = ("voicemail", "");
     /// Call waiting on the network (applied to the modem when it appears).
     pub const CALL_WAITING: (&str, &str) = ("call_waiting", "true");
+    /// Caller ID as the owner last set it with `*31#`/`#31#`: "0" the network's
+    /// default, "1" hidden, "2" shown (AT+CLIR's n). Applied when the modem starts,
+    /// which forgets it.
+    pub const CLIR: (&str, &str) = ("clir", "0");
     /// Ask the network to report when a text is delivered.
     pub const DELIVERY_REPORTS: (&str, &str) = ("delivery_reports", "false");
     /// Speak the caller's name when a call rings (needs espeak-ng).
@@ -585,6 +589,7 @@ pub mod keys {
         READ_GRANTS,
         VOICEMAIL,
         CALL_WAITING,
+        CLIR,
         DELIVERY_REPORTS,
         SPEAK_CALLER,
         SILENCE_UNKNOWN,
