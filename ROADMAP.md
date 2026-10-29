@@ -39,8 +39,9 @@ audio. What only a board can confirm:
 - **The panel outside Dolphone's apps**: a status-bar badge for missed calls and
   texts, a toast, a home tile; a large-text mode and a font beyond Latin and
   Cyrillic (Dolphone draws with FlipCTL's fonts, and shows the number where a name
-  cannot be drawn). FlipCTL has none of these today; Dolphone can add them as
-  options of its own later, without waiting for FlipCTL.
+  cannot be drawn). FlipCTL has none of these today. They belong in
+  [FlipCTL](https://github.com/flipperdevices/flipctl-slint) itself, for every app, but Dolphone could also add
+  them as options of its own; it could go either way.
 - No RCS: there is no route to it from Linux. Bridges to Matrix and others belong
   outside Dolphone, on its D-Bus API.
 

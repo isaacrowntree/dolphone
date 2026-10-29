@@ -10,8 +10,9 @@ device profile from "untested" to "tested", and a new machine is one TOML file:
 ## Ground rules
 
 - **Add to FlipCTL, never replace it.** Screens use FlipCTL's widgets, fonts and
-  soft-key roles ([docs/BUTTONS.md](https://isaacrowntree.com/dolphone/BUTTONS.html)). Dolphone does not wait
-  on FlipCTL: anything FlipCTL lacks is Dolphone's own optional work, for later.
+  soft-key roles ([docs/BUTTONS.md](https://isaacrowntree.com/dolphone/BUTTONS.html)). Something FlipCTL lacks
+  that belongs in it is FlipCTL's ([flipctl-slint](https://github.com/flipperdevices/flipctl-slint)), though
+  Dolphone could add it as an option of its own; it could go either way.
 - **The Flipper One comes first.** A feature is designed for its panel and its
   buttons; other machines get it through their device profile and the desktop app.
   Hardware facts in a profile cite where they came from.
