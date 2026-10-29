@@ -170,18 +170,25 @@ impl App {
     fn keyboard(&mut self, key: Option<Key>, text: &str, down: bool) {
         let Some((what, field)) = self.kb.as_mut() else { return };
         let what = *what;
+        // Done takes a PIN only once it is one phoned could take.
+        let valid = !what.is_pin() || model::valid_pin(&field.text);
         let done = match key {
             Some(k) if !down => {
                 field.release(k.flipper());
                 None
             }
-            Some(k) => match field.key(k.flipper(), true) {
+            Some(k) => match field.key(k.flipper(), valid) {
                 Some(Exit::Save(t)) => Some(Some(t)),
                 Some(Exit::Cancel) => Some(None),
                 None => None,
             },
             None if down => {
-                if let Some(c) = text.chars().next().filter(|c| text.chars().count() == 1 && !c.is_control()) {
+                if let Some(c) = text
+                    .chars()
+                    .next()
+                    .filter(|c| text.chars().count() == 1 && !c.is_control())
+                    .filter(|c| !what.is_pin() || (c.is_ascii_digit() && field.text.len() < 12))
+                {
                     let at = field.text.char_indices().nth(field.cursor).map(|(i, _)| i).unwrap_or(field.text.len());
                     field.text.insert(at, c);
                     field.cursor += 1;
@@ -212,6 +219,8 @@ impl App {
                     "long_press_ms",
                     "uplink_alert_to",
                     "uplink_interface",
+                    phone_api::keys::MESSAGES_PIN.0,
+                    phone_api::keys::MESSAGES_OPEN_FOR.0,
                 ]);
                 for key in keys {
                     out.push(Event::Setting(key.into(), c.settings.get(key).await?));
@@ -243,7 +252,14 @@ impl App {
                 })
             }
             Page::About => self.bus.run(|c| async move { Ok(vec![Event::Device(c.settings.device().await?)]) }),
-            Page::Calls | Page::Texts | Page::Privacy => {}
+            Page::Privacy => self.bus.run(|c| async move {
+                let mut out = vec![Event::Blocked(c.settings.blocked().await?)];
+                for key in [phone_api::keys::MESSAGES_PIN.0, phone_api::keys::MESSAGES_OPEN_FOR.0] {
+                    out.push(Event::Setting(key.into(), c.settings.get(key).await?));
+                }
+                Ok(out)
+            }),
+            Page::Calls | Page::Texts => {}
             Page::Sip => self.bus.refresh_status(),
             Page::Laptops => {
                 self.bus.run(|c| async move { Ok(vec![Event::Laptops(c.settings.kdeconnect_devices().await?)]) })
@@ -298,7 +314,7 @@ impl App {
                 self.bus.run(move |c| async move { c.confirm.confirm(id).await.map(|_| vec![]) });
                 m.modal = Some((vec!["Phone data deleted.".into()], None));
             }
-            Event::Error(t) => m.modal = Some((vec![font::fit(&t, 210)], None)),
+            Event::Notice(t) | Event::Error(t) => m.modal = Some((vec![font::fit(&t, 210)], None)),
             _ => {}
         }
         self.draw();
@@ -310,6 +326,15 @@ impl App {
                 Action::SetRinger(r) => {
                     self.bus.run(move |c| async move { c.audio.set_ringer(&r).await.map(|_| vec![]) })
                 }
+                // The PIN is read back, so the row says what phoned holds, and its
+                // change is said in words since nothing on the row shows it.
+                Action::Set(k, v) if k == phone_api::keys::MESSAGES_PIN.0 => self.bus.run(move |c| async move {
+                    c.settings.set(k, &v).await?;
+                    Ok(vec![
+                        Event::Setting(k.into(), c.settings.get(k).await?),
+                        Event::Notice(if v.is_empty() { "Messages PIN removed." } else { "Messages PIN set." }.into()),
+                    ])
+                }),
                 Action::Set(k, v) => self.bus.run(move |c| async move { c.settings.set(k, &v).await.map(|_| vec![]) }),
                 Action::SetRoute(r) => self.bus.run(move |c| async move {
                     c.audio.set_route(r).await?;
@@ -384,7 +409,11 @@ impl App {
                     Ok(vec![Event::Grants(c.settings.grants().await?)])
                 }),
                 Action::EditText(f) => {
-                    self.kb = Some((f, TextInput::new(f.title(), &self.model.field_text(f))));
+                    let mut field = TextInput::new(f.title(), &self.model.field_text(f));
+                    if f.is_pin() {
+                        numeric(&mut field);
+                    }
+                    self.kb = Some((f, field));
                 }
                 Action::Wipe => self
                     .bus
@@ -398,8 +427,8 @@ impl App {
     }
 
     fn draw(&self) {
-        if let Some((_, field)) = &self.kb {
-            show_keyboard(&self.ui, field, self.frame % 10 < 5);
+        if let Some((what, field)) = &self.kb {
+            show_keyboard(&self.ui, field, what.is_pin(), self.frame % 10 < 5);
             return;
         }
         apply(&self.ui, &self.model, self.frame);
@@ -423,6 +452,15 @@ fn adjust(label: &str, value: &str) -> ListItem {
         chevrons: 2,
         frames: 1,
         ..Default::default()
+    }
+}
+
+/// "5 min", for the seconds Messages stays open.
+fn open_for_label(secs: &str) -> String {
+    match secs.parse::<u32>() {
+        Ok(s) if s % 60 == 0 => format!("{} min", s / 60),
+        Ok(s) => format!("{s} s"),
+        Err(_) => secs.to_string(),
     }
 }
 
@@ -600,9 +638,17 @@ pub fn items(m: &Model) -> (Vec<ListItem>, String, [&'static str; 5]) {
                     PrivacyRow::Blocked => item("Blocked numbers", &m.blocked.len().to_string()),
                     PrivacyRow::Grants => item("Programs allowed to text", ""),
                     PrivacyRow::Audit => item("What programs asked for", ""),
+                    PrivacyRow::MessagesPin => item("Messages PIN", if m.messages_pin_set { "On" } else { "Off" }),
+                    PrivacyRow::StayOpen => adjust("Messages stay open", &open_for_label(&m.open_for)),
                 })
                 .collect();
-            (rows, "> Privacy".into(), ["Back", "", "", "", "Select"])
+            let buttons = match PRIVACY[m.sel().min(PRIVACY.len() - 1)] {
+                PrivacyRow::MessagesPin if m.messages_pin_set => ["Back", "", "", "Remove", "Change"],
+                PrivacyRow::MessagesPin => ["Back", "", "", "", "Set"],
+                PrivacyRow::StayOpen => ["Back", "", "", "", "Change"],
+                _ => ["Back", "", "", "", "Select"],
+            };
+            (rows, "> Privacy".into(), buttons)
         }
         Page::Grants => {
             let rows = if m.grants.is_empty() {
@@ -755,8 +801,27 @@ fn short_result(r: &str) -> &'static str {
     }
 }
 
-fn show_keyboard(ui: &AppWindow, field: &TextInput, cursor_on: bool) {
-    let k = field.view("", cursor_on);
+/// FlipCTL's keyboard has no number pad; its 123 layout, with the digits on top
+/// and the highlight on 1, is the nearest.
+fn numeric(field: &mut TextInput) {
+    use flipctl_app::FlipperKey;
+    field.key(FlipperKey::View, true);
+    field.key(FlipperKey::Up, true);
+}
+
+/// The keyboard. A secret shows as a star for each character, laid out as the
+/// keyboard lays out text, so the caret sits where it should.
+fn show_keyboard(ui: &AppWindow, field: &TextInput, secret: bool, cursor_on: bool) {
+    let mut k = field.view("", cursor_on);
+    if secret {
+        use flipctl_app::keyboard::{field_w, fit_input};
+        let stars = "*".repeat(field.text.chars().count());
+        let w = field_w(i32::from(font::TITLE.text_width(&stars)));
+        let fitted = fit_input(&stars, field.cursor, w - 2 * flipctl_app::theme::metric::KB_INPUT_PAD);
+        k.text = fitted.visible;
+        k.field_w = w as f32;
+        k.cursor_dx = fitted.cursor_dx as f32;
+    }
     ui.set_mode(3);
     ui.set_kb_title(k.title.as_str().into());
     ui.set_kb_text(k.text.as_str().into());
@@ -950,6 +1015,11 @@ mod tests {
         shot("alerts", &m);
         m.page = Page::Privacy;
         shot("privacy", &m);
+        m.messages_pin_set = true;
+        m.open_for = "900".into();
+        m.sel[Page::Privacy as usize] = PRIVACY.iter().position(|r| *r == PrivacyRow::MessagesPin).unwrap();
+        shot("privacy-pin", &m);
+        m.sel[Page::Privacy as usize] = 0;
         m.page = Page::Grants;
         m.grants = vec![phone_api::Grant {
             id: 1,

@@ -78,6 +78,9 @@ pub enum Field {
     SipProxy,
     UplinkTo,
     UplinkIface,
+    /// The Messages PIN, new, and then again to be sure of it.
+    Pin,
+    PinAgain,
 }
 
 impl Field {
@@ -89,6 +92,7 @@ impl Field {
             Self::SipProxy => keys::SIP_PROXY.0,
             Self::UplinkTo => keys::UPLINK_ALERT_TO.0,
             Self::UplinkIface => keys::UPLINK_INTERFACE.0,
+            Self::Pin | Self::PinAgain => keys::MESSAGES_PIN.0,
         }
     }
 
@@ -100,9 +104,24 @@ impl Field {
             Self::SipProxy => "Proxy (sip:host), or empty",
             Self::UplinkTo => "Text this number when the link drops",
             Self::UplinkIface => "Interface to watch (eth0), or empty",
+            Self::Pin => "New Messages PIN, 4 to 12 digits",
+            Self::PinAgain => "The new PIN again",
         }
     }
+
+    /// Typed but never shown: the keyboard stars it, and takes only digits.
+    pub fn is_pin(self) -> bool {
+        matches!(self, Self::Pin | Self::PinAgain)
+    }
 }
+
+/// What the PIN keyboard lets through: 4 to 12 digits, as phoned takes.
+pub fn valid_pin(t: &str) -> bool {
+    (4..=12).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// How long Messages stays open after its PIN, in seconds: 1, 5 or 15 minutes.
+pub const OPEN_FOR: [&str; 3] = ["60", "300", "900"];
 
 /// The SIP page's rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -206,9 +225,14 @@ pub enum PrivacyRow {
     Blocked,
     Grants,
     Audit,
+    /// Set, change or remove the PIN that keeps texts closed.
+    MessagesPin,
+    /// How long Messages stays open once the PIN is in.
+    StayOpen,
 }
 
-pub const PRIVACY: [PrivacyRow; 3] = [PrivacyRow::Blocked, PrivacyRow::Grants, PrivacyRow::Audit];
+pub const PRIVACY: [PrivacyRow; 5] =
+    [PrivacyRow::Blocked, PrivacyRow::Grants, PrivacyRow::Audit, PrivacyRow::MessagesPin, PrivacyRow::StayOpen];
 
 pub struct Model {
     pub page: Page,
@@ -242,6 +266,12 @@ pub struct Model {
     /// A modal, and what Run does on it.
     pub modal: Option<(Vec<String>, Option<Action>)>,
     pub connected: bool,
+    /// Whether a Messages PIN is set (phoned never says what it is).
+    pub messages_pin_set: bool,
+    /// Seconds Messages stays open after the PIN.
+    pub open_for: String,
+    /// The new PIN typed once, waiting to be typed again.
+    pub new_pin: Option<String>,
 }
 
 impl Default for Model {
@@ -274,6 +304,9 @@ impl Default for Model {
             setup: Vec::new(),
             modal: None,
             connected: false,
+            messages_pin_set: false,
+            open_for: keys::MESSAGES_OPEN_FOR.1.into(),
+            new_pin: None,
         }
     }
 }
@@ -305,6 +338,8 @@ impl Model {
             k if k == keys::LONG_PRESS_MS.0 => self.hold_ms = value.to_string(),
             k if k == keys::UPLINK_ALERT_TO.0 => self.uplink_to = value.to_string(),
             k if k == keys::UPLINK_INTERFACE.0 => self.uplink_iface = value.to_string(),
+            k if k == keys::MESSAGES_PIN.0 => self.messages_pin_set = value == "set",
+            k if k == keys::MESSAGES_OPEN_FOR.0 => self.open_for = value.to_string(),
             _ => {
                 return match all_flags().find(|(k, _)| *k == key) {
                     Some((k, _)) => {
@@ -326,7 +361,7 @@ impl Model {
             Field::SipProxy => self.sip_proxy.clone(),
             Field::UplinkTo => self.uplink_to.clone(),
             Field::UplinkIface => self.uplink_iface.clone(),
-            Field::SipPassword => String::new(),
+            Field::SipPassword | Field::Pin | Field::PinAgain => String::new(),
         }
     }
 
@@ -494,15 +529,7 @@ impl Model {
                     _ => Vec::new(),
                 }
             }
-            Page::Privacy if matches!(input, Input::Run | Input::Ok | Input::Right) => {
-                self.page = match PRIVACY[self.sel().min(PRIVACY.len() - 1)] {
-                    PrivacyRow::Blocked => Page::Blocked,
-                    PrivacyRow::Grants => Page::Grants,
-                    PrivacyRow::Audit => Page::Audit,
-                };
-                self.set_sel(0);
-                vec![Action::Refresh(self.page)]
-            }
+            Page::Privacy => self.key_privacy(input),
             Page::Grants if matches!(input, Input::Run | Input::Ok | Input::Edit) => {
                 if let Some(g) = self.grants.get(self.sel()) {
                     self.modal = Some((
@@ -553,8 +580,39 @@ impl Model {
                 }
                 _ => Vec::new(),
             },
-            Page::Privacy | Page::Grants => Vec::new(),
+            Page::Grants => Vec::new(),
         }
+    }
+
+    fn key_privacy(&mut self, input: Input) -> Vec<Action> {
+        let open = matches!(input, Input::Run | Input::Ok | Input::Right);
+        let page = match PRIVACY[self.sel().min(PRIVACY.len() - 1)] {
+            PrivacyRow::Blocked if open => Page::Blocked,
+            PrivacyRow::Grants if open => Page::Grants,
+            PrivacyRow::Audit if open => Page::Audit,
+            PrivacyRow::MessagesPin if open => return vec![Action::EditText(Field::Pin)],
+            PrivacyRow::MessagesPin if input == Input::Edit && self.messages_pin_set => {
+                self.modal = Some((
+                    vec!["Remove the Messages PIN?".into(), "Texts open without it.".into()],
+                    Some(Action::Set(keys::MESSAGES_PIN.0, String::new())),
+                ));
+                return Vec::new();
+            }
+            PrivacyRow::StayOpen if matches!(input, Input::Left | Input::Right | Input::Run | Input::Ok) => {
+                let i = OPEN_FOR.iter().position(|x| *x == self.open_for).unwrap_or(1);
+                let j = if input == Input::Left {
+                    (i + OPEN_FOR.len() - 1) % OPEN_FOR.len()
+                } else {
+                    (i + 1) % OPEN_FOR.len()
+                };
+                self.open_for = OPEN_FOR[j].to_string();
+                return vec![Action::Set(keys::MESSAGES_OPEN_FOR.0, self.open_for.clone())];
+            }
+            _ => return Vec::new(),
+        };
+        self.page = page;
+        self.set_sel(0);
+        vec![Action::Refresh(page)]
     }
 
     fn key_main(&mut self, input: Input) -> Vec<Action> {
@@ -666,9 +724,30 @@ impl Model {
 
     /// The keyboard closed on a typed setting.
     pub fn written(&mut self, f: Field, text: Option<String>) -> Vec<Action> {
-        let Some(t) = text else { return Vec::new() };
+        let Some(t) = text else {
+            self.new_pin = None;
+            return Vec::new();
+        };
         let t = t.trim().to_string();
         match f {
+            Field::Pin => {
+                if !valid_pin(&t) {
+                    self.modal = Some((vec!["A PIN is 4 to 12 digits.".into()], None));
+                    return Vec::new();
+                }
+                self.new_pin = Some(t);
+                vec![Action::EditText(Field::PinAgain)]
+            }
+            Field::PinAgain => match self.new_pin.take() {
+                Some(first) if first == t => {
+                    self.messages_pin_set = true;
+                    vec![Action::Set(keys::MESSAGES_PIN.0, t)]
+                }
+                _ => {
+                    self.modal = Some((vec!["The two PINs differ.".into(), "Nothing was changed.".into()], None));
+                    Vec::new()
+                }
+            },
             Field::Voicemail => {
                 let n: String = t.chars().filter(|c| c.is_ascii_digit() || *c == '+').collect();
                 self.voicemail = n.clone();
@@ -899,6 +978,39 @@ mod tests {
         assert_eq!(m.key(Input::Run), vec![Action::ApplyModemSetup]);
         m.setup_done(vec![("modem".into(), "error".into(), "no modem".into())]);
         assert_eq!(m.modal.as_ref().map(|(l, _)| l[1].as_str()), Some("no modem"));
+    }
+
+    #[test]
+    fn messages_pin_is_typed_twice_and_removed_after_asking() {
+        let mut m = Model::default();
+        m.page = Page::Privacy;
+        let at = |r: PrivacyRow| PRIVACY.iter().position(|x| *x == r).unwrap();
+        for _ in 0..at(PrivacyRow::MessagesPin) {
+            m.key(Input::Down);
+        }
+        assert!(m.key(Input::Edit).is_empty() && m.modal.is_none(), "nothing to remove yet");
+        assert_eq!(m.key(Input::Run), vec![Action::EditText(Field::Pin)]);
+        assert!(m.written(Field::Pin, Some("12".into())).is_empty());
+        assert!(m.modal.take().is_some(), "too short says so");
+        assert_eq!(m.written(Field::Pin, Some("2468".into())), vec![Action::EditText(Field::PinAgain)]);
+        assert!(m.written(Field::PinAgain, Some("2469".into())).is_empty());
+        assert!(m.modal.take().is_some() && !m.messages_pin_set, "two that differ change nothing");
+        m.written(Field::Pin, Some("2468".into()));
+        assert_eq!(m.written(Field::PinAgain, Some("2468".into())), vec![Action::Set("messages_pin", "2468".into())]);
+        assert!(m.messages_pin_set);
+        // Cancelling the second forgets the first.
+        m.written(Field::Pin, Some("1111".into()));
+        m.written(Field::PinAgain, None);
+        assert!(m.new_pin.is_none());
+        // Removing asks first.
+        assert!(m.key(Input::Edit).is_empty() && m.modal.is_some());
+        assert_eq!(m.key(Input::Run), vec![Action::Set("messages_pin", String::new())]);
+        // Stay open steps through 1, 5 and 15 minutes.
+        m.key(Input::Down);
+        assert_eq!(m.key(Input::Right), vec![Action::Set("messages_open_for", "900".into())]);
+        assert_eq!(m.key(Input::Right), vec![Action::Set("messages_open_for", "60".into())]);
+        assert_eq!(m.key(Input::Left), vec![Action::Set("messages_open_for", "900".into())]);
+        assert!(valid_pin("123456789012") && !valid_pin("1234567890123"));
     }
 
     #[test]

@@ -11,6 +11,7 @@ name = "dolphone-desktop"
 path = "src/main.rs"
 
 [dependencies]
+futures-util = { version = "0.3", default-features = false }
 phone-api.workspace = true
 phone-bus.workspace = true
 phone-core.workspace = true

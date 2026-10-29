@@ -883,6 +883,10 @@ mod tests {
         let mut m = model();
         m.alert_received(alert_info(phone_core::model::AlertLevel::Extreme));
         assert!(ink(&shot("alert", &m)) > 500);
+        let mut amber = alert_info(phone_core::model::AlertLevel::Amber);
+        amber.id = 2;
+        m.alert_received(amber);
+        shot("alert-queue", &m);
         let mut m = model();
         m.status.state = "locked".into();
         m.number = "12".into();
@@ -988,6 +992,46 @@ mod tests {
         m.key(Input::Run, true, Instant::now());
         assert_eq!(m.top(), Top::Browse);
         assert!(m.alert_received(alert_info(phone_core::model::AlertLevel::Info)).is_empty(), "info is quiet");
+    }
+
+    #[test]
+    fn alerts_queue_the_most_severe_first() {
+        use phone_core::model::AlertLevel;
+        let mut m = model();
+        let mut next_id = 0;
+        let mut send = |m: &mut Model, level| {
+            next_id += 1;
+            let mut a = alert_info(level);
+            a.id = next_id;
+            m.alert_received(a)
+        };
+        send(&mut m, AlertLevel::Test);
+        send(&mut m, AlertLevel::Severe);
+        assert_eq!(send(&mut m, AlertLevel::National), vec![Action::Buzz(Buzz::Alert)], "each one buzzes");
+        send(&mut m, AlertLevel::Amber);
+        send(&mut m, AlertLevel::Extreme);
+        let mut seen = Vec::new();
+        while let Top::Alert(a) = m.top() {
+            let v = view::view(&m, 1_793_000_000, 0);
+            let view::Body::Detail { breadcrumb, .. } = &v.body else { panic!("an alert is a detail screen") };
+            seen.push((AlertLevel::from_u8(a.level), breadcrumb.clone(), v.buttons[4].clone()));
+            std::thread::sleep(model::FRESH);
+            m.key(Input::Run, true, Instant::now());
+        }
+        let levels: Vec<_> = seen.iter().map(|s| s.0).collect();
+        assert_eq!(
+            levels,
+            [AlertLevel::National, AlertLevel::Extreme, AlertLevel::Severe, AlertLevel::Amber, AlertLevel::Test]
+        );
+        assert_eq!(seen[0].1, "> Emergency alert 1 of 5");
+        assert_eq!(seen[0].2, "Next");
+        assert_eq!((seen[4].1.as_str(), seen[4].2.as_str()), ("> Emergency alert 5 of 5", "Dismiss"));
+        assert_eq!(m.top(), Top::Browse);
+        // The same alert heard twice is shown once.
+        let a = alert_info(AlertLevel::Severe);
+        m.alert_received(a.clone());
+        assert!(m.alert_received(a).is_empty());
+        assert_eq!(m.alerts.position(), (1, 1));
     }
 
     #[test]

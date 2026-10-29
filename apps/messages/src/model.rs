@@ -32,6 +32,8 @@ pub enum Screen {
     Found,
     /// The text, ready to go, with its cost shown.
     Preview,
+    /// Messages wants its PIN: nothing of the texts is shown.
+    Locked,
 }
 
 /// What the keyboard is for when it is up.
@@ -43,6 +45,8 @@ pub enum Writing {
     Body,
     /// Words to search for.
     Search,
+    /// The Messages PIN.
+    Pin,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,6 +64,8 @@ pub enum Action {
     /// Send a failed text again.
     Retry(i64),
     Search(String),
+    /// Try the Messages PIN.
+    Unlock(String),
     Quit,
 }
 
@@ -110,6 +116,11 @@ pub struct Model {
     pub query: String,
     pub found: Vec<MessageInfo>,
     pub found_sel: usize,
+    /// Messages wants its PIN, as phoned last said.
+    pub locked: bool,
+    /// A number the Dialer asked to text while Messages was locked, to open once
+    /// the PIN is in.
+    pub waiting_peer: Option<String>,
 }
 
 impl Model {
@@ -134,6 +145,8 @@ impl Model {
             query: String::new(),
             found: Vec::new(),
             found_sel: 0,
+            locked: false,
+            waiting_peer: None,
         }
     }
 
@@ -178,9 +191,51 @@ impl Model {
 
     /// The Dialer (or the desktop) asked to text this number.
     pub fn compose_to(&mut self, peer: &str) -> Vec<Action> {
+        if self.locked {
+            // Kept for after the PIN; the keyboard is the PIN's until then.
+            self.waiting_peer = Some(peer.to_string());
+            return Vec::new();
+        }
         let mut a = self.open(peer);
         a.push(Action::Write(Writing::Body, String::new()));
         a
+    }
+
+    /// The texts' lock: phoned said Messages is (or is no longer) locked, or a
+    /// load was refused because it is. Locking forgets what was on screen, so
+    /// nothing of it shows behind the PIN; unlocking loads the list again.
+    pub fn set_locked(&mut self, locked: bool) -> Vec<Action> {
+        if locked == self.locked {
+            return Vec::new();
+        }
+        self.locked = locked;
+        self.notice = None;
+        self.confirm_delete = false;
+        if locked {
+            self.screen = Screen::Locked;
+            self.threads.clear();
+            self.messages.clear();
+            self.found.clear();
+            self.draft.clear();
+            self.peer.clear();
+            return vec![Action::Write(Writing::Pin, String::new())];
+        }
+        self.screen = Screen::Threads;
+        let mut a = vec![Action::LoadThreads];
+        if let Some(peer) = self.waiting_peer.take() {
+            a.extend(self.compose_to(&peer));
+        }
+        a
+    }
+
+    /// What the PIN keyboard lets through: 4 to 12 digits, as phoned takes.
+    pub fn valid_pin(t: &str) -> bool {
+        (4..=12).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_digit())
+    }
+
+    /// Whether phoned's error means only that Messages is locked.
+    pub fn is_lock_error(text: &str) -> bool {
+        text.starts_with("Messages is locked")
     }
 
     // Events.
@@ -199,6 +254,9 @@ impl Model {
     /// A new message from phoned. Returns what to do about it (reload the list;
     /// mark read when it lands in the open conversation).
     pub fn message_added(&mut self, m: MessageInfo) -> Vec<Action> {
+        if self.locked {
+            return Vec::new();
+        }
         let mut a = vec![Action::LoadThreads];
         if number::same_party(&m.peer, &self.peer)
             && matches!(self.screen, Screen::Conversation | Screen::Preview | Screen::Options)
@@ -225,6 +283,14 @@ impl Model {
 
     /// The keyboard finished.
     pub fn written(&mut self, what: Writing, text: Option<String>) -> Vec<Action> {
+        if what == Writing::Pin {
+            // Leaving the PIN leaves Messages: there is nothing else to show.
+            return match text {
+                Some(pin) if !pin.is_empty() => vec![Action::Unlock(pin)],
+                Some(_) => Vec::new(),
+                None => vec![Action::Quit],
+            };
+        }
         let Some(text) = text else {
             // Cancelled: back to where the keyboard was opened from.
             if what == Writing::To || (what == Writing::Search && self.screen != Screen::Found) {
@@ -260,6 +326,7 @@ impl Model {
                 self.screen = Screen::Found;
                 vec![Action::Search(q)]
             }
+            Writing::Pin => Vec::new(),
             Writing::Body => {
                 let body = text::clean(&text, text::MAX_BODY);
                 if body.trim().is_empty() {
@@ -287,6 +354,11 @@ impl Model {
         }
         match self.screen {
             Screen::Threads => self.key_threads(input),
+            Screen::Locked => match input {
+                Input::Run | Input::Ok | Input::Edit => vec![Action::Write(Writing::Pin, String::new())],
+                Input::Escape => vec![Action::Quit],
+                _ => Vec::new(),
+            },
             Screen::Conversation => self.key_conversation(input, rows, visible),
             Screen::Options => self.key_options(input),
             Screen::Found => match input {
@@ -545,6 +617,41 @@ mod tests {
         assert!(m.notice.is_some());
         let a = m.key(Input::Run, 0, 8);
         assert_eq!(a, vec![Action::Delete("+61491570156".into()), Action::LoadThreads]);
+    }
+
+    #[test]
+    fn locked_messages_ask_for_the_pin() {
+        let mut m = Model::new("AU", Book::default());
+        m.set_threads(vec![ThreadInfo {
+            peer: "+61491570156".into(),
+            last_body: "hi".into(),
+            last_at: 1,
+            last_direction: 0,
+            unread: 1,
+        }]);
+        m.open("0491570156");
+        m.set_conversation("+61491570156", vec![msg(1, "+61491570156", 0, "secret")]);
+        // A load refused for the lock locks, as the signal does.
+        assert!(Model::is_lock_error("Messages is locked: enter the PIN"));
+        assert_eq!(m.set_locked(true), vec![Action::Write(Writing::Pin, String::new())]);
+        assert_eq!(m.screen, Screen::Locked);
+        assert!(m.threads.is_empty() && m.messages.is_empty(), "nothing is left behind the PIN");
+        assert!(m.set_locked(true).is_empty(), "a second word of it changes nothing");
+        // Texts arriving while locked fetch nothing.
+        assert!(m.message_added(msg(2, "+61491570156", 0, "")).is_empty());
+        // The Dialer's handoff waits for the PIN.
+        assert!(m.compose_to("0491570157").is_empty());
+        assert_eq!(m.written(Writing::Pin, Some("1234".into())), vec![Action::Unlock("1234".into())]);
+        // A wrong PIN leaves it locked; Run types it again, Escape leaves.
+        assert_eq!(m.key(Input::Run, 0, 8), vec![Action::Write(Writing::Pin, String::new())]);
+        assert_eq!(m.written(Writing::Pin, None), vec![Action::Quit]);
+        assert_eq!(m.key(Input::Escape, 0, 8), vec![Action::Quit]);
+        // Right: the list loads, and the waiting conversation opens to write in.
+        let a = m.set_locked(false);
+        assert_eq!(a[0], Action::LoadThreads);
+        assert!(a.contains(&Action::Write(Writing::Body, String::new())));
+        assert_eq!(m.peer, "+61491570157");
+        assert!(Model::valid_pin("0000") && !Model::valid_pin("123") && !Model::valid_pin("12a4"));
     }
 
     #[test]

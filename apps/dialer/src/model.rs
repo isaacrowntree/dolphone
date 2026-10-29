@@ -203,8 +203,8 @@ pub struct Model {
     pub ringer: String,
     pub missed: u32,
     pub unread: u32,
-    /// The emergency alert on screen, until dismissed.
-    pub alert: Option<AlertInfo>,
+    /// Emergency alerts not yet dismissed, the most severe on screen.
+    pub alerts: phone_bus::alerts::AlertQueue,
     /// Conversations, for the unread ones on Today.
     pub threads: Vec<ThreadInfo>,
     /// How long a hold is.
@@ -260,7 +260,7 @@ impl Model {
             ringer: "ring".into(),
             missed: 0,
             unread: 0,
-            alert: None,
+            alerts: Default::default(),
             threads: Vec::new(),
             hold: HOLD,
             hint: None,
@@ -294,7 +294,7 @@ impl Model {
         // A ringing call first: it cannot wait, and answering it does not hide the
         // alert, which is back on top once the call is dealt with.
         let ringing = self.ringing().cloned();
-        if let (Some(a), None) = (&self.alert, &ringing) {
+        if let (Some(a), None) = (self.alerts.current(), &ringing) {
             return Top::Alert(a.clone());
         }
         if let Some(r) = self.pending.first() {
@@ -485,7 +485,10 @@ impl Model {
         if a.level == phone_core::model::AlertLevel::Info as u8 {
             return Vec::new();
         }
-        self.alert = Some(a);
+        // One heard twice is not news; one waiting behind another still buzzes.
+        if !self.alerts.push(a) {
+            return Vec::new();
+        }
         self.settle();
         vec![Action::Buzz(Buzz::Alert)]
     }
@@ -554,7 +557,7 @@ impl Model {
         match self.top() {
             Top::Alert(_) => {
                 if matches!(input, Input::Run | Input::Ok | Input::Escape) {
-                    self.alert = None;
+                    self.alerts.dismiss();
                     self.settle();
                 }
                 Vec::new()

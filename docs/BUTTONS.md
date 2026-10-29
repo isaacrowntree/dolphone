@@ -27,9 +27,14 @@ the background ignores it.
 | Reply picker | choose | back | | | send and decline | | |
 | In call | Ok swaps two calls; hold Ok merges them | | keypad | audio route | **End** (ignored for 1.5 s after answering) | mute / unmute | |
 | In-call keypad | move, Ok sends the tone | close | close | audio route | End | | tap a key |
-| Emergency alert | Ok dismisses | dismiss | | | **Dismiss** | | |
+| Emergency alert | Ok dismisses | dismiss | | | **Dismiss** (**Next** while more wait) | | |
 | Confirmation | | **Deny** | | | **Allow** | | |
 | Service code reply | | close | | reply on the keypad | | | |
+
+Emergency alerts not yet dismissed wait in turn rather than replacing each other:
+the most severe first (National, Extreme, Severe, Amber, Test), alerts of one level
+in the order they came, with "1 of 3" in the breadcrumb while more wait. A worse
+alert arriving takes the screen at once; the one it covered comes back after it.
 
 Keys are ignored for 400 ms after a call, an alert or a confirmation appears unasked,
 so a press meant for whatever was on screen cannot answer a call or allow a request.
@@ -68,6 +73,13 @@ emergency alert stays still when the ringer is on Silent.
 | Quick reply | choose | back | | edit it first | use (to the preview) |
 | Keyboard (FlipCTL's) | type | cancel | 123 | backspace | done |
 | Preview | | edit again | | edit again | **Send** |
+| Locked (a Messages PIN is set) | Ok types the PIN | exit | | type the PIN | **Unlock**: type the PIN |
+| PIN keyboard (opens on 123, the PIN shown as \*) | type | exit Messages | ABC | backspace | **Unlock** (4 to 12 digits) |
+
+With a Messages PIN set (Settings > Privacy), Messages opens on the PIN and shows
+nothing of the texts until it is right; it stays open for the time set there, then
+asks again. A wrong PIN says so; after five, phoned makes you wait. A number the
+Dialer hands over while locked opens once the PIN is in.
 
 A picture message shows its text with `[Picture]` (or `[Audio]`, `[Contact]`) below:
 the panel is too small for the picture, which the desktop app shows. A group
@@ -84,6 +96,8 @@ conversation is one thread, named after everyone on it; a reply goes to all of t
 | Bluetooth device | | pair / connect / disconnect | forget | copy contacts (a paired phone) | |
 | Blocked number | | unblock | unblock | | |
 | A program allowed to text | | revoke | revoke | | |
+| Privacy > Messages PIN | Right sets | **Set** / **Change**: the new PIN on the keyboard, then again | **Remove** (asks first) | | up a page |
+| Privacy > Messages stay open | step 1, 5, 15 min | step | | | up a page |
 | Modem page | | **Set up** when the modem's setup has changes to make, or **Turn on** when ModemManager's debug mode is off; both ask first | | | up a page |
 
 ## Desktop app
@@ -101,4 +115,15 @@ conversation is one thread, named after everyone on it; a reply goes to all of t
 | Space | choose a list row, or press the control with the focus |
 
 The call card opens with the focus on **Answer** (on **Keypad** once the call is
-live, away from End); a confirmation on **Deny**; an alert on **Dismiss**.
+live, away from End); a confirmation on **Deny**; an alert on **Dismiss** (**Next
+alert** while more wait, with "1 of 3" beside the time; the most severe comes first).
+
+With a Messages PIN set, the Messages page is a PIN field and **Unlock** (Enter
+unlocks too) until it is right; once open, **Lock** beside New closes it again.
+Settings > Messages PIN sets or changes it (the new PIN twice), removes it, and
+picks how long Messages stays open (1, 5 or 15 minutes).
+
+In a conversation, **Attach** opens the desktop's file chooser (through the XDG
+desktop portal) for pictures; what is picked is named above the text, **Remove**
+drops it, and **Send** sends the lot as one picture message. Without a portal,
+Attach says so.

@@ -10,6 +10,7 @@
 //! [`Event::Connected`] each time it comes and goes, which is a front end's cue to
 //! reload what it shows.
 
+pub mod alerts;
 pub mod files;
 pub mod haptics;
 
@@ -229,6 +230,16 @@ impl Bus {
     pub fn send(&self, to: String, body: String) {
         self.run(move |c| async move {
             Ok(vec![Event::Placed { kind: "sms", placed: c.messages.send(&to, &body).await? }])
+        });
+    }
+
+    /// A picture message: `to` is one number or several (a group), and `files` the
+    /// paths of what goes with the text.
+    pub fn send_mms(&self, to: Vec<String>, body: String, files: Vec<String>) {
+        self.run(move |c| async move {
+            let to: Vec<&str> = to.iter().map(String::as_str).collect();
+            let files: Vec<&str> = files.iter().map(String::as_str).collect();
+            Ok(vec![Event::Placed { kind: "mms", placed: c.messages.send_mms(&to, &body, &files).await? }])
         });
     }
 }

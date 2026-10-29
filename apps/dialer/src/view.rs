@@ -108,7 +108,7 @@ fn fit(s: &str, budget: i32) -> String {
 
 pub fn view(m: &Model, now: i64, frame: u32) -> View {
     let mut v = match m.top() {
-        Top::Alert(a) => return alert(&a, now),
+        Top::Alert(a) => return alert(&a, m.alerts.position(), now),
         Top::Confirm(_) | Top::Browse => browse(m, now),
         Top::Incoming(c) => incoming(m, &c, frame),
         Top::InCall => in_call(m, now),
@@ -563,7 +563,9 @@ fn in_call(m: &Model, now: i64) -> View {
 }
 
 /// An emergency alert, full screen: the level as the title, the whole text.
-fn alert(a: &phone_api::AlertInfo, now: i64) -> View {
+/// `at` is which of how many are waiting: more than one shows "1 of 3", and
+/// Run says Next until the last.
+fn alert(a: &phone_api::AlertInfo, at: (usize, usize), now: i64) -> View {
     let level = phone_core::model::AlertLevel::from_u8(a.level);
     let mut rows = vec![
         Row { kind: 5, label: level.label().to_uppercase(), value: when::short(a.at, now) },
@@ -571,8 +573,14 @@ fn alert(a: &phone_api::AlertInfo, now: i64) -> View {
     ];
     rows.extend(wrap(&a.text, 240).into_iter().map(|l| Row { kind: 3, label: l, value: String::new() }));
     View {
-        body: Body::Detail { rows, breadcrumb: "> Emergency alert".into() },
-        buttons: buttons(["", "", "", "", "Dismiss"]),
+        body: Body::Detail {
+            rows,
+            breadcrumb: match at {
+                (_, 0 | 1) => "> Emergency alert".into(),
+                (n, of) => format!("> Emergency alert {n} of {of}"),
+            },
+        },
+        buttons: buttons(["", "", "", "", if at.0 < at.1 { "Next" } else { "Dismiss" }]),
         modal: None,
     }
 }

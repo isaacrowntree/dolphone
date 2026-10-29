@@ -6,6 +6,7 @@ use phone_api::{
     keys, AlertInfo, AuditEntry, BtDevice, CallInfo, CallRecordInfo, Grant, MessageInfo, ModemStatus, Request,
     RouteInfo, ThreadInfo,
 };
+use phone_bus::alerts::AlertQueue;
 use phone_bus::{Bus, Event};
 use phone_core::contacts::Book;
 use phone_core::model::{CallState, MessageState, Outcome, Route};
@@ -38,6 +39,15 @@ const ALERT_FLAGS: [Flag; 4] = [
     (keys::ALERTS_AMBER, "Amber alerts (missing children)"),
     (keys::ALERTS_TEST, "Test alerts"),
 ];
+
+/// How long Messages stays open after its PIN, in seconds, as the desktop's menu
+/// lists them (1, 5 and 15 minutes; the labels are in app.slint).
+const OPEN_FOR: [&str; 3] = ["60", "300", "900"];
+
+/// What a PIN may be: 4 to 12 digits, as phoned takes.
+fn valid_pin(t: &str) -> bool {
+    (4..=12).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_digit())
+}
 
 /// The panel's hold times, in milliseconds, as the desktop's menu lists them (the
 /// labels are in app.slint): up to three seconds, for hands that press slowly.
@@ -78,8 +88,14 @@ pub struct App {
     pub laptops: Vec<(String, String, bool)>,
     /// The tray icon and launcher badge, when running for real.
     pub tray: Option<crate::tray::Tray>,
-    /// The alert on screen, until dismissed.
-    pub alert: Option<AlertInfo>,
+    /// Alerts not yet dismissed: the most severe is on screen.
+    pub waiting_alerts: AlertQueue,
+    /// Messages wants its PIN; whether one is set; how long it stays open.
+    pub locked: bool,
+    pub pin_set: bool,
+    pub open_for: String,
+    /// Pictures to send with the next text, as paths.
+    pub attachments: Vec<String>,
     pub bt: (bool, bool),
     pub devices: Vec<BtDevice>,
     pub blocked: Vec<String>,
@@ -133,7 +149,11 @@ impl App {
             found: Vec::new(),
             tray: None,
             laptops: Vec::new(),
-            alert: None,
+            waiting_alerts: AlertQueue::default(),
+            locked: false,
+            pin_set: false,
+            open_for: keys::MESSAGES_OPEN_FOR.1.into(),
+            attachments: Vec::new(),
             bt: (false, false),
             devices: Vec::new(),
             blocked: Vec::new(),
@@ -167,6 +187,7 @@ impl App {
         let Some(b) = self.bus() else { return };
         b.refresh_calls();
         b.refresh_recents(200);
+        b.refresh_lock();
         b.refresh_threads();
         b.refresh_pending();
         b.refresh_status();
@@ -184,6 +205,8 @@ impl App {
                 "long_press_ms",
                 "uplink_alert_to",
                 "uplink_interface",
+                keys::MESSAGES_PIN.0,
+                keys::MESSAGES_OPEN_FOR.0,
             ];
             for k in all_flags().map(|f| f.0 .0).chain(extra) {
                 out.push(Event::Setting(k.into(), c.settings.get(k).await?));
@@ -266,6 +289,19 @@ impl App {
         if changed || timing || phone_core::now() / 60 != self.drawn_minute {
             self.render();
         }
+    }
+
+    /// Set the Messages PIN, or remove it with an empty one, and read back whether
+    /// phoned holds one, so the page says what is so rather than what was asked.
+    fn set_pin(&mut self, pin: String) {
+        let Some(b) = self.bus() else { return };
+        b.run(move |c| async move {
+            c.settings.set(keys::MESSAGES_PIN.0, &pin).await?;
+            Ok(vec![
+                Event::Setting(keys::MESSAGES_PIN.0.into(), c.settings.get(keys::MESSAGES_PIN.0).await?),
+                Event::Notice(if pin.is_empty() { "Messages PIN removed" } else { "Messages PIN set" }.into()),
+            ])
+        });
     }
 
     fn reload_contacts(&mut self) {
@@ -378,6 +414,8 @@ impl App {
             Event::Threads(t) => self.threads = t,
             Event::Unread(n) => self.unread = n,
             Event::Conversation(p, m) if number::same_party(&p, &self.peer) => self.messages = m,
+            // Locked, there is nothing to fetch: phoned would refuse it.
+            Event::MessageAdded(_) if self.locked => {}
             Event::MessageAdded(m) => {
                 if number::same_party(&m.peer, &self.peer) {
                     // The signal carries no text; fetch the conversation.
@@ -444,6 +482,10 @@ impl App {
                     self.hold_ms = v;
                 } else if k == "sip_use" {
                     self.sip_always = v == "always";
+                } else if k == keys::MESSAGES_PIN.0 {
+                    self.pin_set = v == "set";
+                } else if k == keys::MESSAGES_OPEN_FOR.0 {
+                    self.open_for = v;
                 } else if let Some(f) = self.flags.iter_mut().find(|(n, _)| *n == k) {
                     f.1 = v == "true";
                 }
@@ -463,12 +505,16 @@ impl App {
             Event::Grants(g) => self.grants = g,
             Event::Audit(a) => self.audit = a,
             Event::Alert(a) => {
-                if a.level != phone_core::model::AlertLevel::Info as u8 {
-                    self.alert = Some(a.clone());
+                if a.level != phone_core::model::AlertLevel::Info as u8 && self.waiting_alerts.push(a.clone()) {
                     self.ui.window().show().ok();
                 }
-                self.alerts.insert(0, a);
+                if !self.alerts.iter().any(|x| x.id == a.id) {
+                    self.alerts.insert(0, a);
+                }
             }
+            Event::Locked(locked) => self.set_locked(locked),
+            // A load refused for the lock is the lock screen, not news.
+            Event::Error(t) if t.starts_with("Messages is locked") => self.set_locked(true),
             Event::Bluetooth { available, powered } => self.bt = (available, powered),
             Event::Devices(d) => self.devices = d,
             Event::Passkey(_, key) => self.say(format!("Bluetooth pairing code {key:06}: check it matches the device")),
@@ -482,6 +528,41 @@ impl App {
             _ => {}
         }
         self.render();
+    }
+
+    /// Messages locked or opened. Locked, what it showed is forgotten, so none of
+    /// it is left in the window's lists; opened, it is loaded again.
+    fn set_locked(&mut self, locked: bool) {
+        let was = std::mem::replace(&mut self.locked, locked);
+        if locked {
+            self.threads.clear();
+            self.messages.clear();
+            self.found.clear();
+            self.attachments.clear();
+        } else if was {
+            if let Some(b) = self.bus() {
+                b.refresh_threads();
+                if !self.peer.is_empty() {
+                    b.load_conversation(self.peer.clone());
+                }
+            }
+        }
+    }
+
+    /// The file chooser answered.
+    pub fn picked(&mut self, p: crate::portal::Picked) {
+        match p {
+            crate::portal::Picked::Files(f) => {
+                for path in f {
+                    if !self.attachments.contains(&path) {
+                        self.attachments.push(path);
+                    }
+                }
+                self.render();
+            }
+            crate::portal::Picked::Cancelled => {}
+            crate::portal::Picked::Unavailable(why) => self.say(why),
+        }
     }
 
     // Drawing.
@@ -657,6 +738,12 @@ impl App {
             })
             .collect();
         sync(ui.get_bubbles(), bubbles, |m| ui.set_bubbles(m));
+        ui.set_messages_locked(self.locked);
+        ui.set_messages_pin_set(self.pin_set);
+        ui.set_open_for_index(OPEN_FOR.iter().position(|o| *o == self.open_for).unwrap_or(1) as i32);
+        ui.set_attached(
+            self.attachments.iter().map(|p| crate::portal::file_name(p)).collect::<Vec<_>>().join(", ").into(),
+        );
         let draft = ui.get_draft().to_string();
         ui.set_draft_cost(if draft.is_empty() {
             "".into()
@@ -818,12 +905,15 @@ impl App {
         ui.set_hold_index(HOLDS.iter().position(|h| *h == self.hold_ms).unwrap_or(1) as i32);
         ui.set_sip_always(self.sip_always);
         ui.set_sip_status(self.status.as_ref().map(|s| s.sip.as_str()).unwrap_or("").into());
-        match &self.alert {
+        match self.waiting_alerts.current() {
             Some(a) => {
                 ui.set_alert_visible(true);
                 ui.set_alert_title(phone_core::model::AlertLevel::from_u8(a.level).label().to_uppercase().into());
                 ui.set_alert_text(a.text.as_str().into());
                 ui.set_alert_time(when::short(a.at, now).into());
+                let (n, of) = self.waiting_alerts.position();
+                ui.set_alert_count(self.waiting_alerts.count().into());
+                ui.set_alert_more(n < of);
             }
             None => ui.set_alert_visible(false),
         }
@@ -1200,14 +1290,92 @@ pub fn wire(ui: &AppWindow) {
     ui.on_send(|t| {
         with_app(|a| {
             let body = t.trim().to_string();
-            if body.is_empty() || a.peer.is_empty() {
+            if (body.is_empty() && a.attachments.is_empty()) || a.peer.is_empty() {
                 return;
             }
+            let files = std::mem::take(&mut a.attachments);
             if let Some(b) = a.bus() {
-                b.send(a.peer.clone(), body);
+                if files.is_empty() {
+                    // A group (numbers with commas) goes as MMS through Send too.
+                    b.send(a.peer.clone(), body);
+                } else {
+                    let to = a.peer.split(',').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect();
+                    b.send_mms(to, body, files);
+                }
             }
             a.ui.set_draft("".into());
             a.render();
+        })
+    });
+    ui.on_attach(|| {
+        with_app(|a| {
+            if a.peer.is_empty() {
+                return;
+            }
+            // The chooser waits on the person, so it is asked off the window's
+            // thread, and its answer brought back to it.
+            let title = format!("Pictures to send to {}", a.name_for(&a.peer));
+            let spawned = std::thread::Builder::new().name("file-chooser".into()).spawn(move || {
+                let picked = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                    Ok(rt) => rt.block_on(crate::portal::pick_pictures(&title)),
+                    Err(e) => crate::portal::Picked::Unavailable(format!("The file chooser failed: {e}")),
+                };
+                let _ = slint::invoke_from_event_loop(move || with_app(|a| a.picked(picked)));
+            });
+            if spawned.is_err() {
+                a.say("The file chooser could not start");
+            }
+        })
+    });
+    ui.on_clear_attachments(|| {
+        with_app(|a| {
+            a.attachments.clear();
+            a.render();
+        })
+    });
+    ui.on_unlock(|pin| {
+        with_app(|a| {
+            let pin = pin.trim().to_string();
+            a.ui.set_unlock_pin("".into());
+            if pin.is_empty() {
+                return;
+            }
+            if let Some(b) = a.bus() {
+                b.unlock(pin);
+            }
+        })
+    });
+    ui.on_lock_messages(|| {
+        with_app(|a| {
+            if let Some(b) = a.bus() {
+                b.lock();
+            }
+        })
+    });
+    ui.on_set_messages_pin(|pin, again| {
+        with_app(|a| {
+            let (pin, again) = (pin.trim().to_string(), again.trim().to_string());
+            if !valid_pin(&pin) {
+                a.say("A PIN is 4 to 12 digits");
+                return;
+            }
+            if pin != again {
+                a.say("The two PINs differ: type the same one twice");
+                return;
+            }
+            a.ui.set_new_pin("".into());
+            a.ui.set_new_pin_again("".into());
+            a.set_pin(pin);
+        })
+    });
+    ui.on_remove_messages_pin(|| with_app(|a| a.set_pin(String::new())));
+    ui.on_set_open_for(|i| {
+        with_app(|a| {
+            let secs = OPEN_FOR[(i.max(0) as usize).min(OPEN_FOR.len() - 1)].to_string();
+            a.open_for = secs.clone();
+            if let Some(b) = a.bus() {
+                b.run(move |c| async move { c.settings.set(keys::MESSAGES_OPEN_FOR.0, &secs).await.map(|_| vec![]) });
+            }
         })
     });
     ui.on_thread_call(|| {
@@ -1538,7 +1706,7 @@ pub fn wire(ui: &AppWindow) {
     });
     ui.on_dismiss_alert(|| {
         with_app(|a| {
-            a.alert = None;
+            a.waiting_alerts.dismiss();
             a.render();
         })
     });
