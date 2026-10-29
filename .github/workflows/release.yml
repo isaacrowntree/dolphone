@@ -35,7 +35,11 @@ jobs:
       - name: flipctl-slint, for its bundler and pinned AppImage tools
         if: matrix.arch == 'arm64'
         run: |
+          # The commit the panel apps are locked to, so the fonts, licences and
+          # packing tools in the bundles match the code linked into them.
+          rev=$(sed -n 's|^source = "git+https://github.com/flipperdevices/flipctl-slint#\(.*\)"|\1|p' apps/dialer/Cargo.lock | head -1)
           git clone -q https://github.com/flipperdevices/flipctl-slint "$HOME/flipctl-slint"
+          git -C "$HOME/flipctl-slint" checkout -q "$rev"
           cd "$HOME/flipctl-slint" && tools/appimage/build.sh --native apps/sysmon >/dev/null
           echo "UPSTREAM=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
       - name: The Debian package (and on arm64 the panel bundles)

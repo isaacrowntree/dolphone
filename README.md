@@ -131,9 +131,9 @@ On an Apple Silicon Mac with [OrbStack](https://orbstack.dev):
 ```sh
 scripts/dev-setup.sh                 # a Debian 13 arm64 machine, FlipCTL built, fake modem in
 orb -m f1 scripts/run-dev.sh         # build, install, start; open http://f1.orb.local:8899/
-orb -m f1 phonectl fake ring 0491570156          # and watch the panel
-orb -m f1 phonectl fake sms 0491570156 "hello"
-orb -m f1 phonectl fake broadcast 4370 "Test alert"
+orb -m f1 ~/.local/bin/phonectl fake ring 0491570156     # and watch the panel
+orb -m f1 ~/.local/bin/phonectl fake sms 0491570156 "hello"
+orb -m f1 ~/.local/bin/phonectl fake broadcast 4370 "Test alert"
 ```
 
 More in [docs/DEVELOPING.md](docs/DEVELOPING.md).
@@ -185,7 +185,11 @@ phonectl device                                     # which device profile, and 
 
 ## License
 
-Source: MIT. The panel apps link Slint through flipctl-app under GPL-3.0-only, so
-their **binaries are GPL-3.0-only**; each release carries the full corresponding
-source. The panel fonts are CC BY-SA 3.0, Unlicense and MIT; see each bundle's
-`NOTICE.md` and `THIRD-PARTY-LICENSES.md`.
+Source: MIT. The panel apps and the desktop app link Slint (the panel apps through
+flipctl-app) under GPL-3.0-only, so **those binaries are GPL-3.0-only**; each
+release carries the full corresponding source, and the Debian package says where
+it is in `/usr/share/doc/dolphone/copyright`. phoned, phonectl and the gateway are
+MIT, with their dependencies' notices in `THIRD-PARTY-LICENSES.md` (SQLCipher's
+among them). The panel fonts are CC BY-SA 3.0, Unlicense and MIT, and the AppImage
+runtime at the head of each bundle has its own notices; see each bundle's
+`NOTICE.md`.

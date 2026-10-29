@@ -78,7 +78,23 @@ cp /usr/share/dolphone/apps/dolphone-*-aarch64.fap.AppImage "$HOME/Apps/Phone/"
 echo "installed to $HOME/Apps/Phone: Phone, Messages, Phone Settings"
 EOF
 [ "$ARCH" = arm64 ] && chmod 0755 "$PKG/usr/bin/dolphone-install-apps"
-cp "$ROOT/LICENSE" "$PKG/usr/share/doc/dolphone/copyright"
+# What is under which licence, and where the source of the GPL binaries is.
+{
+    cat <<COPYRIGHT
+Dolphone $VERSION
+Source: https://github.com/isaacrowntree/dolphone
+
+Dolphone's own source is MIT (below). dolphone-desktop, and the panel apps in
+/usr/share/dolphone/apps, link the Slint toolkit under its GPL-3.0-only option, so
+those binaries are GPL-3.0-only (LICENSES/GPL-3.0-only.txt); their complete
+corresponding source is attached to this version's release on GitHub, as
+dolphone-$VERSION-source.tar.zst, and is in the repository at this version's tag.
+phoned, phonectl and dolphone-gateway are MIT; their dependencies' notices are in
+THIRD-PARTY-LICENSES.md.
+
+COPYRIGHT
+    cat "$ROOT/LICENSE"
+} >"$PKG/usr/share/doc/dolphone/copyright"
 cp -r "$ROOT/LICENSES" "$PKG/usr/share/doc/dolphone/LICENSES"
 # Attribution for every crate in the daemon, CLI and desktop app (SQLCipher among
 # them); scripts/gen-third-party-licenses.sh keeps it in step with Cargo.lock.

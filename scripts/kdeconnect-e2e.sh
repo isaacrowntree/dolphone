@@ -64,7 +64,9 @@ expect "a pair request waits for the device" "$out" "kdeconnect"
 phonectl confirm "$(awk '{print $1; exit}' <<<"$out")" >/dev/null
 sleep 1.5
 expect "allowed there, the laptop is paired" "$(kdeconnect-cli -l 2>&1)" "paired and reachable"
-expect "on both sides" "$(phonectl kdeconnect)" "paired "
+# The second column is "paired" or "unpaired": compare it whole.
+state=$(phonectl kdeconnect | awk 'NR==1 {print $2}')
+[ "$state" = paired ] && pass "on both sides" || fail "on both sides" "$(phonectl kdeconnect)"
 
 echo "texts"
 kdeconnect-cli --send-sms "Hello from the laptop" --destination 0491570196 -d "$ID" >/dev/null 2>&1
@@ -81,15 +83,14 @@ expect "the laptop reads the conversation list" "$out" "Text for the laptop"
 echo "calls"
 phonectl fake ring 0491570198 >/dev/null
 sleep 1.5
-expect "a ringing call reaches the laptop's telephony plugin" "$(grep -i 'telephony' /tmp/dolphone-kdc-kde.log)" "telephony"
+expect "a ringing call reaches the laptop's telephony plugin" "$(cat /tmp/dolphone-kdc-kde.log)" 'notification with type: "callReceived"'
 phonectl fake hangup >/dev/null
 
 echo "unpairing"
 phonectl kdeconnect unpair "$(phonectl kdeconnect | awk '{print $1; exit}')"
 sleep 1
-expect "unpairing from the phone unpairs the laptop" "$(kdeconnect-cli -l 2>&1)" "Test Phone"
 refute_paired=$(kdeconnect-cli -l 2>&1 | grep -c "paired and")
-[ "$refute_paired" = 0 ] && pass "and it is no longer paired" || fail "unpaired" "$(kdeconnect-cli -l 2>&1)"
+[ "$refute_paired" = 0 ] && pass "unpairing from the phone unpairs the laptop" || fail "unpaired" "$(kdeconnect-cli -l 2>&1)"
 
 echo
 if [ "$fails" -eq 0 ]; then echo "all passed"; else echo "$fails failed"; exit 1; fi

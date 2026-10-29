@@ -25,7 +25,7 @@ Phone Settings > About shows it on the panel too.
 | Profile | Recognised by | Status | Notes |
 |---|---|---|---|
 | `flipper-one` | device tree model "Flipper One" | expected | The reference. NAU8822 codec switched with amixer (`Speaker`, `Headphone`, from the kernel driver's controls); the modem's USB audio bridged by phoned. The board's device-tree strings are not published yet, so detection is assumed: choose it by hand if it misses. |
-| `clockworkpi-uconsole` | `dtoverlay=clockworkpi-uconsole` in config.txt | untested | The 4G extension is a SIMCom SIM7600G-H, which sends call audio as serial PCM: phoned turns it on with `AT+CPCMREG=1` when a call connects and bridges `/dev/ttyUSB4` to PipeWire at 8 kHz (SIMCom USB AUDIO Application Note V1.03). Needs ModemManager in debug mode for the AT command, and you in the `dialout` group for the port. |
+| `clockworkpi-uconsole` | `dtoverlay=clockworkpi-uconsole` in config.txt | untested | The 4G extension is a SIMCom SIM7600G-H, which sends call audio as serial PCM. ModemManager's SIMCom plugin turns it on (`AT+CPCMREG=1`) once a call connects and names the port; phoned bridges that port (or `/dev/ttyUSB4`) to PipeWire at the call's rate, 8 or 16 kHz (SIMCom USB AUDIO Application Note V1.03). Needs you in the `dialout` group for the port. |
 | `raspberry-pi` | device tree model "Raspberry Pi" | untested | Any modem ModemManager supports. Mobile call audio needs a modem with a USB sound card; use a USB headset for the speaker and microphone. |
 | `pinephone` | `pine64,pinephone` | untested | The EG25-G is wired to the codec; ALSA UCM's Voice Call verb connects it (`call_start_commands`); calls start on the earpiece. |
 | `librem5` | `purism,librem5` | untested | The BM818 is its own ALSA card ("Modem"), bridged to the codec by phoned, as on the Flipper One; calls start on the earpiece. |
@@ -43,8 +43,9 @@ GNOME Calls and Chatty for that reason.
 
 ## Adding a device
 
-Copy `/usr/share/dolphone/devices/generic.toml` to `~/.config/dolphone/devices/`,
-give it an id, and fill in what you know:
+Copy `generic.toml` (in `/usr/share/dolphone/devices/` once installed, or
+`dist/devices/` in the repository) to `~/.config/dolphone/devices/`, give it an id,
+and fill in what you know:
 
 ```toml
 id = "my-board"

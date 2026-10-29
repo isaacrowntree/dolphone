@@ -41,9 +41,24 @@ for app in "${APPS[@]}"; do
     src=$ROOT/apps/$app
     id=dolphone-$app
     echo "== building $id (flipctl-slint $upstream) =="
-    CARGO_TARGET_DIR=$TARGET cargo build --release --locked --manifest-path "$src/Cargo.toml" 2>&1 | grep -vE "^\s+(Compiling|Downloaded|Downloading)" || true
+    # The build's own status, not the filter's: a failed build must not leave the
+    # last good binary to be bundled as if it were this one.
+    set +e
+    CARGO_TARGET_DIR=$TARGET cargo build --release --locked --manifest-path "$src/Cargo.toml" 2>&1 \
+        | grep -vE "^\s+(Compiling|Downloaded|Downloading)"
+    built=${PIPESTATUS[0]}
+    set -e
+    [ "$built" = 0 ] || { echo "building $id failed" >&2; exit 1; }
     bin=$TARGET/release/$id
     [ -x "$bin" ] || { echo "no binary at $bin" >&2; exit 1; }
+    # Upstream's link-surface check (tools/appimage/build.sh): a framework app needs
+    # libc, libm and libgcc_s and nothing else; more is a C dependency creeping in,
+    # which the panel's base image may not have.
+    needed=$(readelf -d "$bin" | awk '/NEEDED/ { gsub(/[][]/, "", $5); print $5 }' | sort | tr '\n' ' ')
+    [ "$needed" = "libc.so.6 libgcc_s.so.1 libm.so.6 " ] || {
+        echo "$id links more than libc, libm and libgcc_s: $needed" >&2
+        exit 1
+    }
 
     # Staged under the name phoned looks for, so `flipctl open` finds it by file.
     stage=$OUT/.stage/$id

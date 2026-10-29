@@ -27,8 +27,9 @@
 //!
 //! ring_leds = ["white:status"]    # LEDs that flash while a call rings
 //! modem_at = ["AT+QPCMV=1,2"]     # sent each time the modem appears
-//! call_at_start = ["AT+CPCMREG=1"] # sent as a mobile call connects
-//! call_at_end = ["AT+CPCMREG=0"]   # and as it ends
+//! call_at_start = []               # AT commands as a mobile call connects
+//! call_at_end = []                 # and as it ends (ModemManager's SIMCom
+//!                                  # plugin already sends AT+CPCMREG itself)
 //!
 //! [audio]                         # any audio.json key; see dist/audio.example.json
 //! speaker_commands = [["amixer", "-q", "sset", "Speaker", "unmute"]]

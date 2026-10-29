@@ -696,7 +696,15 @@ impl Phone {
         launch::dialer();
         let name = self.name_for(&num);
         if self.flag(phone_api::keys::SPEAK_CALLER) && ringer != "silent" {
-            let who = if num.is_empty() { "a withheld number".to_string() } else { name.clone() };
+            // A number with no name is read out digit by digit: as one figure it is
+            // "sixty-one billion...".
+            let who = if num.is_empty() {
+                "a withheld number".to_string()
+            } else if name.chars().all(|c| c.is_ascii_digit() || c == ' ' || c == '+') {
+                name.chars().filter(char::is_ascii_digit).map(String::from).collect::<Vec<_>>().join(" ")
+            } else {
+                name.clone()
+            };
             self.audio.speak(&format!("Call from {who}"));
         }
         self.notify.incoming_call(id, &name, &num).await;
@@ -1176,7 +1184,18 @@ impl Phone {
         let delete = self.flag(phone_api::keys::DELETE_FROM_SIM) && !crate::storekey::locked();
         let private = self.flag(phone_api::keys::PRIVATE_NOTIFY);
 
-        let handled = if self.with_store(|s| s.is_blocked(&from)).unwrap_or(false) {
+        // Australia's Emergency Alert texts come from 0444 444 444, the number the
+        // national system sends from (ACT ESA, Queensland's disaster centre: "do
+        // not block it"). Until cell broadcast takes over (AusAlert, from 2027) they
+        // are the country's warnings: never blocked, and sounded through silent.
+        let emergency_alert = from == "+61444444444";
+        if emergency_alert {
+            tracing::warn!("an Emergency Alert text");
+            self.audio.play(Tone::Alert);
+            launch::dialer();
+            self.notify.alert("Emergency Alert", &body).await;
+        }
+        let handled = if !emergency_alert && self.with_store(|s| s.is_blocked(&from)).unwrap_or(false) {
             tracing::info!(from = %number::mask(&from), "text from blocked number dropped");
             true
         } else if flash {
@@ -1194,9 +1213,12 @@ impl Phone {
                     }
                     api::emit_unread_changed(self).await;
                     tracing::info!(from = %number::mask(&from), "text received");
-                    self.notify.message(&self.name_for(&from), &from, &body, private).await;
-                    if self.flag(phone_api::keys::TEXT_TONE) && self.setting(("ringer", "ring")) == "ring" {
-                        self.audio.play(Tone::Text);
+                    // An Emergency Alert text has had its alert already.
+                    if !emergency_alert {
+                        self.notify.message(&self.name_for(&from), &from, &body, private).await;
+                        if self.flag(phone_api::keys::TEXT_TONE) && self.setting(("ringer", "ring")) == "ring" {
+                            self.audio.play(Tone::Text);
+                        }
                     }
                     self.run_rules(&from, &body, at);
                     true

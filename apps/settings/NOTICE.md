@@ -13,4 +13,12 @@
   - *Born2bSportyV2* by Fredrik Forsberg: Unlicense.
   - *Busy9px*, Flipper Devices: MIT.
   Their license texts are under `fonts/` beside this file.
+- **The AppImage runtime** at the head of this file:
+  [AppImage/type2-runtime](https://github.com/AppImage/type2-runtime) release
+  20251108 (as flipctl-slint's tools/appimage/tools.lock pins it), MIT. Its
+  LICENSE says it statically links musl libc (its COPYRIGHT), libfuse (LGPL, its
+  LGPL2.txt), squashfuse, libzstd and zlib, each under its own licence; that file
+  lists where each is. The runtime's source is at that release; for the source of
+  the libraries as built into it, open an issue on Dolphone's repository and it
+  will be provided.
 - Dolphone is not made or endorsed by Flipper Devices Inc.

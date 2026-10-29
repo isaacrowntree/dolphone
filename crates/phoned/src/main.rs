@@ -316,14 +316,15 @@ async fn follow_audio(phone: Arc<Phone>) {
             }
         }
         last = Some((bt, names));
-        // Quick during a call, when a headset going on or off should move the call
-        // at once; relaxed otherwise, which is most of the time.
         let busy = !phone.state.lock().await.calls.is_empty();
         if busy {
             // Bring back a call's audio links if PipeWire restarted under them.
             phone.audio.check_call();
         }
-        tokio::time::sleep(Duration::from_secs(if busy { 2 } else { 10 })).await;
+        // Quick during a call, when a headset going on or off should move the call
+        // at once; every half minute otherwise, so an idle phone is not woken to
+        // run pw-dump.
+        tokio::time::sleep(Duration::from_secs(if busy { 2 } else { 30 })).await;
     }
 }
 

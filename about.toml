@@ -37,3 +37,19 @@ accepted = [
     "WTFPL",
     "GPL-3.0-only",
 ]
+
+# sqlcipher-src ships its upstreams' license files under sqlcipher/ rather than
+# at the top, so cargo-about fell back to the bare BSD-3-Clause template, without
+# the copyright line BSD-3 requires a binary to carry. Point it at the real files.
+[sqlcipher-src.clarify]
+license = "MIT AND BSD-3-Clause AND blessing AND WTFPL"
+
+[[sqlcipher-src.clarify.files]]
+path = "LICENSE"
+license = "MIT"
+checksum = "413f82e0f4f8191a8624a7b7b2c9809466f7f3d930ad52a74ad29f2dd907881d"
+
+[[sqlcipher-src.clarify.files]]
+path = "sqlcipher/LICENSE-sqlcipher"
+license = "BSD-3-Clause"
+checksum = "2a2826f6acf46fa650730cf42cbb22a642be33a7ef119c9c4f4bf6daf3bef48e"

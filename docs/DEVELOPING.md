@@ -3,7 +3,11 @@
 ## The machine
 
 Dolphone builds and runs on arm64 Debian 13 (trixie), which is what Flipper OS is
-built on. On an Apple Silicon Mac, OrbStack runs that natively:
+built on. On an Apple Silicon Mac, OrbStack runs that natively. On an arm64 Debian 13
+machine (a Raspberry Pi, a cloud VM), `scripts/dev-setup.sh --here` sets up that
+machine itself instead. Elsewhere (an Intel Mac, x86 Linux) the daemon, the CLI, the
+desktop app and the end-to-end tests build and run, but the panel apps and their
+bundles need arm64.
 
 ```sh
 scripts/dev-setup.sh        # creates `f1`, installs packages and Rust, builds FlipCTL
@@ -42,9 +46,27 @@ journalctl --user -u phoned -f
 fake-mm is close enough to ModemManager that `mmcli -m 0`, `mmcli -m 0
 --voice-list-calls` and FlipCTL's status bar all read it.
 
+## Layout
+
+| | Workspace | Build output (in the dev machine) |
+|---|---|---|
+| `crates/*`, `apps/desktop` | the root `Cargo.toml` | `$CARGO_TARGET_DIR` (`~/dolphone-target` in the scripts) |
+| `apps/dialer`, `apps/messages`, `apps/settings` | each its own (they link flipctl-app for the panel) | `~/dolphone-apps-target`, or `~/dolphone-target/apps` from `bundle.sh` |
+
+So `cargo fmt`, `clippy` and `test` at the root do not reach the panel apps: run them
+in each `apps/<app>` too (CONTRIBUTING has the list). Set `CARGO_TARGET_DIR` in the
+dev machine's shell, or every build starts over in `target/` on the shared folder.
+The cache dropping above is an OrbStack matter (its file sharing, virtiofs), not a
+Linux one.
+
 ## Tests
 
+The end-to-end scripts start their own phoned and fake-mm, and refuse to run beside
+another phoned: stop the one `run-dev.sh` started first (`pkill -x phoned`), and
+build first, since they run what is in `$CARGO_TARGET_DIR/debug`:
+
 ```sh
+cargo build --workspace                      # what the scripts run
 cargo test --workspace                       # core, daemon, CLI, desktop
 scripts/e2e.sh                               # 212 checks: fake-mm, fake-mmsd, phoned, a SIP far end, phonectl, on real buses
 scripts/ui-e2e.sh                            # the four apps driven live against phoned; screenshots in */target/render/live/

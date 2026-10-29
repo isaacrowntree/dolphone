@@ -11,8 +11,9 @@ members = [
     "apps/desktop",
 ]
 # The apps under apps/ are not members. Each carries its own [workspace] table, as
-# upstream's apps do: they link flipctl-app, and so Slint, and build for the panel,
-# while everything here builds for the host and links no UI at all.
+# upstream's apps do: they link flipctl-app, and so Slint, and build for the panel.
+# The desktop app here links Slint too (its own windows), so its binary is
+# GPL-3.0-only like the panel apps'; the rest links no UI.
 
 [workspace.package]
 version = "0.1.0"

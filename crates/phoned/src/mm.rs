@@ -139,8 +139,9 @@ pub trait Call {
     fn direction(&self) -> zbus::Result<i32>;
     #[zbus(property)]
     fn number(&self) -> zbus::Result<String>;
-    /// The modem's audio card, when its audio is exposed to the host (USB audio on
-    /// the RM520N-GL). Empty when there is no host-side audio to bridge.
+    /// Where a call's audio is, when ModemManager knows: a serial port for a
+    /// SIMCom modem (its plugin sets it once the call is up). Empty otherwise,
+    /// including a Quectel's USB sound card, which the profile's modem_match finds.
     #[zbus(property)]
     fn audio_port(&self) -> zbus::Result<String>;
     /// The call audio's format, when the modem sends it over a port (a SIM7600:

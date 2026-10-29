@@ -23,13 +23,30 @@ note what passed, and send the profile's file back with its `status` and `notes`
 updated (see [DEVICES.md](DEVICES.md)). `phonectl device` says which profile is in
 use, and why.
 
+## Before G0: prepare the board
+
+Install Dolphone's package on the board first: several gates use `phonectl` and the
+modem commands it brings, and the package also installs the polkit rule that lets
+your session use the modem, and `dolphone-modem-access`.
+
+```sh
+# A release's .deb, or one built on any arm64 Debian 13 machine. Without
+# flipctl-slint's tools there, leave the panel bundles out:
+SKIP_BUNDLES=1 scripts/package-deb.sh
+sudo apt install ./target/deb/dolphone_*_arm64.deb    # answer yes: AT commands
+```
+
+Log in again so phoned starts with your session (`systemctl --user status phoned`).
+`scripts/dev-setup.sh` is for a machine without a modem: it refuses to run where it
+finds one, since it swaps ModemManager for the fake.
+
 ## G0: the modem is there
 
 ```sh
 sudo apt install modemmanager libqmi-utils
 mmcli -L
 mmcli -m any                       # model, firmware, state, signal
-mmcli -m any --command='AT+QGMR' 2>/dev/null || sudo qmicli -d /dev/cdc-wdm0 --dms-get-revision
+mmcli -m any --command='AT+QGMR' 2>/dev/null || sudo qmicli -p -d /dev/cdc-wdm0 --dms-get-revision
 ```
 
 Write down the firmware revision: Quectel asks for it.
@@ -109,8 +126,10 @@ variant has them), so call audio has to come over USB as a sound card.
    ```
    Both people should hear each other. The note gives the format as 8 kHz, mono,
    16-bit; PipeWire converts.
-5. Then let phoned do it: `scripts/run-dev.sh` with `REAL_MODEM=1`, call, and check
-   `pgrep -a pw-loopback` shows the two loopbacks it starts.
+5. Then let phoned do it: stop the two loopbacks, call again, and check
+   `pgrep -a pw-loopback` shows the two phoned starts (names `dolphone-downlink` and
+   `dolphone-uplink`). To find the Quectel card's node names for the step above,
+   `wpctl status` or `pw-cli ls Node`.
 
 If the card appears but carries silence, try the other UAC mode the note lists,
 check `AT+QAUDMOD`, and capture `pw-top` during the call. Record what you tried.

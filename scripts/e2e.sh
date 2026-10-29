@@ -110,6 +110,9 @@ CONF
     exit $?
 fi
 
+# A run that stops early (set -e) must not leave its phoned for the next one.
+trap 'kill "${PHONED:-}" "${MMSD:-}" 2>/dev/null || true' EXIT
+
 start_phoned() {
     "$BIN/phoned" >>/tmp/dolphone-e2e-phoned.log 2>&1 &
     PHONED=$!
@@ -287,6 +290,14 @@ expect "bidi overrides are stripped" "$out" "eviltxt.exe"
 out=$("$P" fake dump)
 refute "received texts are deleted from the modem once stored" "$out" "sms "
 
+echo "Australia's Emergency Alert texts"
+"$P" block 0444444444 >/dev/null
+"$P" fake sms 0444444444 "Emergency Alert: test message" >/dev/null
+out=$(until_has "Emergency Alert: test" "$P" threads)
+expect "a text from 0444 444 444 is never blocked" "$out" "Emergency Alert: test"
+expect "and is sounded as an alert" "$(cat /tmp/dolphone-e2e-phoned.log)" "an Emergency Alert text"
+"$P" unblock 0444444444 >/dev/null
+
 echo "blocked numbers"
 "$P" block 0491570160
 "$P" fake ring +61491570160 >/dev/null
@@ -404,8 +415,10 @@ sleep 1
 echo "search, export, and which SIM"
 out=$("$P" search running late)
 expect "search finds a text by its words" "$out" "Hey, running 10 min late"
-out=$("$P" search 'late"; DROP TABLE messages; --')
-refute "and a query is only ever words" "$("$P" threads)" "no such table"
+out=$("$P" search 'late"; DROP TABLE messages; --' 2>&1) && pass "a query with SQL in it is still just a search" \
+    || fail "a query with SQL in it is still just a search" "$out"
+refute "and its SQL is not run as SQL" "$out" "no such table"
+expect "and the messages are all still there" "$("$P" search running late)" "Hey, running 10 min late"
 out=$("$P" export)
 expect "export writes an SMS Backup & Restore file" "$out" "<smses count="
 expect "with each text" "$out" 'body="Hey, running 10 min late"'
@@ -817,7 +830,9 @@ expect "sends under a grant are logged" "$out" "sent under a grant"
 expect "so are refusals" "$out" "over its grant's limit"
 expect "and denials" "$out" "denied"
 expect "and reads by a granted script" "$out" "read "
-refute "numbers in the log are masked" "$out" "0491570158"
+# Stored numbers are canonical (+61491570158): look for the digits that would
+# show through if masking failed, whatever the prefix.
+refute "numbers in the log are masked" "$out" "491570158"
 kill "$PHONED"
 # Let it go (and take its baresip with it) before the next run looks for one.
 wait "$PHONED" 2>/dev/null || true
