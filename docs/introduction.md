@@ -105,7 +105,8 @@ dolphone-install-apps                          # as yourself: Apps > Phone on th
 
 The install asks one question: whether Dolphone may send setup commands to the modem,
 which turns on ModemManager's debug mode (yes by default on a Flipper One, where call
-audio needs it; `sudo dolphone-modem-access on|off` changes it later). The package
+audio needs it; `sudo dolphone-modem-access on|off` changes it later, and `port on`
+gives Dolphone a spare AT port instead, untested on a real modem). The package
 recommends what the optional parts use: mmsd-tng for picture messages and group texts,
 baresip for SIP, bluez-obexd for copying contacts from a phone, wl-clipboard or xclip
 for Copy, and suggests espeak-ng for spoken caller ID. More in [docs/install.md](install.md).

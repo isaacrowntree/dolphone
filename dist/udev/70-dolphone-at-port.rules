@@ -1,0 +1,37 @@
+# Give one AT port of the modem to Dolphone, so phoned sends its few AT commands
+# there (crates/phoned/src/atport.rs) and ModemManager needs no debug mode. Does
+# nothing until the owner chooses it: sudo dolphone-modem-access port on creates
+# /etc/dolphone/at-port, port off removes it.
+#
+# ID_MM_PORT_IGNORE is ModemManager's own tag for "explicitly ignoring a given
+# port in a device", any port type, since 1.10 (include/ModemManager-tags.h). It
+# overrides the port-type hints its Quectel plugin sets (ID_MM_PORT_TYPE_AT_
+# SECONDARY on interface 3, in 77-mm-quectel-port-types.rules): mm-port-probe.c
+# checks it after loading them. So those need no change, and this file's number
+# matters only for GROUP, which must come after 50-udev-default.rules' dialout.
+# ModemManager reads the tag when it probes the port: dolphone-modem-access
+# restarts it.
+#
+# Which port: on the Quectel RM520N-GL (2c7c:0801) and RM500Q (2c7c:0800),
+# interface 0 is DIAG, 1 GNSS, 2 AT (ModemManager's primary port) and 3 the modem
+# port, which takes AT commands too (Quectel's UMTS/LTE/5G Linux USB Driver User
+# Guide V3.1, Table 1; ModemManager's 77-mm-quectel-port-types.rules agrees).
+# Interface 3 comes here, so ModemManager keeps its primary port. Not yet tried
+# on a real modem. The device profile's [at_port] must name the same port.
+#
+# The port goes to the dolphone group: phoned runs as the owner (a systemd --user
+# service), so the owner must be a member (sudo adduser <you> dolphone, then log
+# in again). Members can send the modem any AT command.
+#
+# Another modem: copy this file to /etc/udev/rules.d/ (same name, so it replaces
+# this one), change the ids and interface, and add an [at_port] to the profile.
+ACTION!="add|change|move|bind", GOTO="dolphone_at_port_end"
+SUBSYSTEM!="tty", GOTO="dolphone_at_port_end"
+TEST!="/etc/dolphone/at-port", GOTO="dolphone_at_port_end"
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="2c7c", ATTRS{idProduct}=="0801|0800", GOTO="dolphone_at_port_quectel"
+GOTO="dolphone_at_port_end"
+
+LABEL="dolphone_at_port_quectel"
+SUBSYSTEMS=="usb", ATTRS{bInterfaceNumber}=="03", ENV{ID_MM_PORT_IGNORE}="1", GROUP="dolphone", MODE="0660"
+
+LABEL="dolphone_at_port_end"

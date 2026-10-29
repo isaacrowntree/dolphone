@@ -70,6 +70,11 @@ dmi_chassis = []                      # SMBIOS chassis types: 9 laptop, 10 noteb
 file_contains = [["/etc/hostname", "myboard"]]
 priority = 50                         # higher wins when several match
 
+[at_port]                        # a spare AT port of the modem's (see below)
+usb_vendor = "2c7c"                   # hex ids, as lsusb and sysfs write them
+usb_products = ["0801"]
+usb_interface = "03"                  # bInterfaceNumber
+
 [audio]                          # any key of dist/audio.example.json
 codec_sink = ""                       # PipeWire node names; empty for the default
 mic_source = ""
@@ -88,6 +93,32 @@ Restart phoned (or `phonectl device use my-board`), place a call, and check with
 adding the file to `dist/devices/` (and to the list in `crates/phoned/src/devices.rs`)
 brings it to everyone; the unit tests check that every profile parses, is described,
 and can be detected.
+
+### AT commands without ModemManager's debug mode
+
+`modem_at`, `call_at_start`, `call_at_end`, `phonectl modem setup` and the call
+forwarding and caller-ID codes are AT commands. ModemManager passes them only in its
+debug mode. A profile's `[at_port]` names a spare AT port instead, by its place on
+USB, and phoned talks to it itself once udev tells ModemManager to leave it alone
+(`ID_MM_PORT_IGNORE`). The package's `/usr/lib/udev/rules.d/70-dolphone-at-port.rules`
+does that for the Quectel RM520N-GL and RM500Q, interface 3, and gives the port to
+the `dolphone` group; it does nothing until:
+
+```sh
+sudo dolphone-modem-access port on   # port off undoes it; ModemManager restarts
+sudo adduser $USER dolphone          # then log in again
+phonectl modem setup                 # "at commands  ok  on phoned's own port /dev/ttyUSB3"
+```
+
+Only the Flipper One profile has an `[at_port]`; it is untested on a real modem. For
+another modem, find an AT port that ModemManager does not need as its primary one
+(`mmcli -m any` lists the ports and what it uses each for; the vendor's Linux USB
+guide gives the interface numbers), copy the rule to `/etc/udev/rules.d/` with the
+same name and change its ids and interface, and add `[at_port]` to the profile.
+phoned uses a profile's port only when udev reports `ID_MM_PORT_IGNORE` on it,
+since two programs on one AT port garble each other's answers. The `at_port`
+setting overrides: `phonectl set at_port /dev/ttyUSB3` uses that port whatever udev
+says, and `modemmanager` never uses one.
 
 ### Flashing LEDs for a ringing call
 

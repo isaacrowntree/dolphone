@@ -103,6 +103,7 @@ fake modem (the far end, against fake-mm)
   fake ring <number> | fake sms <from> <text...> | fake answer | fake hangup | fake busy
   fake signal <0-100> <5G|LTE|3G|none> | fake register <on|off> [operator] | fake roam <on|off>
   fake autoanswer <ms> | fake sendfails <on|off> | fake atdebug <on|off> | fake ussd <reply...> | fake dump
+  fake atport                 the modem's spare AT port (a pty), for phonectl set at_port
   fake broadcast <channel> <text...> | fake lock <on|off> | fake enable <on|off>
   fake mms <from> [--to <n,n>] [--file <f>]... [text...] | fake mms dump | fake mms fails <on|off>
                               (against fake-mmsd, mmsd-tng's stand-in)
@@ -1048,6 +1049,7 @@ async fn fake(w: &[&str]) -> Result<()> {
         ["autoanswer", ms] => drop(p.call_method("SetAutoAnswer", &(ms.parse::<u64>()?,)).await?),
         ["sendfails", s] => drop(p.call_method("SetSendFails", &(on(s),)).await?),
         ["atdebug", s] => drop(p.call_method("SetAtDebug", &(on(s),)).await?),
+        ["atport"] => println!("{}", p.call_method("AtPort", &()).await?.body().deserialize::<String>()?),
         ["ussd", reply @ ..] if !reply.is_empty() => drop(p.call_method("SetUssdReply", &(reply.join(" "),)).await?),
         ["dump"] => print!("{}", p.call_method("Dump", &()).await?.body().deserialize::<String>()?),
         ["broadcast", ch, text @ ..] if !text.is_empty() => {
@@ -1062,7 +1064,7 @@ async fn fake(w: &[&str]) -> Result<()> {
         ["uplink", s] => drop(p.call_method("SetUplink", &(on(s),)).await?),
         ["enable", s] => drop(p.call_method("SetEnabled", &(on(s),)).await?),
         _ => bail!(
-            "fake ring|sms|answer|hangup|busy|signal|register|roam|autoanswer|sendfails|atdebug|ussd|broadcast|lock|enable|dump"
+            "fake ring|sms|answer|hangup|busy|signal|register|roam|autoanswer|sendfails|atdebug|atport|ussd|broadcast|lock|enable|dump"
         ),
     }
     Ok(())

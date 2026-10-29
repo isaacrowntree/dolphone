@@ -32,11 +32,15 @@ audio. What only a board can confirm:
   tile, so the news reaches the panel outside Dolphone's apps; a large-text mode and
   a fallback font beyond Latin and Cyrillic (Dolphone draws with FlipCTL's fonts, and
   shows the number where a name cannot be drawn). Worth raising with Flipper.
-- **AT commands without ModemManager's debug mode.** ModemManager passes a client's
-  AT commands only with `--debug` (or when built with `at_command_via_dbus`), which
-  also raises its log level. Dolphone asks at install and makes it one command to
-  change, but a ModemManager API for the few commands it needs, or a spare AT port
-  it leaves alone, would be better. Both need upstream ModemManager or a real board.
+- **AT commands without ModemManager's debug mode, on a real modem.** Built: a
+  spare AT port that ModemManager is told to ignore (`ID_MM_PORT_IGNORE`), which
+  phoned talks to itself (`sudo dolphone-modem-access port on`; the Flipper One
+  profile names the RM520N-GL's interface 3). Tested only against a pty. What a
+  board must confirm: that interface 3 is an AT port on the RM520N's firmware, that
+  ModemManager still calls, texts and sees `RING` without it (which port gets the
+  modem's unsolicited messages, `AT+QURCCFG="urcport"`, is not in any manual found),
+  and the numbers under other USB compositions. A ModemManager API for the few
+  commands Dolphone needs would still be better; that is upstream's.
 - No RCS: there is no route to it from Linux. Bridges to Matrix and others belong
   outside Dolphone, on its D-Bus API.
 

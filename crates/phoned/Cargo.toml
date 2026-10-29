@@ -13,6 +13,8 @@ phone-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml = "0.8"
+# termios for the modem's AT port (already here through phone-core).
+libc = "0.2"
 # KDE Connect: TLS with self-signed certificates, as its protocol has it.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }

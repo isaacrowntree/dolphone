@@ -31,6 +31,11 @@
 //! call_at_end = []                 # and as it ends (ModemManager's SIMCom
 //!                                  # plugin already sends AT+CPCMREG itself)
 //!
+//! [at_port]                       # a spare AT port phoned may use itself, once
+//! usb_vendor = "2c7c"             # ModemManager is told to leave it alone
+//! usb_products = ["0801"]         # (see crates/phoned/src/atport.rs)
+//! usb_interface = "03"            # bInterfaceNumber, as sysfs writes it
+//!
 //! [audio]                         # any audio.json key; see dist/audio.example.json
 //! speaker_commands = [["amixer", "-q", "sset", "Speaker", "unmute"]]
 //! ```
@@ -86,8 +91,9 @@ pub struct Profile {
     pub matching: Match,
     /// LEDs (names under /sys/class/leds) to flash while a call rings.
     pub ring_leds: Vec<String>,
-    /// AT commands sent each time the modem appears (through ModemManager), for
-    /// settings the modem forgets on a restart, such as `AT+QPCMV=1,2`.
+    /// AT commands sent each time the modem appears (through ModemManager, or the
+    /// spare AT port), for settings the modem forgets on a restart, such as
+    /// `AT+QPCMV=1,2`.
     pub modem_at: Vec<String>,
     /// AT commands sent when a mobile call connects and when it ends, for modems
     /// that must be told to start call audio (a SIM7600's `AT+CPCMREG=1`).
@@ -95,6 +101,19 @@ pub struct Profile {
     pub call_at_end: Vec<String>,
     /// audio.json keys, laid over the defaults.
     pub audio: toml::Table,
+    /// The modem's spare AT port, for AT commands without ModemManager's debug
+    /// mode (crate::atport). Empty: none.
+    pub at_port: AtPort,
+}
+
+/// A modem's AT port by its place on USB, as sysfs has it: the vendor and product
+/// ids in hex, and the interface's number.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(default)]
+pub struct AtPort {
+    pub usb_vendor: String,
+    pub usb_products: Vec<String>,
+    pub usb_interface: String,
 }
 
 /// What the machine says about itself.
@@ -319,6 +338,7 @@ mod tests {
         let p = built_in().into_iter().find(|p| p.id == "flipper-one").unwrap();
         let c = audio_config(&p);
         assert!(!c.speaker_commands.is_empty(), "the Flipper One switches its codec with amixer");
+        assert_eq!(p.at_port.usb_interface, "03", "the RM520N's modem port, not ModemManager's primary");
         let g = built_in().into_iter().find(|p| p.id == "generic").unwrap();
         assert!(audio_config(&g).speaker_commands.is_empty(), "generic touches no mixer controls");
     }

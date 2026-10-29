@@ -41,7 +41,11 @@ The roadmap from the reviews, done:
   modem's USB call audio, VoLTE and carrier profile and set them with one press
   (it restarts); a device profile can send AT commands when the modem appears and
   when a call starts or ends. The install asks whether ModemManager may pass them
-  (its debug mode), and `dolphone-modem-access on|off` changes it.
+  (its debug mode), and `dolphone-modem-access on|off` changes it. Or, without
+  debug mode, phoned sends them on a spare AT port that ModemManager is told to
+  ignore (`dolphone-modem-access port on`, a udev rule for the RM520N-GL's
+  interface 3, the profile's `[at_port]`, the `at_port` setting); `phonectl modem
+  setup` says which way they go. Tested against a pty in fake-mm, not a modem.
 - Call audio: a SIM7600's serial PCM bridged to PipeWire at 8 kHz (the uConsole's
   4G extension); an earpiece route for the PinePhone and Librem 5; holding and
   swapping between a SIP call and a mobile call.

@@ -10,6 +10,7 @@
 //! with resets, SIM switches and power states, and phoned follows it.
 
 mod api;
+mod atport;
 mod audio;
 mod bt;
 mod caller;

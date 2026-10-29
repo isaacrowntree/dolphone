@@ -223,6 +223,17 @@ impl Control {
         self.world.lock().await.at.debug = on;
     }
 
+    /// The modem's spare AT port, a pty that ModemManager's debug mode does not
+    /// govern: opened on the first call, the same path after.
+    async fn at_port(&self) -> zbus::fdo::Result<String> {
+        if let Some(p) = self.world.lock().await.at.port.clone() {
+            return Ok(p);
+        }
+        let p = crate::atport::serve(self.world.clone()).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        self.world.lock().await.at.port = Some(p.clone());
+        Ok(p)
+    }
+
     async fn set_send_fails(&self, fails: bool) {
         self.world.lock().await.send_fails = fails;
     }

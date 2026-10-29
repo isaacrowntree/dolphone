@@ -698,6 +698,21 @@ refute "and a second check finds nothing to do" "$out" "change"
 "$P" fake atdebug off
 out=$("$P" modem setup)
 expect "without ModemManager's debug mode, it says so" "$out" "only in debug mode"
+expect "and says the commands go through ModemManager" "$out" "at commands       ok           through ModemManager"
+# A spare AT port that ModemManager leaves alone (fake-mm's pty): the same setup
+# with debug mode still off.
+TTY=$("$P" fake atport)
+"$P" set at_port "$TTY"
+out=$("$P" modem setup)
+expect "with a spare AT port, the setup says it uses it" "$out" "on phoned's own port $TTY"
+refute "and needs no debug mode" "$out" "only in debug mode"
+expect "and reads the modem through it" "$out" "carrier profile   ok"
+out=$("$P" ussd '#31#')
+expect "service codes go on the port too" "$out" "Caller ID: shown"
+expect "which the modem saw there" "$("$P" fake dump)" "port_last=AT+CLIR"
+out=$("$P" set at_port ttyUSB3 2>&1 || true)
+expect "a port that is not a path is refused" "$out" "a port such as /dev/ttyUSB3"
+"$P" set at_port auto
 "$P" fake atdebug on
 "$P" device use auto
 

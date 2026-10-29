@@ -63,7 +63,9 @@ install -m 0644 "$ROOT/dist/modemmanager/dolphone-debug.conf" "$PKG/usr/share/do
 install -m 0755 "$ROOT/dist/bin/dolphone-modem-access" "$PKG/usr/bin/"
 install -m 0644 "$ROOT/dist/polkit/io.github.isaacrowntree.Dolphone.policy" "$PKG/usr/share/polkit-1/actions/"
 install -m 0644 "$ROOT"/dist/devices/*.toml "$PKG/usr/share/dolphone/devices/"
-install -m 0644 "$ROOT/dist/udev/70-dolphone-modem-wakeup.rules" "$ROOT/dist/udev/70-dolphone-leds.rules" "$PKG/usr/lib/udev/rules.d/"
+# The spare AT port rule does nothing until dolphone-modem-access port on.
+install -m 0644 "$ROOT/dist/udev/70-dolphone-modem-wakeup.rules" "$ROOT/dist/udev/70-dolphone-leds.rules" \
+    "$ROOT/dist/udev/70-dolphone-at-port.rules" "$PKG/usr/lib/udev/rules.d/"
 for b in "$ROOT"/target/bundles/dolphone-*-aarch64.fap.AppImage; do
     [ -f "$b" ] && install -m 0755 "$b" "$PKG/usr/share/dolphone/apps/"
 done
@@ -152,7 +154,8 @@ if [ "$1" = configure ]; then
     fi
     command -v update-desktop-database >/dev/null && update-desktop-database -q /usr/share/applications || true
     command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q /usr/share/icons/hicolor || true
-    # The group whose members may flash the LEDs (70-dolphone-leds.rules).
+    # The group whose members may flash the LEDs (70-dolphone-leds.rules) and use
+    # the modem's spare AT port (70-dolphone-at-port.rules).
     getent group dolphone >/dev/null || addgroup --system dolphone >/dev/null
     if command -v udevadm >/dev/null; then
         udevadm control --reload-rules >/dev/null 2>&1 || true
@@ -162,7 +165,7 @@ if [ "$1" = configure ]; then
         echo "Dolphone: run dolphone-install-apps as your user to add the panel apps to ~/Apps/Phone."
     fi
     if [ -n "$SUDO_USER" ] && ! id -nG "$SUDO_USER" | grep -qw dolphone; then
-        echo "Dolphone: to flash the LEDs for a ringing call, sudo adduser $SUDO_USER dolphone, then log in again."
+        echo "Dolphone: to flash the LEDs for a ringing call (and use a spare AT port), sudo adduser $SUDO_USER dolphone, then log in again."
     fi
 fi
 EOF
@@ -171,8 +174,10 @@ cat > "$PKG/DEBIAN/prerm" <<'EOF'
 set -e
 if [ "$1" = remove ]; then
     systemctl --global disable phoned.service >/dev/null 2>&1 || true
-    # Leave ModemManager as it was before Dolphone.
+    # Leave ModemManager as it was before Dolphone: debug mode off, and every
+    # port its own.
     dolphone-modem-access off >/dev/null 2>&1 || true
+    dolphone-modem-access port off >/dev/null 2>&1 || true
 fi
 EOF
 cat > "$PKG/DEBIAN/postrm" <<'EOF'

@@ -68,6 +68,31 @@ hides numbers and message text from its QMI and MBIM log lines unless started
 with `--log-personal-info` (since 1.20), but not from AT traffic, so with an AT
 modem the journal can hold them. Removing the package turns it off again.
 
+**Or a spare AT port**, with debug mode left off. The RM520N-GL (USB `2c7c:0801`)
+has two AT ports: interface 2, which ModemManager makes its primary port, and
+interface 3, the "modem" port, which takes AT commands too and which ModemManager
+uses only as its secondary (Quectel's UMTS/LTE/5G Linux USB Driver User Guide V3.1,
+Table 1; ModemManager's `77-mm-quectel-port-types.rules`). Dolphone can tell
+ModemManager to ignore interface 3 (the `ID_MM_PORT_IGNORE` udev tag) and send its
+commands there itself. Nobody has tried it on a real RM520N yet, so check it here:
+
+```sh
+ls -d /sys/bus/usb/devices/*/ttyUSB*           # which ttyUSB is which interface (…:1.3 is 3)
+sudo dolphone-modem-access port on             # then log in again if you just joined dolphone
+udevadm info -q property -n /dev/ttyUSB3 | grep ID_MM_PORT_IGNORE   # =1
+mmcli -m any | grep -A4 " ports:"              # ttyUSB3 no longer listed; ttyUSB2 still (at)
+ls -l /dev/ttyUSB3                             # crw-rw---- root dolphone
+phonectl modem setup                           # "at commands ... on phoned's own port /dev/ttyUSB3"
+```
+
+Record: whether ModemManager still finds the modem, places and receives calls
+(G1) with the port gone, and still sees `RING` and new texts. Which port the modem
+sends those unsolicited messages to (`AT+QURCCFG="urcport"`) is not in any RM520N
+manual found; if ModemManager misses them, answer `AT+QURCCFG="urcport"` on
+interface 3 and note it. If the interface numbers differ (another USB composition
+from `AT+QCFG="usbcfg"`), the rule and the profile's `[at_port]` need the right one
+([DEVICES.md](DEVICES.md)).
+
 ## G1: calls
 
 ```sh
