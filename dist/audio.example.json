@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to ~/.config/dolphone/audio.json to override the device profile (phonectl device) for this machine. Every key is optional; the values below are what the generic profile starts from. The Flipper One's profile adds its NAU8822 mixer commands: see dist/devices/flipper-one.toml.",
+  "_comment": "Copy to ~/.config/dolphone/audio.json to override the device profile (phonectl device) for this machine. Every key is optional; the values below are what the generic profile starts from. The Flipper One's profile adds its NAU8822 mixer commands: see dist/devices/flipper-one.toml. codec_sink is where the ringer plays and where the echo canceller's output goes; mic_source is the echo canceller's microphone. serial_pcm is a fallback for when ModemManager names no audio port for the call.",
   "speaker_commands": [],
   "wired_commands": [],
   "earpiece_commands": [],

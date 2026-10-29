@@ -3,11 +3,11 @@
 id = "clockworkpi-uconsole"
 name = "ClockworkPi uConsole"
 status = "untested"
-source = "ClockworkPi's uConsole wiki (How to use the 4G extension: SIMCOM_SIM7600G-H) and shipped config.txt (dtoverlay=clockworkpi-uconsole); SIMCom's SIM7100/SIM7500/SIM7600 Series USB AUDIO Application Note V1.03 (AT+CPCMREG, 8 kHz 16-bit PCM on the Audio port); Waveshare's SIM7600X voice-call guide (/dev/ttyUSB4 is that port)"
-notes = "The SIM7600 sends call audio as raw PCM on a serial port, not as a USB sound card: phoned starts it with AT+CPCMREG=1 once a call connects and bridges the port to PipeWire with pw-cat. That needs ModemManager in debug mode (docs/HARDWARE.md) and the owner in the dialout group. Power the extension first (uconsole-4g-cm4 enable)."
-# SIMCom's note: AT+CPCMREG=1 after the call has begun, =0 after it ends.
-call_at_start = ["AT+CPCMREG=1"]
-call_at_end = ["AT+CPCMREG=0"]
+source = "ModemManager's plugins/simtech/mm-shared-simtech.c (in-call audio channel: AT+CPCMREG, AudioPort, AudioFormat); ClockworkPi's uConsole wiki (How to use the 4G extension: SIMCOM_SIM7600G-H) and shipped config.txt (dtoverlay=clockworkpi-uconsole); SIMCom's SIM7100/SIM7500/SIM7600 Series USB AUDIO Application Note V1.03 (AT+CPCMREG, 8 kHz 16-bit PCM on the Audio port); Waveshare's SIM7600X voice-call guide (/dev/ttyUSB4 is that port)"
+notes = "The SIM7600 sends call audio as raw PCM on a serial port, not as a USB sound card. ModemManager's SIMCom plugin turns the stream on and off itself (AT+CPCMREG=1 and =0) and names the port as the call's AudioPort; phoned bridges it to PipeWire with pw-cat at the rate ModemManager reports (8 kHz, or 16 kHz where the firmware has it). ModemManager's debug mode is not needed for call audio. The owner must be in the dialout group to open the port. Power the extension first (uconsole-4g-cm4 enable)."
+# No call_at_start or call_at_end: ModemManager's SIMCom plugin sends
+# AT+CPCMREG=1 as a call's audio starts and AT+CPCMREG=0 as it ends
+# (plugins/simtech/mm-shared-simtech.c), and sending them again would race it.
 front_ends = ["desktop"]
 
 [match]
@@ -16,6 +16,7 @@ priority = 60
 
 [audio]
 modem_match = ["SIMCOM", "SIM7600"]
-# The fifth USB serial port (interface 4, "Audio 9001" in SIMCom's note). When
-# ModemManager's SIMCom plugin names the call's audio port, that wins.
+# The fifth USB serial port (interface 4, "Audio 9001" in SIMCom's note), for when
+# ModemManager names no audio port for the call (its udev rules tag that
+# interface as the audio port, and then the call's AudioPort wins).
 serial_pcm = "/dev/ttyUSB4"
