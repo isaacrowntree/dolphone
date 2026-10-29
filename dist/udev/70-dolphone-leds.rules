@@ -6,6 +6,8 @@
 # when the timer trigger's delay_on and delay_off appear. The same chgrp in a udev
 # RUN is how brightnessctl's rules open LEDs to a group.
 #
+# udev expands $ itself, so the shell's $f is written $$f (udevadm verify checks it).
+#
 # Another machine's LEDs: copy this file to /etc/udev/rules.d/, change KERNEL to
 # match the names in the device profile's ring_leds, and reload the rules.
-ACTION=="add|change", SUBSYSTEM=="leds", KERNEL=="flipper-one:*", RUN+="/bin/sh -c 'cd /sys%p && for f in trigger brightness delay_on delay_off; do [ -e $f ] && chgrp dolphone $f && chmod g+w $f; done; true'"
+ACTION=="add|change", SUBSYSTEM=="leds", KERNEL=="flipper-one:*", RUN+="/bin/sh -c 'cd /sys%p && for f in trigger brightness delay_on delay_off; do [ -e $$f ] && chgrp dolphone $$f && chmod g+w $$f; done; true'"

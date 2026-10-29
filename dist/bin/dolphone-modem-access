@@ -31,14 +31,18 @@ remember() {
     # Not from the package's own scripts, which hold debconf themselves.
     [ -z "${DPKG_MAINTSCRIPT_PACKAGE:-}" ] || return 0
     command -v debconf-communicate >/dev/null &&
-        echo "set dolphone/modem-access $1" | debconf-communicate dolphone >/dev/null 2>&1 || true
+        printf 'set dolphone/modem-access %s\nfset dolphone/modem-access seen true\n' "$1" |
+        debconf-communicate dolphone >/dev/null 2>&1 || true
 }
 
 case "${1:-status}" in
 on)
     [ "$(id -u)" = 0 ] || { echo "run it with sudo" >&2; exit 1; }
-    install -D -m 0644 "$SOURCE" "$DROPIN"
-    restart
+    # Already on: leave ModemManager (and any call) alone, as an upgrade should.
+    if ! cmp -s "$SOURCE" "$DROPIN"; then
+        install -D -m 0644 "$SOURCE" "$DROPIN"
+        restart
+    fi
     remember true
     echo "on: ModemManager runs with --debug, and passes Dolphone's AT commands"
     ;;

@@ -95,8 +95,8 @@ Version: $VERSION
 Architecture: $ARCH
 Maintainer: Isaac Rowntree <isaacrowntree@users.noreply.github.com>
 Installed-Size: $size
-Depends: debconf (>= 0.5) | debconf-2.0, modemmanager (>= 1.20), pipewire (>= 1.0), pipewire-bin, wireplumber, libfontconfig1, libxkbcommon0, libssl3t64
-Recommends: mmsd-tng, bluez, bluez-obexd, pipewire-pulse, alsa-utils, baresip-core, wl-clipboard | xclip
+Depends: debconf (>= 0.5) | debconf-2.0, adduser, polkitd, modemmanager (>= 1.20), pipewire (>= 1.0), pipewire-bin, wireplumber, libfontconfig1, libxkbcommon0, libssl3t64
+Recommends: pkexec, mmsd-tng, bluez, bluez-obexd, pipewire-pulse, alsa-utils, baresip-core, wl-clipboard | xclip
 Suggests: espeak-ng
 Conflicts: gnome-calls, chatty
 Section: comm
@@ -128,13 +128,16 @@ if [ "$1" = configure ]; then
     else
         dolphone-modem-access off >/dev/null || true
     fi
-    # Start phoned in every user session from the next login; D-Bus activation
-    # starts it sooner if anything asks.
-    systemctl --global enable phoned.service >/dev/null 2>&1 || true
+    # Start phoned in every user session from the next login (D-Bus activation
+    # starts it sooner if anything asks). Only on a first install: an admin who
+    # disabled it keeps that through upgrades.
+    if [ -z "$2" ]; then
+        systemctl --global enable phoned.service >/dev/null 2>&1 || true
+    fi
     command -v update-desktop-database >/dev/null && update-desktop-database -q /usr/share/applications || true
     command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q /usr/share/icons/hicolor || true
     # The group whose members may flash the LEDs (70-dolphone-leds.rules).
-    getent group dolphone >/dev/null || addgroup --system dolphone >/dev/null 2>&1 || groupadd --system dolphone || true
+    getent group dolphone >/dev/null || addgroup --system dolphone >/dev/null
     if command -v udevadm >/dev/null; then
         udevadm control --reload-rules >/dev/null 2>&1 || true
         udevadm trigger --subsystem-match=leds --action=change >/dev/null 2>&1 || true
@@ -159,6 +162,10 @@ EOF
 cat > "$PKG/DEBIAN/postrm" <<'EOF'
 #!/bin/sh
 set -e
+if [ "$1" = remove ] && command -v udevadm >/dev/null; then
+    # The LED rule is gone: let udev forget it (the LEDs' group stays until reboot).
+    udevadm control --reload-rules >/dev/null 2>&1 || true
+fi
 if [ "$1" = purge ] && [ -e /usr/share/debconf/confmodule ]; then
     . /usr/share/debconf/confmodule
     db_purge

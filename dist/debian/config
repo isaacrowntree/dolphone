@@ -3,7 +3,9 @@
 # the default on a Flipper One, where call audio depends on it.
 set -e
 . /usr/share/debconf/confmodule
-if ! db_fget dolphone/modem-access seen 2>/dev/null || [ "$RET" = false ]; then
+# Only on a first install ($2, the version configured before, is empty): an
+# upgrade keeps the owner's answer, even one never shown (noninteractive).
+if [ -z "${2:-}" ] && { ! db_fget dolphone/modem-access seen 2>/dev/null || [ "$RET" = false ]; }; then
     if [ -r /proc/device-tree/model ] && tr -d '\0' < /proc/device-tree/model | grep -qi "flipper one"; then
         db_set dolphone/modem-access true
     fi
