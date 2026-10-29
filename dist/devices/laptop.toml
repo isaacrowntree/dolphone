@@ -1,0 +1,16 @@
+# A laptop, with or without a WWAN modem: the desktop app with the laptop's own
+# speakers and microphone, and SIP when the modem cannot call.
+id = "laptop"
+name = "Laptop"
+status = "untested"
+source = "SMBIOS chassis types (9 laptop, 10 notebook, 14 sub-notebook, 31 convertible, 32 detachable); ThinkPads name their model in DMI product_version"
+notes = "Whether a laptop's modem can call and text depends on the modem and its firmware: mmcli -m 0 lists Voice and Messaging when it can. Calls over SIP work on any laptop."
+front_ends = ["desktop"]
+
+[match]
+dmi_version = ["ThinkPad"]
+dmi_chassis = [9, 10, 14, 31, 32]
+priority = 20
+
+[audio]
+modem_match = ["Quectel", "Fibocom", "Sierra", "RM520"]

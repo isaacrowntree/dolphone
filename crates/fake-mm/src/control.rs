@@ -34,6 +34,11 @@ impl Control {
             w.calls.push(p.clone());
             p
         };
+        if busy && !self.world.lock().await.call_waiting {
+            // With call waiting off, the network turns a second caller away.
+            tracing::info!(number, "busy and call waiting is off: the caller is turned away");
+            return Ok(OwnedObjectPath::try_from("/").expect("root"));
+        }
         let state = if busy { cs::WAITING } else { cs::RINGING_IN };
         server.at(p.as_str(), modem::new_incoming(&self.world, &p, number, state)).await?;
         modem::announce_call(conn, &p).await?;
@@ -80,6 +85,76 @@ impl Control {
             }
         }
         Err(zbus::fdo::Error::Failed("no outgoing call".into()))
+    }
+
+    /// The network broadcasts an emergency alert. A modem only passes on channels
+    /// it was told to listen to, so this returns "/" when nobody set this one.
+    async fn broadcast(
+        &self,
+        channel: u32,
+        text: &str,
+        serial: u32,
+        #[zbus(object_server)] server: &ObjectServer,
+        #[zbus(connection)] conn: &Connection,
+    ) -> zbus::fdo::Result<OwnedObjectPath> {
+        let p = {
+            let mut w = self.world.lock().await;
+            let listening = w.channels.iter().any(|(a, b)| (*a..=*b).contains(&channel));
+            if !listening {
+                tracing::info!(channel, "broadcast on a channel the modem does not listen to");
+                return Ok(OwnedObjectPath::try_from("/").expect("root"));
+            }
+            let p = format!("/org/freedesktop/ModemManager1/CBM/{}", w.next_cbm);
+            w.next_cbm += 1;
+            w.cbm.push(p.clone());
+            p
+        };
+        let cbm = modem::Cbm {
+            state: crate::world::CBM_RECEIVED,
+            text: text.into(),
+            channel,
+            message_code: serial,
+            update: 0,
+        };
+        server.at(p.as_str(), cbm).await?;
+        if let Ok(iref) = conn.object_server().interface::<_, modem::CellBroadcast>(crate::MODEM).await {
+            let em = iref.signal_emitter().clone();
+            let _ = modem::CellBroadcast::added(&em, OwnedObjectPath::try_from(p.clone()).expect("path")).await;
+        }
+        tracing::info!(cbm = %p, channel, "alert broadcast");
+        Ok(OwnedObjectPath::try_from(p).expect("path"))
+    }
+
+    /// The uplink goes down or comes back: NetworkManager's connectivity (4 full,
+    /// 1 none) and eth0's state (100 activated, 30 disconnected).
+    async fn set_uplink(&self, up: bool) -> zbus::fdo::Result<()> {
+        let nm = self.world.lock().await.nm.clone();
+        let Some((conn, net)) = nm else {
+            return Err(zbus::fdo::Error::Failed("not standing in for NetworkManager (a real one is running)".into()));
+        };
+        crate::nm::set(&conn, &net, if up { 4 } else { 1 }, if up { 100 } else { 30 }).await;
+        tracing::info!(up, "uplink");
+        Ok(())
+    }
+
+    /// The SIM asks for its PIN (1234 here), hiding Voice and Messaging until it gets it.
+    async fn set_locked(&self, locked: bool, #[zbus(connection)] conn: &Connection) {
+        {
+            let mut w = self.world.lock().await;
+            w.locked = locked;
+            w.pin_retries = 3;
+        }
+        if locked {
+            modem::lock_interfaces(conn).await;
+        } else {
+            modem::unlock_interfaces(conn, &self.world).await;
+        }
+    }
+
+    /// Power the modem down, as a fresh boot or a user leaves it.
+    async fn set_enabled(&self, enabled: bool, #[zbus(connection)] conn: &Connection) {
+        self.world.lock().await.enabled = enabled;
+        let _ = modem::announce_signal(conn).await;
     }
 
     /// Someone texts the phone.
@@ -143,6 +218,11 @@ impl Control {
         self.world.lock().await.auto_answer_ms = milliseconds;
     }
 
+    /// Whether ModemManager is "in debug mode", which Modem.Command needs.
+    async fn set_at_debug(&self, on: bool) {
+        self.world.lock().await.at.debug = on;
+    }
+
     async fn set_send_fails(&self, fails: bool) {
         self.world.lock().await.send_fails = fails;
     }
@@ -160,12 +240,19 @@ impl Control {
         let mut out = String::new();
         for p in calls {
             if let Some((s, d)) = call::state_of(conn, &p).await {
-                out.push_str(&format!("call {p} state={s} direction={d}\n"));
+                let dtmf = call::dtmf_of(conn, &p).await;
+                out.push_str(&format!("call {p} state={s} direction={d} dtmf={dtmf}\n"));
             }
         }
         for p in sms {
             out.push_str(&format!("sms {p}\n"));
         }
+        let w = self.world.lock().await;
+        out.push_str(&format!(
+            "call_waiting={} locked={} enabled={} channels={:?} modes={:?}\n",
+            w.call_waiting, w.locked, w.enabled, w.channels, w.modes
+        ));
+        out.push_str(&w.at.dump());
         out
     }
 }

@@ -1,0 +1,12 @@
+# Anything else with Linux, ModemManager and PipeWire: default devices, no mixer
+# controls touched. A starting point for a profile of your own (see
+# docs/DEVICES.md).
+id = "generic"
+name = "Generic Linux machine"
+status = "expected"
+source = "Dolphone's defaults"
+notes = "Copy this file to ~/.config/dolphone/devices/, give it an id and a [match], and adjust [audio]."
+front_ends = ["desktop"]
+
+[match]
+priority = 0

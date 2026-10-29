@@ -15,6 +15,8 @@ pub struct Contact {
     pub numbers: Vec<Phone>,
     /// The file it came from, so an edit can be written back to the same place.
     pub source: Option<PathBuf>,
+    /// Its place among the cards in that file (a file may hold several).
+    pub card: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,7 +34,7 @@ pub fn parse(text: &str, region: &str) -> Vec<Contact> {
     for line in unfold(text) {
         let upper = line.to_ascii_uppercase();
         if upper.starts_with("BEGIN:VCARD") {
-            current = Some(Contact { name: String::new(), numbers: Vec::new(), source: None });
+            current = Some(Contact { name: String::new(), numbers: Vec::new(), source: None, card: 0 });
             continue;
         }
         if upper.starts_with("END:VCARD") {
@@ -139,8 +141,9 @@ impl Book {
         paths.sort();
         for path in paths {
             let Ok(text) = std::fs::read_to_string(&path) else { continue };
-            for mut c in parse(&text, region) {
+            for (i, mut c) in parse(&text, region).into_iter().enumerate() {
                 c.source = Some(path.clone());
+                c.card = i;
                 contacts.push(c);
             }
         }
@@ -160,6 +163,10 @@ impl Book {
     pub fn name_for(&self, num: &str, region: &str) -> String {
         if num.is_empty() {
             return "Unknown".into();
+        }
+        if num.contains(',') {
+            // A group text's thread: every member.
+            return num.split(',').map(|n| self.name_for(n, region)).collect::<Vec<_>>().join(", ");
         }
         self.lookup(num).map(|c| c.name.clone()).unwrap_or_else(|| number::display(num, region))
     }
@@ -182,6 +189,24 @@ impl Book {
             .collect()
     }
 
+    /// Contacts whose name matches keypad digits the phone way: 2 is ABC, 3 is DEF,
+    /// and so on, against the start of the name or of any word in it ("567" and "362"
+    /// both find "Jordan Doe"). For dialing by name on a keypad.
+    pub fn search_t9(&self, digits: &str) -> Vec<&Contact> {
+        let d: String = digits.chars().filter(|c| c.is_ascii_digit()).collect();
+        if d.len() < 2 || d.chars().any(|c| c == '0' || c == '1') {
+            return Vec::new();
+        }
+        self.contacts
+            .iter()
+            .filter(|c| {
+                let words: Vec<String> = c.name.split_whitespace().map(t9_word).collect();
+                let whole: String = words.concat();
+                whole.starts_with(&d) || words.iter().any(|w| w.starts_with(&d))
+            })
+            .collect()
+    }
+
     /// Save a new contact as its own file in `dir`.
     pub fn add(&mut self, dir: &Path, mut c: Contact) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
@@ -195,10 +220,175 @@ impl Book {
         }
         std::fs::write(&path, write(&c))?;
         c.source = Some(path);
+        c.card = 0;
         self.contacts.push(c);
         self.contacts.sort_by_key(|c| c.name.to_lowercase());
         Ok(())
     }
+}
+
+/// What an import did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Imported {
+    pub added: u32,
+    /// Matched a contact already here (same name, or a number already known) and
+    /// gave it any numbers it lacked.
+    pub merged: u32,
+    pub unchanged: u32,
+}
+
+/// An import never takes more than this many cards: a phonebook is hundreds, and a
+/// file of millions is a mistake or an attack on the disk.
+pub const IMPORT_MAX: usize = 5000;
+
+impl Contact {
+    /// The contact's id: its file's name without .vcf, and its place in the file
+    /// after a # when it is not the first card there.
+    pub fn id(&self) -> String {
+        let stem = self
+            .source
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if self.card == 0 {
+            stem
+        } else {
+            format!("{stem}#{}", self.card)
+        }
+    }
+}
+
+impl Book {
+    pub fn get(&self, id: &str) -> Option<&Contact> {
+        self.contacts.iter().find(|c| c.id() == id)
+    }
+
+    /// Bring in cards from another phone or an export. Only names and numbers are
+    /// kept (parse drops the rest). A card that matches one already here, by name
+    /// or by any number, adds its missing numbers to it instead of making a twin,
+    /// so importing the same phonebook twice changes nothing.
+    pub fn import(&mut self, dir: &Path, cards: Vec<Contact>) -> std::io::Result<Imported> {
+        let mut out = Imported::default();
+        for mut card in cards.into_iter().take(IMPORT_MAX) {
+            card.name = card.name.trim().to_string();
+            card.numbers.retain(|p| !number::digits(&p.number).is_empty());
+            if card.name.is_empty() && card.numbers.is_empty() {
+                continue;
+            }
+            if card.name.is_empty() {
+                card.name = card.numbers[0].number.clone();
+            }
+            let same = self.contacts.iter().position(|c| {
+                c.name.eq_ignore_ascii_case(&card.name)
+                    || c.numbers.iter().any(|a| card.numbers.iter().any(|b| number::same_party(&a.number, &b.number)))
+            });
+            match same {
+                Some(i) => {
+                    let c = &mut self.contacts[i];
+                    let new: Vec<Phone> = card
+                        .numbers
+                        .into_iter()
+                        .filter(|b| !c.numbers.iter().any(|a| number::same_party(&a.number, &b.number)))
+                        .collect();
+                    if new.is_empty() {
+                        out.unchanged += 1;
+                        continue;
+                    }
+                    c.numbers.extend(new);
+                    if let Some(path) = c.source.clone() {
+                        self.rewrite(&path)?;
+                    }
+                    out.merged += 1;
+                }
+                None => {
+                    self.add(dir, card)?;
+                    out.added += 1;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Replace a contact's name and numbers, in its own file.
+    pub fn update(&mut self, id: &str, name: &str, numbers: Vec<Phone>) -> std::io::Result<()> {
+        let c = self
+            .contacts
+            .iter_mut()
+            .find(|c| c.id() == id)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such contact"))?;
+        c.name = name.trim().to_string();
+        c.numbers = numbers;
+        if let Some(path) = c.source.clone() {
+            self.rewrite(&path)?;
+        }
+        self.contacts.sort_by_key(|c| c.name.to_lowercase());
+        Ok(())
+    }
+
+    /// Write back every card that lives in `path`, in its order, so changing one
+    /// card in a file of many keeps the others. A file left with none is removed.
+    fn rewrite(&mut self, path: &Path) -> std::io::Result<()> {
+        let mut here: Vec<&mut Contact> =
+            self.contacts.iter_mut().filter(|c| c.source.as_deref() == Some(path)).collect();
+        here.sort_by_key(|c| c.card);
+        if here.is_empty() {
+            return match std::fs::remove_file(path) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            };
+        }
+        let mut text = String::new();
+        for (i, c) in here.into_iter().enumerate() {
+            c.card = i;
+            text.push_str(&write(c));
+        }
+        std::fs::write(path, text)
+    }
+
+    /// Delete a contact and its file.
+    pub fn remove(&mut self, id: &str) -> std::io::Result<()> {
+        let i = self
+            .contacts
+            .iter()
+            .position(|c| c.id() == id)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no such contact"))?;
+        let gone = self.contacts.remove(i);
+        if let Some(path) = gone.source {
+            self.rewrite(&path)?;
+        }
+        Ok(())
+    }
+}
+
+/// A word as keypad digits. Letters outside A-Z (after removing accents roughly)
+/// map to nothing, so they never match.
+fn t9_word(w: &str) -> String {
+    w.chars()
+        .filter_map(|ch| {
+            let c = match ch.to_ascii_lowercase() {
+                'à' | 'á' | 'â' | 'ä' | 'ã' => 'a',
+                'é' | 'è' | 'ê' | 'ë' => 'e',
+                'í' | 'ï' | 'î' => 'i',
+                'ó' | 'ö' | 'ô' | 'õ' => 'o',
+                'ú' | 'ü' | 'û' => 'u',
+                'ç' => 'c',
+                'ñ' => 'n',
+                other => other,
+            };
+            Some(match c {
+                'a'..='c' => '2',
+                'd'..='f' => '3',
+                'g'..='i' => '4',
+                'j'..='l' => '5',
+                'm'..='o' => '6',
+                'p'..='s' => '7',
+                't'..='v' => '8',
+                'w'..='z' => '9',
+                _ => return None,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -243,6 +433,17 @@ mod tests {
     }
 
     #[test]
+    fn t9_finds_names() {
+        let book = Book { contacts: parse(SAMPLE, "AU") };
+        let names = |d: &str| book.search_t9(d).iter().map(|c| c.name.clone()).collect::<Vec<_>>();
+        assert_eq!(names("2539"), vec!["Alex Example"]);
+        assert_eq!(names("3926"), vec!["Alex Example"], "matches the second word");
+        assert_eq!(names("726"), vec!["Sam Sample"]);
+        assert!(names("1").is_empty());
+        assert!(names("0491").is_empty(), "a number is not a name");
+    }
+
+    #[test]
     fn add_writes_a_file() {
         let dir = tempfile::tempdir().unwrap();
         let mut book = Book::default();
@@ -250,11 +451,49 @@ mod tests {
             name: "New Person".into(),
             numbers: vec![Phone { number: "+61491570159".into(), kind: "mobile".into() }],
             source: None,
+            card: 0,
         };
         book.add(dir.path(), c.clone()).unwrap();
         book.add(dir.path(), c).unwrap();
         assert!(dir.path().join("new-person.vcf").exists());
         assert!(dir.path().join("new-person-2.vcf").exists());
         assert_eq!(Book::load(dir.path(), "AU").contacts.len(), 2);
+    }
+
+    #[test]
+    fn import_merges_instead_of_doubling() {
+        let dir = std::env::temp_dir().join(format!("dolphone-import-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut b = Book::default();
+        let first = parse(SAMPLE, "AU");
+        let r = b.import(&dir, first.clone()).unwrap();
+        assert_eq!((r.added, r.merged, r.unchanged), (3, 0, 0));
+        let again = b.import(&dir, first).unwrap();
+        assert_eq!((again.added, again.merged, again.unchanged), (0, 0, 3), "the same phonebook twice changes nothing");
+        let extra =
+            parse("BEGIN:VCARD\nFN:Alex Example\nTEL:0491570199\nEMAIL:alex@example.com\nPHOTO:xyz\nEND:VCARD\n", "AU");
+        let r = b.import(&dir, extra).unwrap();
+        assert_eq!(r.merged, 1);
+        let alex = b.contacts.iter().find(|c| c.name == "Alex Example").unwrap();
+        assert_eq!(alex.numbers.len(), 3, "the new number joins the old ones");
+        let on_disk = std::fs::read_to_string(alex.source.as_ref().unwrap()).unwrap();
+        assert!(!on_disk.contains("EMAIL") && !on_disk.contains("PHOTO"), "only names and numbers are kept");
+        let id = alex.id();
+        b.update(&id, "Alex E.", vec![Phone { number: "+61491570156".into(), kind: "cell".into() }]).unwrap();
+        assert_eq!(Book::load(&dir, "AU").get(&id).unwrap().name, "Alex E.");
+        b.remove(&id).unwrap();
+        assert!(Book::load(&dir, "AU").get(&id).is_none());
+
+        // A file of several cards: changing one keeps the rest.
+        let many = dir.join("export.vcf");
+        std::fs::write(&many, SAMPLE).unwrap();
+        let mut b = Book::load(&dir, "AU");
+        let folded = b.contacts.iter().find(|c| c.name == "Folded Name").unwrap().id();
+        assert_eq!(folded, "export#2");
+        b.remove("export#1").unwrap();
+        let after = Book::load(&dir, "AU");
+        assert!(after.contacts.iter().any(|c| c.name == "Folded Name"), "the others in the file stay");
+        assert!(!after.contacts.iter().any(|c| c.name == "Sam Sample" && c.source.as_deref() == Some(&*many)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

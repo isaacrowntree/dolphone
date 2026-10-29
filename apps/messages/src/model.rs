@@ -26,6 +26,10 @@ pub enum Screen {
     Threads,
     Conversation,
     Options,
+    /// Ready-made replies, for answering without the keyboard.
+    QuickReply,
+    /// Texts found by a search.
+    Found,
     /// The text, ready to go, with its cost shown.
     Preview,
 }
@@ -37,6 +41,8 @@ pub enum Writing {
     To,
     /// The message itself.
     Body,
+    /// Words to search for.
+    Search,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,10 +57,34 @@ pub enum Action {
     Block(String),
     Unblock(String),
     Delete(String),
+    /// Send a failed text again.
+    Retry(i64),
+    Search(String),
     Quit,
 }
 
-pub const OPTIONS: [&str; 3] = ["Call", "Block number", "Delete conversation"];
+/// What a conversation's Options offer. Resend is there only when a text in it
+/// failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Opt {
+    QuickReply,
+    Resend,
+    Call,
+    Block,
+    Delete,
+}
+
+/// Replies that need no typing on a five-key panel.
+pub const QUICK: [&str; 8] = [
+    "OK",
+    "Yes",
+    "No",
+    "On my way.",
+    "Running late, sorry!",
+    "Can't talk now, I'll call you back.",
+    "Thanks!",
+    "Call me when you can.",
+];
 
 pub struct Model {
     pub region: String,
@@ -74,6 +104,12 @@ pub struct Model {
     pub notice: Option<Vec<String>>,
     pub confirm_delete: bool,
     pub connected: bool,
+    pub quick_sel: usize,
+    pub missed: u32,
+    /// The last search and what it found.
+    pub query: String,
+    pub found: Vec<MessageInfo>,
+    pub found_sel: usize,
 }
 
 impl Model {
@@ -93,6 +129,11 @@ impl Model {
             notice: None,
             confirm_delete: false,
             connected: false,
+            quick_sel: 0,
+            missed: 0,
+            query: String::new(),
+            found: Vec::new(),
+            found_sel: 0,
         }
     }
 
@@ -106,6 +147,20 @@ impl Model {
         } else {
             name
         }
+    }
+
+    /// The newest failed text in the open conversation.
+    pub fn failed(&self) -> Option<&MessageInfo> {
+        self.messages.iter().rev().find(|m| m.direction == 1 && MessageState::from_u8(m.state) == MessageState::Failed)
+    }
+
+    pub fn options(&self) -> Vec<Opt> {
+        let mut o = vec![Opt::QuickReply];
+        if self.failed().is_some() {
+            o.insert(0, Opt::Resend);
+        }
+        o.extend([Opt::Call, Opt::Block, Opt::Delete]);
+        o
     }
 
     pub fn is_blocked(&self) -> bool {
@@ -164,7 +219,7 @@ impl Model {
             m.state = state;
         }
         if MessageState::from_u8(state) == MessageState::Failed {
-            self.notice = Some(vec!["Not sent.".into(), "The network refused it.".into()]);
+            self.notice = Some(vec!["Not sent.".into(), "Options > Resend to try again.".into()]);
         }
     }
 
@@ -172,7 +227,7 @@ impl Model {
     pub fn written(&mut self, what: Writing, text: Option<String>) -> Vec<Action> {
         let Some(text) = text else {
             // Cancelled: back to where the keyboard was opened from.
-            if what == Writing::To {
+            if what == Writing::To || (what == Writing::Search && self.screen != Screen::Found) {
                 self.screen = Screen::Threads;
             }
             return Vec::new();
@@ -193,6 +248,17 @@ impl Model {
                     }
                 };
                 self.compose_to(&peer)
+            }
+            Writing::Search => {
+                let q = text.trim().to_string();
+                if q.is_empty() {
+                    return Vec::new();
+                }
+                self.query = q.clone();
+                self.found.clear();
+                self.found_sel = 0;
+                self.screen = Screen::Found;
+                vec![Action::Search(q)]
             }
             Writing::Body => {
                 let body = text::clean(&text, text::MAX_BODY);
@@ -223,6 +289,51 @@ impl Model {
             Screen::Threads => self.key_threads(input),
             Screen::Conversation => self.key_conversation(input, rows, visible),
             Screen::Options => self.key_options(input),
+            Screen::Found => match input {
+                Input::Up => {
+                    self.found_sel = self.found_sel.saturating_sub(1);
+                    Vec::new()
+                }
+                Input::Down => {
+                    self.found_sel = (self.found_sel + 1).min(self.found.len().saturating_sub(1));
+                    Vec::new()
+                }
+                Input::Run | Input::Ok => match self.found.get(self.found_sel) {
+                    Some(m) => {
+                        let peer = m.peer.clone();
+                        self.open(&peer)
+                    }
+                    None => Vec::new(),
+                },
+                Input::Edit | Input::View => vec![Action::Write(Writing::Search, self.query.clone())],
+                Input::Escape => {
+                    self.screen = Screen::Threads;
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            },
+            Screen::QuickReply => match input {
+                Input::Up => {
+                    self.quick_sel = self.quick_sel.saturating_sub(1);
+                    Vec::new()
+                }
+                Input::Down => {
+                    self.quick_sel = (self.quick_sel + 1).min(QUICK.len() - 1);
+                    Vec::new()
+                }
+                // Through the preview, which says what it costs, like any text.
+                Input::Run | Input::Ok => {
+                    self.draft = QUICK[self.quick_sel].to_string();
+                    self.screen = Screen::Preview;
+                    Vec::new()
+                }
+                Input::Edit => vec![Action::Write(Writing::Body, QUICK[self.quick_sel].to_string())],
+                Input::Escape => {
+                    self.screen = Screen::Options;
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            },
             Screen::Preview => match input {
                 Input::Run => {
                     let body = std::mem::take(&mut self.draft);
@@ -248,6 +359,7 @@ impl Model {
                 }
             }
             Input::Edit => return vec![Action::Write(Writing::To, String::new())],
+            Input::View => return vec![Action::Write(Writing::Search, self.query.clone())],
             Input::Escape => return vec![Action::Quit],
             _ => {}
         }
@@ -284,17 +396,24 @@ impl Model {
     }
 
     fn key_options(&mut self, input: Input) -> Vec<Action> {
+        let opts = self.options();
         match input {
             Input::Up => self.option_sel = self.option_sel.saturating_sub(1),
-            Input::Down => self.option_sel = (self.option_sel + 1).min(OPTIONS.len() - 1),
+            Input::Down => self.option_sel = (self.option_sel + 1).min(opts.len() - 1),
             Input::Escape | Input::View => self.screen = Screen::Conversation,
             Input::Run | Input::Ok => {
                 self.screen = Screen::Conversation;
-                return match self.option_sel {
-                    0 => vec![Action::Call(self.peer.clone())],
-                    1 if self.is_blocked() => vec![Action::Unblock(self.peer.clone())],
-                    1 => vec![Action::Block(self.peer.clone())],
-                    _ => {
+                return match opts[self.option_sel.min(opts.len() - 1)] {
+                    Opt::QuickReply => {
+                        self.screen = Screen::QuickReply;
+                        self.quick_sel = 0;
+                        Vec::new()
+                    }
+                    Opt::Resend => self.failed().map(|m| vec![Action::Retry(m.id)]).unwrap_or_default(),
+                    Opt::Call => vec![Action::Call(self.peer.clone())],
+                    Opt::Block if self.is_blocked() => vec![Action::Unblock(self.peer.clone())],
+                    Opt::Block => vec![Action::Block(self.peer.clone())],
+                    Opt::Delete => {
                         self.screen = Screen::Options;
                         self.confirm_delete = true;
                         self.notice = Some(vec!["Delete this conversation?".into(), "This cannot be undone.".into()]);
@@ -313,7 +432,17 @@ mod tests {
     use super::*;
 
     fn msg(id: i64, peer: &str, dir: u8, body: &str) -> MessageInfo {
-        MessageInfo { id, peer: peer.into(), direction: dir, body: body.into(), at: 100 + id, state: 2, read: true }
+        MessageInfo {
+            id,
+            peer: peer.into(),
+            direction: dir,
+            body: body.into(),
+            at: 100 + id,
+            state: 2,
+            read: true,
+            sim: String::new(),
+            parts: Vec::new(),
+        }
     }
 
     #[test]
@@ -377,15 +506,55 @@ mod tests {
     }
 
     #[test]
+    fn quick_replies_go_through_the_preview() {
+        let mut m = Model::new("AU", Book::default());
+        m.open("0491570156");
+        m.key(Input::View, 0, 8);
+        m.key(Input::Run, 0, 8);
+        assert_eq!(m.screen, Screen::QuickReply);
+        m.key(Input::Down, 0, 8);
+        m.key(Input::Down, 0, 8);
+        m.key(Input::Down, 0, 8);
+        m.key(Input::Run, 0, 8);
+        assert_eq!(m.screen, Screen::Preview);
+        assert_eq!(m.key(Input::Run, 0, 8), vec![Action::Send("+61491570156".into(), "On my way.".into())]);
+    }
+
+    #[test]
+    fn a_failed_text_can_be_resent() {
+        let mut m = Model::new("AU", Book::default());
+        m.open("0491570156");
+        assert!(!m.options().contains(&Opt::Resend));
+        let mut f = msg(9, "+61491570156", 1, "lost");
+        f.state = MessageState::Failed as u8;
+        m.set_conversation("+61491570156", vec![msg(8, "+61491570156", 0, "hi"), f]);
+        assert_eq!(m.options()[0], Opt::Resend, "first, when there is something to resend");
+        m.key(Input::View, 0, 8);
+        assert_eq!(m.key(Input::Run, 0, 8), vec![Action::Retry(9)]);
+    }
+
+    #[test]
     fn delete_asks_first() {
         let mut m = Model::new("AU", Book::default());
         m.open("0491570156");
         m.key(Input::View, 0, 8);
         m.key(Input::Down, 0, 8);
         m.key(Input::Down, 0, 8);
+        m.key(Input::Down, 0, 8);
         assert!(m.key(Input::Run, 0, 8).is_empty());
         assert!(m.notice.is_some());
         let a = m.key(Input::Run, 0, 8);
         assert_eq!(a, vec![Action::Delete("+61491570156".into()), Action::LoadThreads]);
+    }
+
+    #[test]
+    fn search_from_the_thread_list() {
+        let mut m = Model::new("AU", Book::default());
+        assert_eq!(m.key(Input::View, 0, 8), vec![Action::Write(Writing::Search, String::new())]);
+        assert_eq!(m.written(Writing::Search, Some(" parcel ".into())), vec![Action::Search("parcel".into())]);
+        assert_eq!(m.screen, Screen::Found);
+        m.found = vec![msg(3, "+61491570156", 0, "Your parcel is at the post office")];
+        let a = m.key(Input::Run, 0, 8);
+        assert_eq!(a[0], Action::Load("+61491570156".into()), "a result opens its conversation");
     }
 }

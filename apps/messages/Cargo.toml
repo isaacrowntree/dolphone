@@ -21,7 +21,7 @@ flipctl-app = { git = "https://github.com/flipperdevices/flipctl-slint" }
 slint = { version = "1.17", default-features = false, features = ["compat-1-2", "backend-winit-wayland", "renderer-software", "std"] }
 phone-api = { path = "../../crates/phone-api" }
 phone-bus = { path = "../../crates/phone-bus" }
-phone-core = { path = "../../crates/phone-core" }
+phone-core = { path = "../../crates/phone-core", default-features = false }
 
 [dev-dependencies]
 flipper-ui = { git = "https://github.com/flipperdevices/flipctl-slint", default-features = false, features = ["slint"] }

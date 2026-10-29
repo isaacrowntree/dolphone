@@ -1,0 +1,19 @@
+# The Purism Librem 5: a WM8962 codec ("Librem 5", card L5) and the Broadmobi
+# BM818 modem as its own ALSA card ("Modem"), so call audio is bridged between
+# the two by phoned, as on the Flipper One.
+id = "librem5"
+name = "Purism Librem 5"
+status = "untested"
+source = "Mainline device tree (imx8mq-librem5-r4.dts: purism,librem5r4, purism,librem5); aplay -l from a Librem 5 (card 1 L5 wm8962, card 2 Modem bm818); alsa-ucm-conf ucm2/NXP/iMX8/Librem_5 (HiFi only)"
+notes = "Calls start on the earpiece (UCM's Handset); Edit moves them to the loudspeaker, the jack or Bluetooth. Stop callaudiod and GNOME Calls first: one program should own the modem."
+front_ends = ["desktop"]
+
+[match]
+dt_compatible = ["purism,librem5", "purism,librem5r2", "purism,librem5r3", "purism,librem5r4"]
+priority = 90
+
+[audio]
+modem_match = ["Modem", "bm818"]
+speaker_commands = [["alsaucm", "-c", "hw:L5", "set", "_enadev", "Speaker"]]
+wired_commands = [["alsaucm", "-c", "hw:L5", "set", "_enadev", "Headphones"]]
+earpiece_commands = [["alsaucm", "-c", "hw:L5", "set", "_enadev", "Handset"]]

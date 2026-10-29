@@ -76,8 +76,43 @@ pub fn canonical(raw: &str, region: &str) -> String {
     }
 }
 
+/// A number prefix ("0491 57" for every number starting that way) in the stored
+/// form, with one full number it covers: the prefix is padded with zeros until it
+/// reads as a valid number, so its national trunk prefix and country code come out
+/// right. None when no number starts that way.
+pub fn canonical_prefix(stem: &str, region: &str) -> Option<(String, String)> {
+    let d = digits(stem);
+    if d.is_empty() || d.contains(['*', '#']) {
+        return None;
+    }
+    for pad in 0..=12 {
+        let full = canonical(&format!("{d}{}", "0".repeat(pad)), region);
+        if full.starts_with('+') && full.len() > pad {
+            return Some((full[..full.len() - pad].to_string(), full));
+        }
+    }
+    None
+}
+
 /// How the panel shows a number: national format for the home region, international
 /// for any other, the raw form for anything that does not parse.
+/// A thread's peer: one number, or for a group text every member's, canonical,
+/// sorted and joined with commas (as phoned stores them).
+pub fn canonical_peer(raw: &str, region: &str) -> String {
+    if !raw.contains(',') {
+        return canonical(raw, region);
+    }
+    let mut members: Vec<String> = raw.split(',').map(|n| canonical(n, region)).filter(|n| !n.is_empty()).collect();
+    members.sort();
+    members.dedup();
+    members.join(",")
+}
+
+/// A peer for showing: each member of a group in national form, comma separated.
+pub fn display_peer(stored: &str, region: &str) -> String {
+    stored.split(',').map(|n| display(n, region)).collect::<Vec<_>>().join(", ")
+}
+
 pub fn display(stored: &str, region: &str) -> String {
     let d = digits(stored);
     if d.len() < 6 {
@@ -245,5 +280,14 @@ mod tests {
         assert!(same_party("+61412345678", "+61412345678"));
         assert!(!same_party("+61412345678", "+61412345679"));
         assert!(!same_party("1234", "01234"));
+    }
+
+    #[test]
+    fn prefixes_read_like_numbers() {
+        let (p, full) = canonical_prefix("0491 571", "AU").unwrap();
+        assert_eq!(p, "+61491571");
+        assert!(full.starts_with("+61491571") && full.len() == 12, "{full}");
+        assert_eq!(canonical_prefix("+44 7700", "AU").unwrap().0, "+447700");
+        assert_eq!(canonical_prefix("1900", "AU").map(|(_, f)| classify(&f, "AU")), Some(Class::Premium));
     }
 }

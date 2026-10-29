@@ -11,9 +11,16 @@ rust-version.workspace = true
 [dependencies]
 libc = "0.2"
 phonenumber = "0.3"
-rusqlite = { version = "0.41", features = ["bundled"] }
+# SQLCipher in place of SQLite: the same file format when no key is given, and an
+# encrypted one when it is (Store::open_keyed). It uses the system's libcrypto.
+# Only phoned opens the store, so the panel apps build without it (no "db").
+rusqlite = { version = "0.41", features = ["bundled-sqlcipher"], optional = true }
 serde.workspace = true
 thiserror = "2"
+
+[features]
+default = ["db"]
+db = ["dep:rusqlite"]
 
 [dev-dependencies]
 tempfile = "3"

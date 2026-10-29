@@ -19,6 +19,20 @@ fn string_arg(props: &HashMap<String, OwnedVariant>, key: &str) -> Option<String
     props.get(key).and_then(|v| String::try_from(v.clone()).ok())
 }
 
+fn bool_arg(props: &HashMap<String, OwnedVariant>, key: &str) -> bool {
+    props.get(key).and_then(|v| bool::try_from(v.clone()).ok()).unwrap_or(false)
+}
+
+/// ModemManager's core errors, by their D-Bus names.
+#[derive(Debug, zbus::DBusError)]
+#[zbus(prefix = "org.freedesktop.ModemManager1.Error.Core")]
+pub enum CoreError {
+    #[zbus(error)]
+    ZBus(zbus::Error),
+    Failed(String),
+    Unauthorized(String),
+}
+
 /// `org.freedesktop.ModemManager1` itself.
 pub struct Manager;
 
@@ -35,10 +49,32 @@ impl Manager {
     }
 }
 
-pub struct Sim;
+pub struct Sim {
+    pub world: Shared,
+}
 
 #[interface(name = "org.freedesktop.ModemManager1.Sim")]
 impl Sim {
+    async fn send_pin(&self, pin: &str, #[zbus(connection)] conn: &Connection) -> zbus::fdo::Result<()> {
+        let mut w = self.world.lock().await;
+        if !w.locked {
+            return Ok(());
+        }
+        if w.pin_retries == 0 {
+            return Err(zbus::fdo::Error::Failed("SIM blocked: PUK required".into()));
+        }
+        if pin != w.pin {
+            w.pin_retries -= 1;
+            return Err(zbus::fdo::Error::Failed(format!("incorrect PIN, {} tries left", w.pin_retries)));
+        }
+        w.locked = false;
+        w.pin_retries = 3;
+        drop(w);
+        unlock_interfaces(conn, &self.world).await;
+        tracing::info!("SIM unlocked");
+        Ok(())
+    }
+
     #[zbus(property)]
     fn active(&self) -> bool {
         true
@@ -80,16 +116,28 @@ pub struct Modem {
 
 #[interface(name = "org.freedesktop.ModemManager1.Modem")]
 impl Modem {
-    fn enable(&self, _enable: bool) {}
+    async fn enable(&self, enable: bool, #[zbus(connection)] conn: &Connection) -> zbus::fdo::Result<()> {
+        self.world.lock().await.enabled = enable;
+        tracing::info!(enable, "modem enable");
+        let _ = announce_signal(conn).await;
+        Ok(())
+    }
     fn list_bearers(&self) -> Vec<OwnedObjectPath> {
         Vec::new()
     }
     fn reset(&self) {}
     fn set_power_state(&self, _state: u32) {}
-    /// AT passthrough. Real modems answer; this one agrees with everything.
-    fn command(&self, cmd: &str, _timeout: u32) -> String {
+    /// AT passthrough, answered as an RM520N-GL would. ModemManager refuses it
+    /// unless it runs with --debug (mm-iface-modem.c), and so does this.
+    async fn command(&self, cmd: &str, _timeout: u32) -> Result<String, CoreError> {
         tracing::info!(cmd, "AT command");
-        "OK".into()
+        let mut w = self.world.lock().await;
+        if !w.at.debug {
+            return Err(CoreError::Unauthorized(
+                "Cannot send AT command to modem: operation only allowed in debug mode".into(),
+            ));
+        }
+        w.at.answer(cmd).ok_or_else(|| CoreError::Failed("ERROR".into()))
     }
 
     #[zbus(property)]
@@ -127,7 +175,7 @@ impl Modem {
     }
     #[zbus(property)]
     fn manufacturer(&self) -> String {
-        "Dolphone".into()
+        "Quectel".into()
     }
     #[zbus(property)]
     fn model(&self) -> String {
@@ -184,12 +232,17 @@ impl Modem {
     }
     /// MMModemLock: 1 none.
     #[zbus(property)]
-    fn unlock_required(&self) -> u32 {
-        1
+    async fn unlock_required(&self) -> u32 {
+        // MMModemLock: 1 none, 2 SIM PIN.
+        if self.world.lock().await.locked {
+            2
+        } else {
+            1
+        }
     }
     #[zbus(property)]
-    fn unlock_retries(&self) -> HashMap<u32, u32> {
-        HashMap::from([(2, 3)])
+    async fn unlock_retries(&self) -> HashMap<u32, u32> {
+        HashMap::from([(2, self.world.lock().await.pin_retries)])
     }
     #[zbus(property)]
     async fn state(&self) -> i32 {
@@ -222,14 +275,22 @@ impl Modem {
     fn power_state(&self) -> u32 {
         3
     }
-    /// (allowed, preferred) MMModemMode pairs: 8 is 4G, 16 is 5G.
+    /// (allowed, preferred) MMModemMode pairs (2 is 2G, 4 3G, 8 4G), as a modem
+    /// with 2G, 3G and LTE offers them.
     #[zbus(property)]
     fn supported_modes(&self) -> Vec<(u32, u32)> {
-        vec![(8 | 16, 16), (8, 0)]
+        vec![(2 | 4 | 8, 8), (4 | 8, 8), (8, 0), (2 | 4, 4)]
     }
     #[zbus(property)]
-    fn current_modes(&self) -> (u32, u32) {
-        (8 | 16, 16)
+    async fn current_modes(&self) -> (u32, u32) {
+        self.world.lock().await.modes
+    }
+    async fn set_current_modes(&self, modes: (u32, u32)) -> zbus::fdo::Result<()> {
+        if !self.supported_modes().contains(&modes) {
+            return Err(zbus::fdo::Error::InvalidArgs("unsupported modes".into()));
+        }
+        self.world.lock().await.modes = modes;
+        Ok(())
     }
     #[zbus(property)]
     fn supported_bands(&self) -> Vec<u32> {
@@ -343,6 +404,7 @@ impl Voice {
             direction: 2,
             number: number.clone(),
             dtmf: String::new(),
+            multiparty: false,
         };
         server.at(p.as_str(), c).await?;
         Self::call_added(&em, path(&p)).await?;
@@ -417,10 +479,13 @@ impl Voice {
         Err(zbus::fdo::Error::NotSupported("transfer".into()))
     }
 
-    fn call_waiting_setup(&self, _enable: bool) {}
+    async fn call_waiting_setup(&self, enable: bool) {
+        self.world.lock().await.call_waiting = enable;
+        tracing::info!(enable, "call waiting");
+    }
 
-    fn call_waiting_query(&self) -> bool {
-        true
+    async fn call_waiting_query(&self) -> bool {
+        self.world.lock().await.call_waiting
     }
 
     #[zbus(signal)]
@@ -495,6 +560,8 @@ impl Messaging {
             number,
             text,
             timestamp: String::new(),
+            delivery_report: bool_arg(&properties, "delivery-report-request"),
+            delivery: crate::world::DELIVERY_UNKNOWN,
         };
         server.at(p.as_str(), s).await?;
         Self::added(&em, path(&p), false).await?;
@@ -604,6 +671,7 @@ pub fn new_incoming(world: &Shared, p: &str, number: &str, state: i32) -> Call {
         direction: 1,
         number: number.to_string(),
         dtmf: String::new(),
+        multiparty: false,
     }
 }
 
@@ -616,5 +684,104 @@ pub fn new_received(world: &Shared, p: &str, number: &str, text: &str) -> Sms {
         number: number.to_string(),
         text: text.to_string(),
         timestamp: sms::timestamp_now(),
+        delivery_report: false,
+        delivery: crate::world::DELIVERED,
     }
+}
+
+/// Emergency alerts: ModemManager's CellBroadcast interface on the modem.
+pub struct CellBroadcast {
+    pub world: Shared,
+}
+
+#[interface(name = "org.freedesktop.ModemManager1.Modem.CellBroadcast")]
+impl CellBroadcast {
+    async fn list(&self) -> Vec<OwnedObjectPath> {
+        self.world.lock().await.cbm.iter().map(|p| path(p)).collect()
+    }
+
+    async fn delete(
+        &self,
+        path_: OwnedObjectPath,
+        #[zbus(object_server)] server: &ObjectServer,
+        #[zbus(signal_emitter)] em: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<()> {
+        self.world.lock().await.cbm.retain(|p| p.as_str() != path_.as_str());
+        let _ = server.remove::<Cbm, _>(path_.as_str()).await;
+        Self::deleted(&em, path_).await?;
+        Ok(())
+    }
+
+    async fn set_channels(&self, channels: Vec<(u32, u32)>, #[zbus(signal_emitter)] em: SignalEmitter<'_>) {
+        tracing::info!(?channels, "cell broadcast channels");
+        self.world.lock().await.channels = channels;
+        let _ = self.channels_changed(&em).await;
+    }
+
+    #[zbus(signal)]
+    pub async fn added(em: &SignalEmitter<'_>, path: OwnedObjectPath) -> zbus::Result<()>;
+    #[zbus(signal)]
+    pub async fn deleted(em: &SignalEmitter<'_>, path: OwnedObjectPath) -> zbus::Result<()>;
+
+    #[zbus(property)]
+    async fn cell_broadcasts(&self) -> Vec<OwnedObjectPath> {
+        self.world.lock().await.cbm.iter().map(|p| path(p)).collect()
+    }
+
+    #[zbus(property)]
+    async fn channels(&self) -> Vec<(u32, u32)> {
+        self.world.lock().await.channels.clone()
+    }
+}
+
+/// One cell broadcast message.
+pub struct Cbm {
+    pub state: u32,
+    pub text: String,
+    pub channel: u32,
+    pub message_code: u32,
+    pub update: u32,
+}
+
+#[interface(name = "org.freedesktop.ModemManager1.Cbm")]
+impl Cbm {
+    #[zbus(property)]
+    fn state(&self) -> u32 {
+        self.state
+    }
+    #[zbus(property)]
+    fn text(&self) -> String {
+        self.text.clone()
+    }
+    #[zbus(property)]
+    fn channel(&self) -> u32 {
+        self.channel
+    }
+    #[zbus(property)]
+    fn message_code(&self) -> u32 {
+        self.message_code
+    }
+    #[zbus(property)]
+    fn update(&self) -> u32 {
+        self.update
+    }
+}
+
+/// The interfaces a locked SIM hides.
+pub async fn lock_interfaces(conn: &Connection) {
+    let s = conn.object_server();
+    let _ = s.remove::<Voice, _>(MODEM).await;
+    let _ = s.remove::<Messaging, _>(MODEM).await;
+    let _ = s.remove::<Ussd, _>(MODEM).await;
+    let _ = s.remove::<CellBroadcast, _>(MODEM).await;
+    let _ = announce_signal(conn).await;
+}
+
+pub async fn unlock_interfaces(conn: &Connection, world: &Shared) {
+    let s = conn.object_server();
+    let _ = s.at(MODEM, Voice { world: world.clone() }).await;
+    let _ = s.at(MODEM, Messaging { world: world.clone() }).await;
+    let _ = s.at(MODEM, Ussd { world: world.clone() }).await;
+    let _ = s.at(MODEM, CellBroadcast { world: world.clone() }).await;
+    let _ = announce_signal(conn).await;
 }

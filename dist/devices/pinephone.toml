@@ -1,0 +1,22 @@
+# The PinePhone: the Quectel EG25-G's call audio is wired to the A64's codec, so
+# there is nothing to bridge; ALSA UCM's Voice Call verb connects it.
+id = "pinephone"
+name = "PinePhone"
+status = "untested"
+source = "Mainline device tree (sun50i-a64-pinephone-1.*.dts: pine64,pinephone-1.x, pine64,pinephone); the PinePhone card name in its device tree; alsa-ucm-conf ucm2/Allwinner/A64/PinePhone (Voice Call verb: Speaker, Earpiece, Headphones, Headset, Mic)"
+notes = "Calls start on the earpiece; Edit moves them to the loudspeaker, the jack or Bluetooth. Stop callaudiod and GNOME Calls first: one program should own the modem."
+front_ends = ["desktop"]
+
+[match]
+dt_compatible = ["pine64,pinephone", "pine64,pinephone-1.0", "pine64,pinephone-1.1", "pine64,pinephone-1.2"]
+priority = 90
+
+[audio]
+modem_match = []
+echo_cancel_sink = ""
+echo_cancel_source = ""
+call_start_commands = [["alsaucm", "-c", "hw:PinePhone", "set", "_verb", "Voice Call"]]
+call_stop_commands = [["alsaucm", "-c", "hw:PinePhone", "set", "_verb", "HiFi"]]
+speaker_commands = [["alsaucm", "-c", "hw:PinePhone", "set", "_enadev", "Speaker"]]
+wired_commands = [["alsaucm", "-c", "hw:PinePhone", "set", "_enadev", "Headphones"]]
+earpiece_commands = [["alsaucm", "-c", "hw:PinePhone", "set", "_enadev", "Earpiece"]]

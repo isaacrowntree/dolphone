@@ -31,5 +31,9 @@ accepted = [
     "BSL-1.0",
     "CC0-1.0",
     "NCSA",
+    # The bundled sources of SQLCipher (sqlcipher-src, in phoned only): the
+    # public-domain blessing of SQLite, and the WTFPL of libtomcrypt.
+    "blessing",
+    "WTFPL",
     "GPL-3.0-only",
 ]

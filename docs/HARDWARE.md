@@ -17,6 +17,12 @@ running Flipper OS is the target.
 **GO** when G1-G3 pass on at least one modem. **NO-GO** when G2 fails on every
 candidate: publish what was measured and stop.
 
+On another machine (a Raspberry Pi, a uConsole, a PinePhone, a Librem 5, a laptop),
+the same gates are how its device profile goes from "untested" to "tested": run them,
+note what passed, and send the profile's file back with its `status` and `notes`
+updated (see [DEVICES.md](DEVICES.md)). `phonectl device` says which profile is in
+use, and why.
+
 ## G0: the modem is there
 
 ```sh
@@ -27,6 +33,23 @@ mmcli -m any --command='AT+QGMR' 2>/dev/null || sudo qmicli -d /dev/cdc-wdm0 --d
 ```
 
 Write down the firmware revision: Quectel asks for it.
+
+`mmcli --command` and Dolphone's AT commands (the modem setup, the Flipper One's
+`AT+QPCMV=1,2` at every start, call forwarding codes) need ModemManager in **debug
+mode**, the only mode in which it passes AT commands from a client. Installing the
+package asks whether to turn it on (yes by default on a Flipper One, where call
+audio needs it). To change it later:
+
+```sh
+sudo dolphone-modem-access on      # or off, or status; dpkg-reconfigure dolphone asks again
+```
+
+Phone Settings > Modem offers **Turn on** too, with a password prompt.
+
+What it costs: `--debug` also sets ModemManager's log level to DEBUG. ModemManager
+hides numbers and message text from its QMI and MBIM log lines unless started
+with `--log-personal-info` (since 1.20), but not from AT traffic, so with an AT
+modem the journal can hold them. Removing the package turns it off again.
 
 ## G1: calls
 
@@ -44,15 +67,36 @@ If calls fail to set up: `mmcli -m any | grep -i "carrier config"` should name y
 carrier's VoLTE profile (Quectel calls it MBN). `AT+QMBNCFG="List"` shows the
 profiles the firmware has.
 
+Dolphone checks the setup a Quectel modem needs for calls and can make it:
+
+```sh
+phonectl modem setup           # USB audio, VoLTE, carrier profile: ok or change
+phonectl modem setup apply     # waits for a press on the device; the modem restarts
+```
+
+| Step | Checked with | Changed with | Source |
+|---|---|---|---|
+| USB call audio | `AT+QCFG="usbcfg"` (the last function is UAC) | the same with it set to 1 | Quectel LTE Standard UAC Application Note §4.1 |
+| VoLTE | `AT+QCFG="ims"` (`<setting>,<registered>`) | `AT+QCFG="ims",1` | Quectel forum (EC25, RM520N-GL threads) |
+| Carrier profile | `AT+QMBNCFG="AutoSel"` | `AT+QMBNCFG="AutoSel",1` | Quectel forum |
+| Restart | | `AT+CFUN=1,1` | 3GPP TS 27.007 |
+
+None of the three is in the public RM5x0N AT manual (V1.0), so treat a "change"
+on real firmware as something to confirm, and report what it answered. Phone
+Settings > Modem shows the same check, with **Set up** when there is something to do.
+
 ## G2: call audio (the deciding one)
 
 The RM520N-GL has no PCM pins (they are reserved on the GL variant; only the -EU
 variant has them), so call audio has to come over USB as a sound card.
 
-1. Ask Quectel for the "RM520N-GL UAC Application Note" (forum or distributor; it
-   is not public), with your firmware revision.
-2. Enable UAC as the note says. It is an `AT+QCFG="USBCFG",...` setting and a modem
-   reset; the exact values are in the note.
+1. Turn on UAC: `phonectl modem setup apply`, or by hand as Quectel's LTE Standard
+   UAC Application Note describes: query `AT+QCFG="usbcfg"`, send the same values
+   back with the last one set to 1, and restart (`AT+CFUN=1,1`). A firmware that
+   lists only six functions cannot do it by AT command; ask Quectel for the
+   RM520N-GL note and a firmware that can, with your revision.
+2. Send voice to USB: `AT+QPCMV=1,2`. The modem forgets it at every restart; the
+   Flipper One profile's `modem_at` has phoned send it each time the modem appears.
 3. Check a new card appears:
    ```sh
    aplay -l; arecord -l             # a Quectel card
@@ -63,13 +107,32 @@ variant has them), so call audio has to come over USB as a sound card.
    pw-loopback --capture=<quectel source> --playback=<speaker or headset sink> &
    pw-loopback --capture=<microphone> --playback=<quectel sink> &
    ```
-   Both people should hear each other. If the modem needs voice routed to USB per
-   call, Quectel's note names the command (`AT+QPCMV` on related modules).
+   Both people should hear each other. The note gives the format as 8 kHz, mono,
+   16-bit; PipeWire converts.
 5. Then let phoned do it: `scripts/run-dev.sh` with `REAL_MODEM=1`, call, and check
    `pgrep -a pw-loopback` shows the two loopbacks it starts.
 
 If the card appears but carries silence, try the other UAC mode the note lists,
 check `AT+QAUDMOD`, and capture `pw-top` during the call. Record what you tried.
+
+## Call forwarding and caller ID
+
+ModemManager has no API for these, so the dialer sends them as the standard AT
+commands (3GPP TS 27.007), through the same debug-mode passthrough:
+
+| Keypad | Does | Command |
+|---|---|---|
+| `**21*0412345678#` | forward every call | `AT+CCFC=0,3,"0412345678",129,1` |
+| `**67*n#`, `**61*n#`, `**62*n#` | forward when busy, unanswered, unreachable | `AT+CCFC=1/2/3,3,...` |
+| `**61*n**20#` | unanswered after 20 s | `...,1,,,20` |
+| `*#21#` | is it on? | `AT+CCFC=0,2` |
+| `#21#`, `##21#`, `##002#` | off, cleared, clear every forward | `AT+CCFC=…,0` / `,4` |
+| `*#31#`, `#31#`, `*31#` | caller ID: ask, show, hide | `AT+CLIR?`, `=2`, `=1` |
+| `*43#`, `#43#`, `*#43#` | call waiting | ModemManager's Voice API |
+
+Barring codes (`*33*…#`) are refused: they need the network's barring password.
+On real hardware, after setting a forward, ring the SIM from another phone and
+check where the call goes.
 
 ## G3: texts
 
@@ -82,6 +145,19 @@ mmcli -m any --messaging-list-sms        # after texting the SIM from another ph
 On Australian 4G-only networks texts travel over IMS too: if G1 needed a carrier
 profile, G3 does as well.
 
+Picture messages and group texts come over mobile data (MMS), so they need a data
+connection and mmsd-tng:
+
+```sh
+sudo apt install mmsd-tng                # it finds most carriers' MMS settings itself
+# Send the SIM a picture from another phone, then:
+phonectl threads                         # the text, with [Picture]
+phonectl mms 0491570156 --file test.jpg "Dolphone MMS test"
+```
+
+If nothing arrives, check `~/.mms/modemmanager/mms` against your carrier's MMSC,
+proxy and APN, and `journalctl --user -u mmsd-tng`. Record what you changed.
+
 ## Then: Dolphone on real hardware
 
 ```sh
@@ -92,6 +168,10 @@ phonectl status                          # your operator, signal, number
 
 Install the polkit rule (`dist/polkit/50-dolphone.rules`, the .deb does) so phoned
 may use Voice and Messaging from your session.
+
+On the Flipper One, `ls /sys/class/leds` shows the LEDs' real names: if they are
+not the `flipper-one:*` names in the profile's `ring_leds`, note them (and the udev
+rule's match).
 
 ## Report back
 

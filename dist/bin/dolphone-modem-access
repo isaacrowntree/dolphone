@@ -1,0 +1,62 @@
+#!/bin/sh
+# Turn ModemManager's debug mode on or off for Dolphone.
+#
+#     sudo dolphone-modem-access on | off | status
+#
+# ModemManager passes AT commands from its clients (Modem.Command, mmcli
+# --command) only with --debug (handle_command in src/mm-iface-modem.c). Dolphone
+# needs that for the modem's setup (phonectl modem setup), a profile's start-up
+# commands (the Flipper One's AT+QPCMV=1,2, which the modem forgets at every
+# restart), serial call audio on a SIM7600 (AT+CPCMREG), and call forwarding and
+# caller-ID codes.
+#
+# What it costs: --debug also sets ModemManager's log level to DEBUG
+# (src/mm-context.c). ModemManager hides numbers and message text from its QMI and
+# MBIM log lines unless --log-personal-info is given (NEWS, 1.20), but not from AT
+# traffic, so with an AT modem the journal can hold them.
+set -e
+DROPIN=/etc/systemd/system/ModemManager.service.d/dolphone-debug.conf
+SOURCE=/usr/share/dolphone/modemmanager/dolphone-debug.conf
+
+restart() {
+    systemctl daemon-reload
+    # Only if it is running: during an install it may not be yet.
+    if systemctl -q is-active ModemManager; then
+        systemctl restart ModemManager
+    fi
+}
+
+# Keep the install question's answer in step, so an upgrade keeps this choice.
+remember() {
+    # Not from the package's own scripts, which hold debconf themselves.
+    [ -z "${DPKG_MAINTSCRIPT_PACKAGE:-}" ] || return 0
+    command -v debconf-communicate >/dev/null &&
+        echo "set dolphone/modem-access $1" | debconf-communicate dolphone >/dev/null 2>&1 || true
+}
+
+case "${1:-status}" in
+on)
+    [ "$(id -u)" = 0 ] || { echo "run it with sudo" >&2; exit 1; }
+    install -D -m 0644 "$SOURCE" "$DROPIN"
+    restart
+    remember true
+    echo "on: ModemManager runs with --debug, and passes Dolphone's AT commands"
+    ;;
+off)
+    [ "$(id -u)" = 0 ] || { echo "run it with sudo" >&2; exit 1; }
+    if [ -e "$DROPIN" ]; then
+        rm -f "$DROPIN"
+        rmdir --ignore-fail-on-non-empty "$(dirname "$DROPIN")" 2>/dev/null || true
+        restart
+    fi
+    remember false
+    echo "off: ModemManager runs as before; the modem setup and service codes will not work"
+    ;;
+status)
+    if [ -e "$DROPIN" ]; then echo on; else echo off; fi
+    ;;
+*)
+    echo "usage: dolphone-modem-access on | off | status" >&2
+    exit 2
+    ;;
+esac

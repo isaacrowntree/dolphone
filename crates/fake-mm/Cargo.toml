@@ -10,6 +10,11 @@ rust-version.workspace = true
 name = "fake-mm"
 path = "src/main.rs"
 
+# mmsd-tng's stand-in, on the session bus.
+[[bin]]
+name = "fake-mmsd"
+path = "src/bin/fake-mmsd.rs"
+
 [dependencies]
 anyhow.workspace = true
 tokio.workspace = true

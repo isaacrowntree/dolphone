@@ -15,6 +15,9 @@ pub struct Sms {
     pub number: String,
     pub text: String,
     pub timestamp: String,
+    /// The sender asked for a delivery report, and how delivery stands.
+    pub delivery_report: bool,
+    pub delivery: u32,
 }
 
 #[interface(name = "org.freedesktop.ModemManager1.Sms")]
@@ -32,10 +35,21 @@ impl Sms {
         let (conn, path) = (conn.clone(), self.path.clone());
         tokio::time::sleep(Duration::from_millis(150)).await;
         self.state = sms_state::SENT;
+        let report = self.delivery_report;
         tokio::spawn(async move {
             if let Ok(iref) = conn.object_server().interface::<_, Sms>(path.as_str()).await {
                 let em = iref.signal_emitter().clone();
                 let _ = iref.get().await.state_changed(&em).await;
+            }
+            // The network's delivery report, a moment later, when one was asked for.
+            if report {
+                tokio::time::sleep(Duration::from_millis(700)).await;
+                if let Ok(iref) = conn.object_server().interface::<_, Sms>(path.as_str()).await {
+                    let em = iref.signal_emitter().clone();
+                    let mut sms = iref.get_mut().await;
+                    sms.delivery = crate::world::DELIVERED;
+                    let _ = sms.delivery_state_changed(&em).await;
+                }
             }
         });
         tracing::info!(sms = %self.path, to = %self.number, "sent");
@@ -86,7 +100,7 @@ impl Sms {
 
     #[zbus(property)]
     fn delivery_report_request(&self) -> bool {
-        false
+        self.delivery_report
     }
 
     #[zbus(property)]
@@ -121,7 +135,7 @@ impl Sms {
 
     #[zbus(property)]
     fn delivery_state(&self) -> u32 {
-        0
+        self.delivery
     }
 
     #[zbus(property)]

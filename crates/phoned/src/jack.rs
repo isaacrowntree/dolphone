@@ -4,17 +4,17 @@
 //! `SW_MICROPHONE_INSERT`) on some input device, and a TRRS headset's button as a key
 //! (`KEY_MEDIA`, `KEY_PLAYPAUSE`, `KEY_PHONE`). Bluetooth headsets' buttons arrive
 //! the same way, through BlueZ's AVRCP input device. Which device that is depends
-//! on the board (the NAU8822 driver has no jack support of its own, so on the
-//! Flipper One it will be whatever the board wires the detect line to), so this
-//! scans every input device for those capabilities and rescans when devices come
-//! and go.
+//! on the machine (on the Flipper One the RP2350 microcontroller watches the jack
+//! and the headset button and passes them on, so it is whatever input device that
+//! appears as), so this scans every input device for those capabilities and
+//! rescans when devices come and go.
 //!
 //! The buttons only act while a call is ringing or live, so a media key on a
 //! desktop keyboard still plays and pauses music the rest of the time.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use evdev::{Device, EventSummary, KeyCode, SwitchCode};
@@ -40,18 +40,31 @@ fn interesting(d: &Device) -> bool {
 pub fn watch(phone: Arc<Phone>) {
     let rt = tokio::runtime::Handle::current();
     std::thread::spawn(move || {
-        let mut watching: HashSet<PathBuf> = HashSet::new();
+        let watching: Arc<Mutex<HashSet<PathBuf>>> = Arc::default();
         loop {
             for (path, dev) in evdev::enumerate() {
-                if watching.contains(&path) || !interesting(&dev) {
+                let seen = watching.lock().map(|w| w.contains(&path)).unwrap_or(true);
+                if seen || !interesting(&dev) {
                     continue;
                 }
                 tracing::info!(device = dev.name().unwrap_or("?"), "watching for headset events");
-                watching.insert(path.clone());
-                let (phone, rt) = (phone.clone(), rt.clone());
+                if let Ok(mut w) = watching.lock() {
+                    w.insert(path.clone());
+                }
+                let (phone, rt, watching) = (phone.clone(), rt.clone(), watching.clone());
+                let is_jack = dev.supported_switches().is_some_and(|s| s.contains(SwitchCode::SW_HEADPHONE_INSERT));
                 std::thread::spawn(move || {
                     read(dev, &phone, &rt);
                     tracing::debug!("input device {path:?} went away");
+                    // Forget it, so the same device coming back (a Bluetooth headset
+                    // reconnecting, a USB headset replugged) is watched again; and a
+                    // jack that vanished has nothing plugged into it.
+                    if let Ok(mut w) = watching.lock() {
+                        w.remove(&path);
+                    }
+                    if is_jack {
+                        phone.audio.set_wired(false);
+                    }
                 });
             }
             std::thread::sleep(Duration::from_secs(5));

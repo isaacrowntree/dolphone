@@ -9,6 +9,8 @@ runs beside it is careless or hostile.
 | Threat | What Dolphone does |
 |---|---|
 | A program as the same user texts or dials (premium numbers, toll fraud, spam) | Anything not from Dolphone's own front ends waits for a press on the device or in the desktop app. Premium numbers (AU 19xx) and short codes wait for everyone. Texts are limited to 30 an hour and calls to 20. |
+| A program texts without asking, once allowed | A **standing grant** is for one program, listed numbers or a prefix, a per-hour limit (1–60) and an end date (at most a year), allowed on the device. Premium, short and emergency numbers can never be granted. Anyone may revoke a grant; only Dolphone's own apps may list them. |
+| A program changes your contacts (to make a scammer's number read "Bank", or to get past "silence unknown callers") | Adding, editing, removing or importing contacts from anything but Dolphone's own apps waits for a press on the device. Reading contacts needs the same grant as reading messages. A phonebook copy over Bluetooth is only started from Phone Settings. Imports keep names and numbers only. |
 | A program reads your one-time codes | Messages, the call log and the block list are only served to Dolphone's own apps and to programs the owner grants reading (`read_grants`). The new-message signal, which everything on the bus sees, carries no text. **Same-user code can still read the store file directly**; see Limits. |
 | A program answers a call it placed (the device as a room microphone), sends keypad tones, reroutes audio, pairs a Bluetooth headset or changes settings | Only Dolphone's own apps may. Anyone may hang up. |
 | A program poses as the desktop's notification server (to read notifications or press their buttons) | phoned only uses a notification server that is a system program (under /usr, owned by root), only acts on button signals from that server, and no notification can allow a waiting request: Review opens the desktop app, and only Deny acts directly. |
@@ -16,8 +18,15 @@ runs beside it is careless or hostile.
 | A hostile text (control characters, bidi overrides that make a link read backwards, zero-width text, huge bodies) | Cleaned once on arrival, before the store, logs or screens; capped at 4 KB; drawn with ASCII fonts. Flash (class 0) texts are shown, not stored. |
 | USSD codes that change account settings | Only run when typed on Dolphone's own dialer; never from D-Bus callers, never from links. |
 | Emergency calls | Never blocked or delayed when dialled on the keypad; never sent over the internet; routed to the modem as normal calls, which the network treats as emergency calls. An outside program asking to call 000 must be confirmed. |
-| Personal data outliving a reset | The store and contacts live under `~/.local/share/dolphone` (0700/0600). `/home` survives a Flipper OS factory reset, so Settings has **Delete phone data**, confirmed on the device. |
+| Personal data outliving a reset | The store, contacts and MMS pictures live under `~/.local/share/dolphone` (0700/0600). `/home` survives a Flipper OS factory reset, so Settings has **Delete phone data**, confirmed on the device, which removes the pictures too. |
+| A copy of the home directory (a backup, another account, a disk read elsewhere) | `phoned --encrypt-store` encrypts the message store with SQLCipher under a random key that `systemd-creds --user` seals to this user on this machine (with the machine's root-only credential secret, and the TPM2 chip when there is one). A copy of the home directory alone cannot open it. Someone with the whole disk can, unless a TPM holds the secret or the disk is encrypted. If the key cannot be unsealed phoned leaves the store as it is and keeps new texts on the SIM. MMS pictures are not encrypted with it. |
+| A program sends your files by MMS | `SendMms` from anything but Dolphone's own apps waits for a press on the device, which shows the files' names; grants never cover MMS. Files are read only once allowed, and at most 8 MB. |
+| ModemManager's debug mode | Dolphone's AT commands (the modem's setup, call forwarding codes, the Flipper One's call-audio command) pass only in this mode, which also logs at debug level: ModemManager hides numbers and texts in its QMI and MBIM log lines, but not in AT traffic. The install asks (yes by default only on a Flipper One, where call audio needs it); `dolphone-modem-access off` turns it off, and removing the package does. Call forwarding codes still only run from Dolphone's own dialer. |
 | Logs | Numbers are masked (`+61…156`); message bodies are never logged. |
+| Knowing what programs did | Every outside request (dial, text, read, contacts, grants, answer attempts) goes in an **audit log** in the store, numbers masked, capped at 1000 entries, readable only from Dolphone's own apps (Phone Settings > Privacy). |
+| A rule on incoming texts as a way in | Rules live in `~/.config/dolphone/rules.json`, which only the owner writes. A rule runs a program directly (never a shell) with the text as JSON on stdin, for at most 30 s; it may reply only to a sender it names, never to "anyone", and a rule can require a shared secret in the text. |
+| The SIP account | The password is written to `~/.config/dolphone/sip/` (0700, file 0600) and never returned over D-Bus (`Get` answers "set"). Only Dolphone's own apps can set it. The account and proxy are checked so they cannot add options to baresip's account line. phoned listens only to the baresip process it started, so another program claiming baresip's bus name cannot fake calls. Media is encrypted (SRTP) when the provider offers it. Emergency calls never go over SIP. |
+| Emergency alerts | National alerts cannot be turned off. Alerts are shown and sounded whatever the ringer says, and their text is always shown (they are public). |
 | Bluetooth | The pairing agent only accepts a pairing started from a Dolphone screen in the last minute. |
 
 ## Limits
@@ -27,9 +36,10 @@ full path: `/usr/bin/dolphone-*` owned by root, or the same name inside an
 AppImage's mount (the panel apps run from `~/Apps`). The `DOLPHONE_TRUST_ALL` and
 `DOLPHONE_READ_GRANTS` test switches exist only in debug builds. This stops scripts
 and tools that use the API, and makes every such action visible, but it is a speed
-bump: code running as your user can fake an AppImage mount under `/tmp`, read the
-SQLite file, ptrace the apps, or call ModemManager directly (polkit allows the
-active local session). Separating users, or a sandbox around third-party tools, is
+bump: code running as your user can fake an AppImage mount under `/tmp` (unless the
+`trust_appimages` setting is off, which trusts only `/usr/bin`), read the SQLite file (or, with the
+store encrypted, unseal its key the way phoned does), ptrace the apps, or call
+ModemManager directly (polkit allows the active local session). Separating users, or a sandbox around third-party tools, is
 the real fix; ROADMAP.md lists the next steps.
 
 ## Reporting

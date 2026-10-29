@@ -4,12 +4,13 @@
 
 | Crate | Runs as | Job |
 |---|---|---|
-| `phone-core` | library | numbers (canonical form, display, emergency / premium / short classes), message text cleaning and SMS segment counting, vCard contacts, the SQLite store, local time |
+| `phone-core` | library | numbers (canonical form, display, emergency / premium / short classes, prefixes), message text cleaning, SMS segment counting and one-time codes, vCard contacts (import, merge, edit), supplementary-service codes (TS 22.030), the store (SQLite, or SQLCipher when encrypted: messages with their MMS parts, calls, alerts, grants, audit; behind the `db` feature, which the panel apps leave out), the countries' call-progress tones, local time |
 | `phone-api` | library | the D-Bus names, wire types and client proxies; a script author can use it alone |
 | `phone-bus` | library | a front end's worker thread: subscribes to everything phoned says, runs calls off the UI thread, survives phoned restarting |
-| `phoned` | systemd user service | the phone: ModemManager client, call state, texts, confirmations, call audio, ringer, Bluetooth, jack, desktop notifications |
+| `phoned` | systemd user service | the phone: ModemManager client, call state, texts, MMS through mmsd-tng, emergency alerts, confirmations and grants, call audio (including a serial PCM bridge), ringer, tones and LEDs, Bluetooth and the phonebook copy, jack, SIP through baresip, KDE Connect, device profiles, the modem's AT setup and service codes, rules on texts, uplink alerts, sleep and wake, desktop notifications, the store's sealed key |
+| `dolphone-gateway` | optional user service | an HTTP SMS gateway on phoned's API, localhost only by default |
 | `phonectl` | CLI | everything a front end can do, for scripts; `phonectl fake ...` plays the far end against fake-mm |
-| `fake-mm` | dev service | a ModemManager stand-in with one scriptable modem |
+| `fake-mm` | dev service | a ModemManager stand-in with one scriptable modem: calls, texts, delivery reports, cell broadcast, a SIM PIN, call waiting, conferences, AT commands as a Quectel answers them (refused without debug mode); and `fake-mmsd`, an mmsd-tng stand-in on the session bus |
 | `apps/dialer`, `apps/messages`, `apps/settings` | FlipCTL apps | the panel front ends (Wayland clients on flipctl's compositor, drawn with flipctl-app's widgets) |
 | `apps/desktop` | desktop app | the desktop-mode front end |
 
@@ -33,7 +34,10 @@
 4. **Untrusted input is cleaned once, on the way in.** Sender names and bodies lose
    control characters, bidi overrides and zero-width characters, and are capped,
    before they reach the store, a log or a screen.
-5. **Measured on the panel, in the fonts it draws.** Every position on the panel is
+5. **The Flipper One first; other machines by data.** Everything about the hardware
+   around the modem is a device profile (`dist/devices/*.toml`, see DEVICES.md), so
+   a new machine is a file, not a branch in the code.
+6. **Measured on the panel, in the fonts it draws.** Every position on the panel is
    computed in Rust, text is wrapped and cut with the bitmap font that will draw it,
    and the screens are rendered headlessly in tests (`DOLPHONE_RENDER=1 cargo test`).
 
@@ -57,14 +61,37 @@
    blocked), tears the audio down, emits `CallRemoved`, posts a missed-call
    notification if it was one, and has ModemManager delete the Call object.
 
+## A SIP call
+
+phoned runs its own baresip (config and account in `~/.config/dolphone/sip/`, 0600)
+and drives it over baresip's D-Bus control module, listening only to the connection
+whose process it started. baresip's events (`CALL_INCOMING`, `CALL_ESTABLISHED`,
+`CALL_CLOSED` …) move a SIP call through the same states as a cellular one, so it
+is the same `Live` call to every front end, with `internet: true`. Audio is
+baresip's own, through PipeWire: phoned points it at the route's output and
+microphone with `auplay`/`ausrc` as the route changes. Which network a call takes is
+decided in `Phone::dial`: a SIP address always SIP, an emergency number never, and
+otherwise the owner's choice (always, or only with no mobile signal).
+
 ## A text, end to end
 
 Incoming: `Messaging.Added` → phoned waits for a multipart message to finish
 arriving, cleans sender and body, drops it if blocked, stores it, emits
 `MessageAdded` and notifies, then deletes it from the modem's storage (a full modem
-stops accepting texts). Outgoing: `Messages.Send` → confirmation rules → stored as
-Sending → `Messaging.Create` + `Sms.Send` → Sent or Failed → the modem's copy is
-deleted.
+stops accepting texts). Then the owner's rules (`~/.config/dolphone/rules.json`) run for a matching text,
+with the text as JSON on stdin and no shell. Outgoing: `Messages.Send` → confirmation
+rules (or a standing grant) → stored as Sending → `Messaging.Create` + `Sms.Send` →
+Sent or Failed → with delivery reports on, the modem's copy is kept until the network
+reports Delivered, then deleted.
+
+## An emergency alert
+
+phoned tells the modem's CellBroadcast interface which channels to listen to (the
+3GPP alert ranges). Each `Cbm` is classed by its channel (national, extreme, severe,
+Amber, test, information), dropped if the owner turned that class off (national
+never can be), stored once however often it is rebroadcast, announced as
+`Messages.AlertReceived`, sounded with the alert tone whatever the ringer says, put
+full screen on the panel and the desktop, and deleted from the modem.
 
 ## Confirmations
 
@@ -76,12 +103,21 @@ desktop session, lets it go. Requests expire after two minutes. Who is "inside" 
 decided by the executable behind the D-Bus caller; see SECURITY.md for what that
 does and does not protect.
 
+A **standing grant** lets one program text listed numbers (or a prefix) without
+asking each time, up to its own hourly limit and until a date; it is asked for with
+`Settings.RequestGrant`, allowed once on the device, and revoked in Phone Settings.
+Premium, short and emergency numbers can never be granted. Every outside request is
+written to the **audit log** (numbers masked), shown in Phone Settings.
+
 ## Where things live
 
 | What | Where |
 |---|---|
-| Messages, call log, blocks, settings | `~/.local/share/dolphone/dolphone.db` (0600) |
+| Messages, call log, alerts, grants, audit, blocks, settings | `~/.local/share/dolphone/dolphone.db` (0600) |
 | Contacts | `~/.local/share/dolphone/contacts/*.vcf` |
-| Audio board config | `~/.config/dolphone/audio.json` |
+| Device profiles | built in; `/usr/share/dolphone/devices/`; `~/.config/dolphone/devices/` |
+| The owner's audio overrides | `~/.config/dolphone/audio.json` |
+| Rules on incoming texts | `~/.config/dolphone/rules.json` |
+| SIP: baresip's config, account and password | `~/.config/dolphone/sip/` (0700; accounts and password 0600) |
 | Ring tones, handoff file, desktop socket | `$XDG_RUNTIME_DIR/dolphone/` |
 | Panel apps | `~/Apps/Phone/dolphone-*-aarch64.fap.AppImage` |

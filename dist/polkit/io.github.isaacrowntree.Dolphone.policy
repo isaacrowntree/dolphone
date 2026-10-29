@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!-- Phone Settings > Modem runs dolphone-modem-access through pkexec; this names
+     it, so the password prompt says what it is for (pkexec(1): the
+     org.freedesktop.policykit.exec.path annotation). An administrator's password,
+     remembered for a few minutes. -->
+<policyconfig>
+  <vendor>Dolphone</vendor>
+  <vendor_url>https://github.com/isaacrowntree/dolphone</vendor_url>
+  <action id="io.github.isaacrowntree.Dolphone.modem-access">
+    <description>Let Dolphone send setup commands to the modem</description>
+    <message>Turning on ModemManager's debug mode lets Dolphone set the modem up for calls. It needs an administrator.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/dolphone-modem-access</annotate>
+  </action>
+</policyconfig>

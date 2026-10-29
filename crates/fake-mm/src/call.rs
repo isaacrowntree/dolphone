@@ -16,6 +16,7 @@ pub struct Call {
     pub direction: i32,
     pub number: String,
     pub dtmf: String,
+    pub multiparty: bool,
 }
 
 #[interface(name = "org.freedesktop.ModemManager1.Call")]
@@ -59,8 +60,35 @@ impl Call {
         Err(zbus::fdo::Error::NotSupported("deflect".into()))
     }
 
-    fn join_multiparty(&self) -> zbus::fdo::Result<()> {
-        Err(zbus::fdo::Error::NotSupported("multiparty".into()))
+    /// Join this call (usually the held one) with the active call into a conference.
+    async fn join_multiparty(
+        &mut self,
+        #[zbus(connection)] conn: &Connection,
+        #[zbus(signal_emitter)] em: SignalEmitter<'_>,
+    ) -> zbus::fdo::Result<()> {
+        if !matches!(self.state, cs::ACTIVE | cs::HELD) {
+            return Err(zbus::fdo::Error::Failed("only an active or held call can join".into()));
+        }
+        let others: Vec<String> = self.world.lock().await.calls.iter().filter(|p| **p != self.path).cloned().collect();
+        let mut joined = false;
+        for p in &others {
+            if let Some((s, _)) = state_of(conn, p).await {
+                if matches!(s, cs::ACTIVE | cs::HELD) {
+                    set_multiparty(conn, p).await;
+                    joined = true;
+                }
+            }
+        }
+        if !joined {
+            return Err(zbus::fdo::Error::Failed("no other call to join".into()));
+        }
+        self.multiparty = true;
+        let _ = self.multiparty_changed(&em).await;
+        if self.state != cs::ACTIVE {
+            self.transition(&em, cs::ACTIVE, reason::ACCEPTED).await;
+        }
+        tracing::info!(call = %self.path, "joined a conference");
+        Ok(())
     }
 
     fn leave_multiparty(&self) -> zbus::fdo::Result<()> {
@@ -106,7 +134,7 @@ impl Call {
 
     #[zbus(property)]
     fn multiparty(&self) -> bool {
-        false
+        self.multiparty
     }
 
     /// Where a real modem's audio appears: a USB audio card on the RM520N-GL, in
@@ -147,8 +175,28 @@ pub async fn set_state_if(conn: &Connection, path: &str, from: i32, new: i32, wh
     }
 }
 
+/// Put another call in the conference: active, and flagged multiparty.
+pub async fn set_multiparty(conn: &Connection, path: &str) {
+    let Ok(iref) = conn.object_server().interface::<_, Call>(path).await else { return };
+    let em = iref.signal_emitter().clone();
+    let mut call = iref.get_mut().await;
+    call.multiparty = true;
+    let _ = call.multiparty_changed(&em).await;
+    if call.state != cs::ACTIVE {
+        call.transition(&em, cs::ACTIVE, reason::ACCEPTED).await;
+    }
+}
+
 pub async fn state_of(conn: &Connection, path: &str) -> Option<(i32, i32)> {
     let iref = conn.object_server().interface::<_, Call>(path).await.ok()?;
     let c = iref.get().await;
     Some((c.state, c.direction))
+}
+
+/// The keypad tones the call has carried so far.
+pub async fn dtmf_of(conn: &Connection, path: &str) -> String {
+    match conn.object_server().interface::<_, Call>(path).await {
+        Ok(iref) => iref.get().await.dtmf.clone(),
+        Err(_) => String::new(),
+    }
 }

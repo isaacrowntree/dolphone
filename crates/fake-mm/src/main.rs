@@ -18,9 +18,11 @@
 //! Property names, types and enum values follow ModemManager 1.24's introspection
 //! XML, so a client written against fake-mm needs no change for a real modem.
 
+mod at;
 mod call;
 mod control;
 mod modem;
+mod nm;
 mod objmgr;
 mod sms;
 mod world;
@@ -41,25 +43,32 @@ async fn main() -> anyhow::Result<()> {
 
     let session = std::env::args().any(|a| a == "--session");
     let world = world::World::shared();
+    let net = nm::shared();
+    let nm_conn = nm::serve(session, net.clone()).await;
     let builder = if session { zbus::connection::Builder::session() } else { zbus::connection::Builder::system() };
     let conn = builder
         .name(SERVICE)
         .serve_at(MANAGER, objmgr::ObjectManager)
         .serve_at(MANAGER, modem::Manager)
         .serve_at(MANAGER, control::Control { world: world.clone() })
-        .serve_at(SIM, modem::Sim)
+        .serve_at(SIM, modem::Sim { world: world.clone() })
         .serve_at(MODEM, modem::Modem { world: world.clone() })
         .serve_at(MODEM, modem::Modem3gpp { world: world.clone() })
         .serve_at(MODEM, modem::Voice { world: world.clone() })
         .serve_at(MODEM, modem::Messaging { world: world.clone() })
         .serve_at(MODEM, modem::Ussd { world: world.clone() })
+        .serve_at(MODEM, modem::CellBroadcast { world: world.clone() })
         .build()
         .await
         .context(
             "claiming org.freedesktop.ModemManager1 (is the real ModemManager running, or is the bus policy missing?)",
         )?;
 
-    world.lock().await.conn = Some(conn.clone());
+    {
+        let mut w = world.lock().await;
+        w.conn = Some(conn.clone());
+        w.nm = nm_conn.map(|c| (c, net));
+    }
     tracing::info!(bus = if session { "session" } else { "system" }, "fake modem up at {MODEM}");
 
     tokio::signal::ctrl_c().await?;

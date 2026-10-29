@@ -4,7 +4,7 @@ use flipctl_app::font;
 use phone_core::model::MessageState;
 use phone_core::{number, text, when};
 
-use crate::model::{Model, Screen, OPTIONS};
+use crate::model::{Model, Opt, Screen, QUICK};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Item {
@@ -86,11 +86,17 @@ pub fn conversation_rows(m: &Model, now: i64) -> Vec<Row> {
         let state = match MessageState::from_u8(msg.state) {
             MessageState::Sending => " sending",
             MessageState::Failed => " FAILED",
+            MessageState::Delivered => " delivered",
             _ => "",
         };
         rows.push(Row { kind: 5, label: who, value: format!("{}{state}", when::short(msg.at, now)), dim: false });
         for line in wrap(&msg.body, TEXT_W) {
             rows.push(Row { kind: 3, label: line, value: String::new(), dim: false });
+        }
+        // The panel's screen is too small for pictures: name what came.
+        for (mime, _) in &msg.parts {
+            let kind = phone_core::model::kind_of(mime);
+            rows.push(Row { kind: 3, label: format!("[{kind}]"), value: String::new(), dim: true });
         }
     }
     if rows.is_empty() {
@@ -137,9 +143,15 @@ pub fn view(m: &Model, now: i64) -> View {
                 });
             }
             let (selected, scroll) = window(m.thread_sel, items.len());
+            // What else is waiting, as in every Dolphone app.
+            let crumb = match m.missed {
+                0 => String::new(),
+                1 => "> 1 missed call".into(),
+                n => format!("> {n} missed calls"),
+            };
             (
-                Body::Menu { items, selected, scroll, breadcrumb: String::new() },
-                b(["Exit", "", "", "New", if empty { "" } else { "Open" }]),
+                Body::Menu { items, selected, scroll, breadcrumb: crumb },
+                b(["Exit", "Search", "", "New", if empty { "" } else { "Open" }]),
             )
         }
         Screen::Conversation => {
@@ -150,11 +162,19 @@ pub fn view(m: &Model, now: i64) -> View {
             (Body::Detail { rows, offset, breadcrumb: crumb }, b(["Back", "Options", "", "Write", "Call"]))
         }
         Screen::Options => {
-            let items = OPTIONS
-                .iter()
-                .enumerate()
-                .map(|(i, o)| Item {
-                    label: if i == 1 && m.is_blocked() { "Unblock number".into() } else { (*o).to_string() },
+            let items = m
+                .options()
+                .into_iter()
+                .map(|o| Item {
+                    label: match o {
+                        Opt::QuickReply => "Quick reply",
+                        Opt::Resend => "Resend failed text",
+                        Opt::Call => "Call",
+                        Opt::Block if m.is_blocked() => "Unblock number",
+                        Opt::Block => "Block number",
+                        Opt::Delete => "Delete conversation",
+                    }
+                    .to_string(),
                     tag: String::new(),
                     status: String::new(),
                     dim: false,
@@ -166,11 +186,53 @@ pub fn view(m: &Model, now: i64) -> View {
                 b(["Back", "", "", "", "Select"]),
             )
         }
+        Screen::Found => {
+            let mut items: Vec<Item> = m
+                .found
+                .iter()
+                .map(|f| Item {
+                    label: fit(&m.name_for(&f.peer), 100),
+                    tag: fit(f.body.lines().next().unwrap_or(""), 90),
+                    status: when::short(f.at, now),
+                    dim: false,
+                })
+                .collect();
+            let empty = items.is_empty();
+            if empty {
+                items.push(Item {
+                    label: "Nothing found".into(),
+                    tag: String::new(),
+                    status: String::new(),
+                    dim: true,
+                });
+            }
+            let (selected, scroll) = window(m.found_sel, items.len());
+            (
+                Body::Menu { items, selected, scroll, breadcrumb: format!("> \"{}\"", fit(&m.query, 180)) },
+                b(["Back", "Search", "", "", if empty { "" } else { "Open" }]),
+            )
+        }
+        Screen::QuickReply => {
+            let items = QUICK
+                .iter()
+                .map(|q| Item { label: fit(q, 230), tag: String::new(), status: String::new(), dim: false })
+                .collect::<Vec<_>>();
+            let (selected, scroll) = window(m.quick_sel, items.len());
+            (
+                Body::Menu { items, selected, scroll, breadcrumb: "> Quick reply".into() },
+                b(["Back", "", "", "Edit", "Use"]),
+            )
+        }
         Screen::Preview => {
             let seg = text::segments(&m.draft);
             let mut rows = vec![Row { kind: 0, label: "To".into(), value: fit(&m.name_for(&m.peer), 160), dim: false }];
-            if m.name_for(&m.peer) != number::display(&m.peer, &m.region) {
-                rows.push(Row { kind: 0, label: String::new(), value: number::display(&m.peer, &m.region), dim: true });
+            if m.name_for(&m.peer) != number::display_peer(&m.peer, &m.region) {
+                rows.push(Row {
+                    kind: 0,
+                    label: String::new(),
+                    value: number::display_peer(&m.peer, &m.region),
+                    dim: true,
+                });
             }
             rows.push(Row { kind: 1, label: String::new(), value: String::new(), dim: false });
             for line in wrap(&m.draft, TEXT_W) {

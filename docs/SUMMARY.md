@@ -6,6 +6,7 @@
 - [Buttons](BUTTONS.md)
 - [Architecture](ARCHITECTURE.md)
 - [Audio](AUDIO.md)
+- [Devices](DEVICES.md)
 - [Hardware bring-up](HARDWARE.md)
 - [Developing](DEVELOPING.md)
 - [Security](security.md)

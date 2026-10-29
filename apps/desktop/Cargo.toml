@@ -14,6 +14,8 @@ path = "src/main.rs"
 phone-api.workspace = true
 phone-bus.workspace = true
 phone-core.workspace = true
+tokio.workspace = true
+zbus.workspace = true
 # The desktop is a full Wayland or X11 session with a GPU; Slint's defaults (winit,
 # the GL renderer) suit it. The software renderer and system fonts are there for
 # the headless screenshot tests.

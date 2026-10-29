@@ -1,0 +1,15 @@
+Template: dolphone/modem-access
+Type: boolean
+Default: false
+Description: Let Dolphone send setup commands to the modem?
+ Dolphone sets the modem up for calls (USB call audio, VoLTE, the carrier
+ profile), sends where call audio goes each time the modem starts, and handles
+ call forwarding and caller-ID codes, all as AT commands. ModemManager passes
+ those on only in its debug mode, which this turns on.
+ .
+ Debug mode also makes ModemManager's log more detailed, and with this modem
+ that log can include phone numbers and texts. On the Flipper One, call audio
+ needs it.
+ .
+ You can change this later: sudo dolphone-modem-access on (or off), or
+ sudo dpkg-reconfigure dolphone.

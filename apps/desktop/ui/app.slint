@@ -22,6 +22,18 @@ export struct Bubble {
     time: string,
     mine: bool,
     state: string,
+    // A one-time code found in the text, for its Copy button.
+    code: string,
+    // An MMS's first picture, and a line naming what else it carried.
+    picture: image,
+    parts: string,
+}
+
+// An ON/OFF setting: its key in phoned, what it says, whether it is on.
+export struct Toggle {
+    key: string,
+    label: string,
+    on: bool,
 }
 
 export struct Choice {
@@ -200,6 +212,7 @@ component CallCard inherits Rectangle {
     in property <bool> two-calls;
     in property <string> held-name;
     in property <[Choice]> routes;
+    in property <[string]> route-names;
     in property <int> route-index;
     in property <bool> keypad;
     callback answer();
@@ -262,7 +275,7 @@ component CallCard inherits Rectangle {
             if two-calls: Button { text: "Swap"; clicked => { root.swap(); } }
             ComboBox {
                 horizontal-stretch: 1;
-                model: [routes[0].label, routes[1].label, routes[2].label];
+                model: route-names;
                 current-index: route-index;
                 selected => { root.route(self.current-index); }
             }
@@ -306,6 +319,8 @@ export component AppWindow inherits Window {
 
     // Messages.
     in property <[Row]> threads;
+    in-out property <string> search-text;
+    in property <[Row]> found;
     in-out property <int> thread-selected: -1;
     in property <string> thread-title;
     in property <string> thread-number;
@@ -317,14 +332,35 @@ export component AppWindow inherits Window {
     in property <[Row]> contacts;
     in-out property <int> contact-selected: -1;
     in-out property <string> contact-filter;
+    in-out property <string> new-contact-name;
+    in-out property <string> new-contact-number;
+    // Paired phones, to copy contacts from.
+    in property <[Row]> phones;
 
     // Settings.
     in property <[Choice]> routes: [{label: "Speaker"}, {label: "Headset"}, {label: "Bluetooth"}];
+    in property <[string]> route-names: ["Speaker", "Headset", "Bluetooth"];
     in property <int> route-index;
     in property <int> ringer-index;
-    in property <bool> vibrate;
-    in property <bool> private-notify;
-    in property <bool> delete-from-sim;
+    in property <int> hold-index;
+    in property <[Toggle]> call-toggles;
+    in property <[Toggle]> text-toggles;
+    in property <[Toggle]> alert-toggles;
+    in-out property <string> voicemail;
+    in-out property <string> uplink-to;
+    in-out property <string> uplink-iface;
+    in property <bool> sip-enabled;
+    in-out property <string> sip-account;
+    in-out property <string> sip-password;
+    in-out property <string> sip-proxy;
+    in property <bool> sip-always;
+    in property <bool> sip-password-set;
+    in property <string> sip-status;
+    in property <[Row]> grants;
+    in property <bool> kdeconnect;
+    in property <[Row]> laptops;
+    in property <[Row]> audit;
+    in property <[Row]> alerts;
     in property <bool> bt-available;
     in property <bool> bt-powered;
     in property <[Row]> bt-devices;
@@ -349,6 +385,12 @@ export component AppWindow inherits Window {
     in property <string> confirm-body;
     in property <string> confirm-reason;
 
+    // An emergency alert, over everything until dismissed.
+    in property <bool> alert-visible;
+    in property <string> alert-title;
+    in property <string> alert-text;
+    in property <string> alert-time;
+
     // A passing message.
     in property <string> toast;
 
@@ -358,6 +400,9 @@ export component AppWindow inherits Window {
     callback recent-call(int);
     callback recent-text(int);
     callback open-thread(int);
+    callback search(string);
+    callback open-found(int);
+    callback export-texts();
     callback send(string);
     callback draft-edited(string);
     callback new-message(string);
@@ -378,12 +423,46 @@ export component AppWindow inherits Window {
     callback allow();
     callback deny();
     callback set-ringer(int);
+    callback set-hold(int);
     callback set-flag(string, bool);
     callback bt-power(bool);
     callback bt-scan();
     callback bt-action(int);
     callback unblock(int);
     callback wipe();
+    callback copy(string, bool);
+    callback set-voicemail(string);
+    callback save-uplink(string, string);
+    callback save-sip(string, string, string, bool);
+    callback revoke(int);
+    callback unpair-laptop(int);
+    callback dismiss-alert();
+    callback add-contact(string, string);
+    callback remove-contact(int);
+    callback import-from-phone(int);
+
+    // Keyboard shortcuts, for whatever has focus that does not use the key itself:
+    // Ctrl+1..4 the pages, Ctrl+N a new message, and for a call Ctrl+Enter answers,
+    // Ctrl+Backspace declines or hangs up, Ctrl+M mutes.
+    shortcuts := FocusScope {
+        key-pressed(event) => {
+            if (!event.modifiers.control) { return reject; }
+            if (event.text == "1") { root.navigate(0); return accept; }
+            if (event.text == "2") { root.navigate(1); return accept; }
+            if (event.text == "3") { root.navigate(2); return accept; }
+            if (event.text == "4") { root.navigate(3); return accept; }
+            if (event.text == "n" || event.text == "N") { root.navigate(1); root.new-message(""); return accept; }
+            if (event.text == Key.Return && root.call-ringing) { root.answer(); return accept; }
+            if (event.text == Key.Backspace && root.call-visible) {
+                if (root.call-ringing) { root.decline(); } else { root.hangup(); }
+                return accept;
+            }
+            if ((event.text == "m" || event.text == "M") && root.call-visible && !root.call-ringing) {
+                root.mute(!root.call-muted);
+                return accept;
+            }
+            reject
+        }
 
     HorizontalLayout {
         // Sidebar.
@@ -454,7 +533,18 @@ export component AppWindow inherits Window {
                             Text { text: "Messages"; font-size: 18px; font-weight: 700; horizontal-stretch: 1; color: Palette.foreground; }
                             Button { text: "New"; clicked => { root.new-message(root.contact-filter); } }
                         }
-                        ListView {
+                        LineEdit {
+                            placeholder-text: "Search texts";
+                            text <=> root.search-text;
+                            edited => { root.search(self.text); }
+                        }
+                        if root.search-text != "": ListView {
+                            for f[i] in root.found: RowView {
+                                entry: f;
+                                clicked => { root.open-found(i); }
+                            }
+                        }
+                        if root.search-text == "": ListView {
                             for t[i] in root.threads: RowView {
                                 entry: t;
                                 selected: i == root.thread-selected;
@@ -498,8 +588,43 @@ export component AppWindow inherits Window {
                                     padding: 10px;
                                     padding-top: 7px;
                                     padding-bottom: 7px;
-                                    Text { text: b.text; wrap: word-wrap; color: b.mine ? white : Palette.foreground; }
-                                    Text { text: b.time + (b.state == "" ? "" : "  " + b.state); font-size: 10px; color: b.mine ? #fffc : Brand.muted; horizontal-alignment: right; }
+                                    if b.picture.width > 0: Image {
+                                        source: b.picture;
+                                        max-width: 400px;
+                                        max-height: 300px;
+                                        image-fit: contain;
+                                        accessible-role: image;
+                                        accessible-label: "Picture";
+                                    }
+                                    if b.text != "": Text { text: b.text; wrap: word-wrap; color: b.mine ? white : Palette.foreground; }
+                                    if b.parts != "": Text { text: b.parts; font-italic: true; color: b.mine ? white : Palette.foreground; }
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        if b.code != "": Button {
+                                            text: "Copy code " + b.code;
+                                            primary: true;
+                                            clicked => { root.copy(b.code, true); }
+                                        }
+                                        Text { text: b.time + (b.state == "" ? "" : "  " + b.state); font-size: 10px; color: b.mine ? #fffc : Brand.muted; horizontal-alignment: right; vertical-alignment: center; horizontal-stretch: 1; }
+                                        // A quiet link rather than a button on every bubble.
+                                        Rectangle {
+                                            width: copy-label.preferred-width;
+                                            accessible-role: button;
+                                            accessible-label: "Copy message";
+                                            accessible-action-default => { root.copy(b.text, false); }
+                                            copy-label := Text {
+                                                text: "Copy";
+                                                font-size: 10px;
+                                                vertical-alignment: center;
+                                                color: b.mine ? #fffc : Brand.muted;
+                                                font-weight: copy-touch.has-hover ? 700 : 400;
+                                            }
+                                            copy-touch := TouchArea {
+                                                mouse-cursor: pointer;
+                                                clicked => { root.copy(b.text, false); }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -544,8 +669,25 @@ export component AppWindow inherits Window {
                     alignment: end;
                     spacing: 8px;
                     Text { text: "Contacts are .vcf files in ~/.local/share/dolphone/contacts"; color: Brand.muted; font-size: 11px; vertical-alignment: center; horizontal-stretch: 1; }
+                    Button { text: "Delete"; enabled: root.contact-selected >= 0; clicked => { root.remove-contact(root.contact-selected); } }
                     Button { text: "Text"; enabled: root.contact-selected >= 0; clicked => { root.contact-text(root.contact-selected); } }
                     Button { text: "Call"; primary: true; enabled: root.contact-selected >= 0; clicked => { root.contact-call(root.contact-selected); } }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    LineEdit { placeholder-text: "Name"; text <=> root.new-contact-name; }
+                    LineEdit { placeholder-text: "Number"; text <=> root.new-contact-number; accepted => { root.add-contact(root.new-contact-name, root.new-contact-number); } }
+                    Button {
+                        text: "Add contact";
+                        enabled: root.new-contact-name != "" && root.new-contact-number != "";
+                        clicked => { root.add-contact(root.new-contact-name, root.new-contact-number); }
+                    }
+                }
+                if root.phones.length > 0: HorizontalLayout {
+                    spacing: 8px;
+                    alignment: start;
+                    Text { text: "Copy names and numbers from a paired phone (no account needed):"; color: Brand.muted; vertical-alignment: center; }
+                    for p[i] in root.phones: Button { text: p.title; clicked => { root.import-from-phone(i); } }
                 }
             }
 
@@ -562,12 +704,76 @@ export component AppWindow inherits Window {
                     }
                     HorizontalLayout {
                         spacing: 12px;
-                        Text { text: "Call audio"; width: 180px; vertical-alignment: center; color: Palette.foreground; }
-                        ComboBox { model: [root.routes[0].label, root.routes[1].label, root.routes[2].label]; current-index: root.route-index; selected => { root.route(self.current-index); } }
+                        Text { text: "Hold time on the panel"; width: 180px; vertical-alignment: center; color: Palette.foreground; }
+                        ComboBox { model: ["0.4 s", "0.6 s", "0.8 s", "1 s", "1.5 s"]; current-index: root.hold-index; selected => { root.set-hold(self.current-index); } }
                     }
-                    CheckBox { text: "Vibrate when ringing"; checked: root.vibrate; toggled => { root.set-flag("vibrate", self.checked); } }
-                    CheckBox { text: "Hide message text in notifications"; checked: root.private-notify; toggled => { root.set-flag("private_notify", self.checked); } }
-                    CheckBox { text: "Clear texts from the SIM once saved"; checked: root.delete-from-sim; toggled => { root.set-flag("delete_from_sim", self.checked); } }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Text { text: "Call audio"; width: 180px; vertical-alignment: center; color: Palette.foreground; }
+                        ComboBox { model: root.route-names; current-index: root.route-index; selected => { root.route(self.current-index); } }
+                    }
+                    Text { text: "Calls"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Text { text: "Voicemail number"; width: 180px; vertical-alignment: center; color: Palette.foreground; }
+                        LineEdit {
+                            width: 200px;
+                            text <=> root.voicemail;
+                            placeholder-text: "Your carrier's, e.g. 101";
+                            input-type: InputType.text;
+                            accepted => { root.set-voicemail(self.text); }
+                        }
+                        Button { text: "Save"; width: 90px; clicked => { root.set-voicemail(root.voicemail); } }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+                    for t in root.call-toggles: CheckBox { text: t.label; checked: t.on; toggled => { root.set-flag(t.key, self.checked); } }
+
+                    Text { text: "Calls over the internet (SIP)"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
+                    CheckBox { text: "Use a SIP account for calls"; checked: root.sip-enabled; toggled => { root.set-flag("sip_enabled", self.checked); } }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Text { text: "Account"; width: 180px; vertical-alignment: center; color: Palette.foreground; }
+                        LineEdit { text <=> root.sip-account; placeholder-text: "sip:you@voip.example.net"; }
+                    }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Text { text: "Password"; width: 180px; vertical-alignment: center; color: Palette.foreground; }
+                        LineEdit {
+                            text <=> root.sip-password;
+                            input-type: InputType.password;
+                            placeholder-text: root.sip-password-set ? "Saved; type to change" : "The account's password";
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Text { text: "Outbound proxy"; width: 180px; vertical-alignment: center; color: Palette.foreground; }
+                        LineEdit { text <=> root.sip-proxy; placeholder-text: "Only if your provider gives one"; }
+                    }
+                    sip-always-box := CheckBox { text: "Use it for every call, not only when there is no mobile signal"; checked: root.sip-always; }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Text { text: root.sip-status == "" ? "Off" : root.sip-status; color: root.sip-status == "registered" ? Brand.ok : Brand.muted; vertical-alignment: center; horizontal-stretch: 1; }
+                        Button { text: "Save account"; clicked => { root.save-sip(root.sip-account, root.sip-password, root.sip-proxy, sip-always-box.checked); } }
+                    }
+                    Text { text: "Emergency calls always go over the mobile network."; color: Brand.muted; font-size: 11px; }
+
+                    Text { text: "Texts"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
+                    for t in root.text-toggles: CheckBox { text: t.label; checked: t.on; toggled => { root.set-flag(t.key, self.checked); } }
+
+                    Text { text: "Uplink watch"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
+                    Text { text: "Text a number when the network link drops, and when it comes back."; color: Brand.muted; }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        LineEdit { width: 200px; text <=> root.uplink-to; placeholder-text: "Number to text (empty: off)"; }
+                        LineEdit { width: 160px; text <=> root.uplink-iface; placeholder-text: "Interface (any)"; }
+                        Button { text: "Save"; width: 90px; clicked => { root.save-uplink(root.uplink-to, root.uplink-iface); } }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+
+                    Text { text: "Emergency alerts"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
+                    CheckBox { text: "National alerts (always on)"; checked: true; enabled: false; }
+                    for t in root.alert-toggles: CheckBox { text: t.label; checked: t.on; toggled => { root.set-flag(t.key, self.checked); } }
+                    for a in root.alerts: RowView { entry: a; }
 
                     Text { text: "Bluetooth"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
                     if !root.bt-available: Text { text: "No Bluetooth adapter."; color: Brand.muted; }
@@ -590,8 +796,44 @@ export component AppWindow inherits Window {
                         primary => { root.unblock(i); }
                     }
 
+                    Text { text: "Laptops (KDE Connect)"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
+                    CheckBox {
+                        text: "Let laptops with KDE Connect or GSConnect see calls and texts (listens on the local network)";
+                        checked: root.kdeconnect;
+                        toggled => { root.set-flag("kdeconnect", self.checked); }
+                    }
+                    for l[i] in root.laptops: RowView {
+                        entry: l;
+                        primary-label: l.aside;
+                        primary => { root.unpair-laptop(i); }
+                    }
+
+                    Text { text: "Programs allowed to text"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
+                    if root.grants.length == 0: Text {
+                        text: "None. A program asks with Settings.RequestGrant and you allow it once, here or on the panel.";
+                        color: Brand.muted;
+                        wrap: word-wrap;
+                    }
+                    for g[i] in root.grants: RowView {
+                        entry: g;
+                        primary-label: "Revoke";
+                        primary => { root.revoke(i); }
+                    }
+
+                    Text { text: "What programs asked for"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
+                    if root.audit.length == 0: Text { text: "Nothing yet."; color: Brand.muted; }
+                    for e in root.audit: RowView { entry: e; }
+
                     Text { text: "Modem"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
                     Text { text: root.modem-text; color: Brand.muted; wrap: word-wrap; }
+
+                    Text { text: "Your texts"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        alignment: start;
+                        Button { text: "Export texts..."; clicked => { root.export-texts(); } }
+                        Text { text: "An SMS Backup & Restore file in Documents, which Android phones can import."; color: Brand.muted; vertical-alignment: center; }
+                    }
 
                     Text { text: "Danger zone"; font-size: 15px; font-weight: 700; color: Brand.danger; }
                     HorizontalLayout {
@@ -603,8 +845,10 @@ export component AppWindow inherits Window {
         }
     }
 
+    }
+
     // A dim layer under the card and the confirmation, so they read as on top.
-    if call-visible || confirm-visible: Rectangle {
+    if call-visible || confirm-visible || alert-visible: Rectangle {
         background: #0005;
         TouchArea {}
     }
@@ -622,6 +866,7 @@ export component AppWindow inherits Window {
         held-name: root.call-held-name;
         routes: root.routes;
         route-index: root.route-index;
+        route-names: root.route-names;
         keypad: root.call-keypad;
         answer => { root.answer(); }
         decline => { root.decline(); }
@@ -656,6 +901,32 @@ export component AppWindow inherits Window {
                 spacing: 8px;
                 Button { text: "Deny"; clicked => { root.deny(); } }
                 Button { text: "Allow"; primary: true; clicked => { root.allow(); } }
+            }
+        }
+    }
+
+    if alert-visible && !call-visible: Rectangle {
+        x: (root.width - self.width) / 2;
+        y: 60px;
+        width: min(root.width - 80px, 560px);
+        height: abox.preferred-height + 20px;
+        border-radius: 16px;
+        background: Brand.danger;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #0008;
+        accessible-role: groupbox;
+        accessible-label: root.alert-title;
+        abox := VerticalLayout {
+            padding: 24px;
+            spacing: 12px;
+            HorizontalLayout {
+                Text { text: root.alert-title; font-size: 22px; font-weight: 800; color: white; horizontal-stretch: 1; }
+                Text { text: root.alert-time; color: white; vertical-alignment: center; }
+            }
+            Text { text: root.alert-text; font-size: 16px; wrap: word-wrap; color: white; }
+            HorizontalLayout {
+                alignment: end;
+                Button { text: "Dismiss"; primary: true; clicked => { root.dismiss-alert(); } }
             }
         }
     }

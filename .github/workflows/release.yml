@@ -7,31 +7,72 @@ on:
 permissions:
   contents: write
 
+# The Flipper One's arm64 package carries the panel apps; an amd64 package of the
+# daemon, CLI and desktop app is for laptops and other x86 machines. Both are
+# built in Debian 13, as Flipper OS is.
 jobs:
-  release:
-    runs-on: ubuntu-24.04-arm
+  build:
+    name: ${{ matrix.arch }}
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: amd64
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    container: debian:trixie
     steps:
+      - name: System packages
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev \
+            libfontconfig-dev libxkbcommon-dev desktop-file-utils file squashfs-tools zstd dpkg-dev
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - name: System packages
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libfontconfig-dev libxkbcommon-dev desktop-file-utils file squashfs-tools zstd
       - name: flipctl-slint, for its bundler and pinned AppImage tools
+        if: matrix.arch == 'arm64'
         run: |
           git clone -q https://github.com/flipperdevices/flipctl-slint "$HOME/flipctl-slint"
           cd "$HOME/flipctl-slint" && tools/appimage/build.sh --native apps/sysmon >/dev/null
           echo "UPSTREAM=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
-      - name: Bundles and the Debian package
+      - name: The Debian package (and on arm64 the panel bundles)
         run: scripts/package-deb.sh
       - name: Corresponding source (GPL-3.0 for the binaries)
+        if: matrix.arch == 'arm64'
         run: scripts/source-tarball.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.arch }}
+          path: |
+            target/deb/*.deb
+            target/bundles/*.AppImage
+            target/bundles/*.sha256
+            target/source/*.tar.zst
+          if-no-files-found: ignore
+      - name: flipctl-slint version, for the notes
+        if: matrix.arch == 'arm64'
+        run: echo "$UPSTREAM" > upstream.txt
+      - uses: actions/upload-artifact@v4
+        if: matrix.arch == 'arm64'
+        with:
+          name: upstream
+          path: upstream.txt
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --verify-tag --title "Dolphone $GITHUB_REF_NAME" \
-            --notes "Built against flipctl-slint $UPSTREAM. Not for emergency calls." \
-            target/deb/*.deb target/bundles/*.AppImage target/bundles/*.sha256 target/source/*.tar.zst
+          upstream=$(cat out/upstream/upstream.txt)
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "Dolphone $GITHUB_REF_NAME" \
+            --notes "Built against flipctl-slint $upstream. arm64 is the Flipper One's package, with the panel apps; amd64 is the daemon, CLI and desktop app for laptops. Not for emergency calls." \
+            $(find out/release-* -type f)

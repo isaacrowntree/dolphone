@@ -15,7 +15,10 @@
 //!
 //! The output is chosen per route. Bluetooth is a `bluez_output.*` sink; the jack
 //! and the speaker share the codec's sink and are switched with the mixer commands
-//! in the audio config, because the NAU8822 driver has no UCM profile to do it.
+//! of the machine's device profile (see devices.rs): the Flipper One's NAU8822
+//! driver has no UCM profile to do it. A phone whose modem is wired to the codec
+//! (PinePhone, Librem 5) needs no bridge at all, only its UCM voice-call verb,
+//! which the profile's call_start_commands set.
 //! Everything is a subprocess (`pw-dump`, `pw-loopback`, `pw-play`, `amixer`), so
 //! this works with whatever PipeWire the image ships and is easy to follow in `ps`.
 
@@ -26,16 +29,21 @@ use std::time::Duration;
 
 use phone_api::RouteInfo;
 use phone_core::model::Route;
-use serde::Deserialize;
+use phone_core::tones::{self, Progress};
+use serde::{Deserialize, Serialize};
 
-/// What differs between boards, read from `$XDG_CONFIG_HOME/dolphone/audio.json`.
-#[derive(Clone, Debug, Deserialize)]
+/// What differs between machines: from the device profile, then the owner's
+/// `$XDG_CONFIG_HOME/dolphone/audio.json`.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
     /// Commands that send the codec's output to the built-in speaker.
     pub speaker_commands: Vec<Vec<String>>,
     /// Commands that send it to the 3.5 mm jack.
     pub wired_commands: Vec<Vec<String>>,
+    /// Commands that send it to the earpiece, on a phone that has one. A machine
+    /// with these offers the Earpiece route, and calls start there.
+    pub earpiece_commands: Vec<Vec<String>>,
     /// The codec's sink, or empty for the default sink.
     pub codec_sink: String,
     /// The microphone for calls on the speaker or jack, or empty for the default.
@@ -49,43 +57,45 @@ pub struct Config {
     /// The jack is assumed present when nothing reports it, so a board without jack
     /// detection still offers the route.
     pub assume_wired: bool,
+    /// Run as a call's audio starts and after it ends: a phone's UCM voice-call
+    /// verb, a modem's AT command, an amplifier's enable line.
+    pub call_start_commands: Vec<Vec<String>>,
+    pub call_stop_commands: Vec<Vec<String>>,
+    /// The serial port a modem sends call audio over as raw PCM, for modems with
+    /// no USB sound card (SIMCom SIM7600: its "Audio" port, /dev/ttyUSB4). Used
+    /// when ModemManager names no audio port for the call.
+    pub serial_pcm: String,
 }
 
+/// What any machine gets before its profile: no mixer controls touched, the
+/// default devices, the echo canceller when it is installed, and the modem audio
+/// cards Linux phones and boards commonly carry.
 impl Default for Config {
     fn default() -> Self {
-        let amixer = |args: &[&str]| -> Vec<String> {
-            std::iter::once("amixer").chain(args.iter().copied()).map(String::from).collect()
-        };
         Self {
-            // The NAU8822's own control names. Unverified on the Flipper One until the
-            // board's driver is in hand: override in audio.json if they differ.
-            speaker_commands: vec![
-                amixer(&["-q", "sset", "Speaker", "unmute"]),
-                amixer(&["-q", "sset", "Headphone", "mute"]),
-            ],
-            wired_commands: vec![
-                amixer(&["-q", "sset", "Speaker", "mute"]),
-                amixer(&["-q", "sset", "Headphone", "unmute"]),
-            ],
+            speaker_commands: Vec::new(),
+            wired_commands: Vec::new(),
+            earpiece_commands: Vec::new(),
             codec_sink: String::new(),
             mic_source: String::new(),
-            modem_match: vec!["Quectel".into(), "RM520".into(), "RM500".into()],
+            modem_match: ["Quectel", "RM520", "RM500", "EG25", "EC25", "SIMCOM", "SIM7600"].map(String::from).to_vec(),
             echo_cancel_sink: "dolphone_ec_sink".into(),
             echo_cancel_source: "dolphone_ec_source".into(),
             assume_wired: false,
+            call_start_commands: Vec::new(),
+            call_stop_commands: Vec::new(),
+            serial_pcm: String::new(),
         }
     }
 }
 
 impl Config {
-    pub fn load() -> Self {
-        let path = std::env::var_os("XDG_CONFIG_HOME")
+    /// The owner's audio.json, which has the last word.
+    pub fn user_file() -> Option<std::path::PathBuf> {
+        std::env::var_os("XDG_CONFIG_HOME")
             .map(std::path::PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))
-            .map(|d| d.join("dolphone/audio.json"));
-        path.and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| serde_json::from_str(&s).map_err(|e| tracing::warn!("audio.json: {e}")).ok())
-            .unwrap_or_default()
+            .map(|d| d.join("dolphone/audio.json"))
     }
 }
 
@@ -191,9 +201,9 @@ pub fn modem_nodes<'a>(nodes: &'a [Node], port: &str, cfg: &Config) -> Option<(&
     Some((source, sink))
 }
 
-/// The two loopbacks for a call, as pw-loopback argument lists.
-pub fn call_plan(route: Route, modem: (&Node, &Node), nodes: &[Node], cfg: &Config) -> Vec<Vec<String>> {
-    let (modem_src, modem_sink) = modem;
+/// Where a route's call audio plays and where its microphone is: (output, mic) as
+/// PipeWire node names, empty for the default device.
+pub fn endpoints(route: Route, nodes: &[Node], cfg: &Config) -> (String, String) {
     let has = |name: &str| !name.is_empty() && nodes.iter().any(|n| n.name == name);
     let ec = route == Route::Speaker && has(&cfg.echo_cancel_sink) && has(&cfg.echo_cancel_source);
     let output = match route {
@@ -210,6 +220,13 @@ pub fn call_plan(route: Route, modem: (&Node, &Node), nodes: &[Node], cfg: &Conf
         _ if ec => cfg.echo_cancel_source.clone(),
         _ => cfg.mic_source.clone(),
     };
+    (output, mic)
+}
+
+/// The two loopbacks for a call, as pw-loopback argument lists.
+pub fn call_plan(route: Route, modem: (&Node, &Node), nodes: &[Node], cfg: &Config) -> Vec<Vec<String>> {
+    let (modem_src, modem_sink) = modem;
+    let (output, mic) = endpoints(route, nodes, cfg);
     let loopback = |capture: &str, playback: &str, name: &str| {
         let mut a = vec!["pw-loopback".to_string(), "--name".into(), name.into()];
         if !capture.is_empty() {
@@ -225,17 +242,69 @@ pub fn call_plan(route: Route, modem: (&Node, &Node), nodes: &[Node], cfg: &Conf
     vec![loopback(&modem_src.name, &output, "dolphone-downlink"), loopback(&mic, &modem_sink.name, "dolphone-uplink")]
 }
 
+/// The serial port a mobile call's audio comes over, if it does: the port
+/// ModemManager names for the call when it is a tty (its SIMCom plugin sets the
+/// call's AudioPort), or else the profile's `serial_pcm`.
+pub fn serial_port(port: &str, cfg: &Config) -> Option<String> {
+    if port == SIP_PORT {
+        return None;
+    }
+    if port.starts_with("tty") {
+        return Some(format!("/dev/{port}"));
+    }
+    if port.starts_with("/dev/tty") || port.starts_with("/dev/pts/") {
+        return Some(port.to_string());
+    }
+    (port.is_empty() && !cfg.serial_pcm.is_empty()).then(|| cfg.serial_pcm.clone())
+}
+
+/// The two pw-cat legs of a serial PCM call: the downlink plays what the modem
+/// sends, the uplink records the microphone for it. The format is fixed at 8 kHz,
+/// 16-bit linear, mono (SIMCom USB AUDIO Application Note V1.03, §2.3).
+pub fn serial_plan(route: Route, nodes: &[Node], cfg: &Config) -> Vec<Vec<String>> {
+    let (output, mic) = endpoints(route, nodes, cfg);
+    let cat = |mode: &str, target: &str, name: &str| {
+        // --raw: bare samples, not a sound file with a header.
+        let mut a: Vec<String> = ["pw-cat", mode, "--raw", "--rate", "8000", "--channels", "1", "--format", "s16"]
+            .map(String::from)
+            .to_vec();
+        a.extend(["--media-role".into(), "Communication".into(), "-P".into(), format!("{{ node.name = {name} }}")]);
+        if !target.is_empty() {
+            a.extend(["--target".into(), target.into()]);
+        }
+        a.push("-".into());
+        a
+    };
+    vec![cat("--playback", &output, "dolphone-downlink"), cat("--record", &mic, "dolphone-uplink")]
+}
+
 /// The next route the in-call Route key moves to.
-pub fn next_route(current: Route, wired: bool, bluetooth: bool) -> Route {
-    let order = [Route::Speaker, Route::Wired, Route::Bluetooth];
+pub fn next_route(current: Route, wired: bool, bluetooth: bool, earpiece: bool) -> Route {
+    let order = [Route::Earpiece, Route::Speaker, Route::Wired, Route::Bluetooth];
     let available = |r: Route| match r {
         Route::Speaker => true,
         Route::Wired => wired,
         Route::Bluetooth => bluetooth,
+        Route::Earpiece => earpiece,
     };
     let at = order.iter().position(|&r| r == current).unwrap_or(0);
     (1..=order.len()).map(|i| order[(at + i) % order.len()]).find(|&r| available(r)).unwrap_or(Route::Speaker)
 }
+
+/// The audio port a SIP call reports: its audio is baresip's, played and recorded
+/// through PipeWire by baresip itself, so phoned tells it where rather than
+/// bridging anything.
+pub const SIP_PORT: &str = "sip";
+
+/// What a SIP call's audio needs from baresip.
+pub enum SipAudio {
+    /// Play to this output and record this microphone (node names; empty is the
+    /// default device).
+    Route(String, String),
+    Mute(bool),
+}
+
+type SipHook = Arc<dyn Fn(SipAudio) + Send + Sync>;
 
 struct Inner {
     cfg: Config,
@@ -249,20 +318,25 @@ struct Inner {
     plan: Vec<Vec<String>>,
     in_call: bool,
     port: String,
+    /// The serial port the call's audio is bridged over, when it is.
+    serial: Option<String>,
     muted: bool,
     warned_no_modem_audio: bool,
+    sip: Option<SipHook>,
 }
 
 pub struct Audio {
     inner: Mutex<Inner>,
     ringing: Arc<AtomicBool>,
+    /// A call-progress tone (ringback) is looping.
+    progress: Arc<AtomicBool>,
 }
 
 impl Audio {
-    pub fn new() -> Self {
+    pub fn new(cfg: Config) -> Self {
         Self {
             inner: Mutex::new(Inner {
-                cfg: Config::load(),
+                cfg,
                 route: Route::Speaker,
                 pinned: false,
                 wired: false,
@@ -271,10 +345,13 @@ impl Audio {
                 plan: Vec::new(),
                 in_call: false,
                 port: String::new(),
+                serial: None,
                 muted: false,
                 warned_no_modem_audio: false,
+                sip: None,
             }),
             ringing: Arc::new(AtomicBool::new(false)),
+            progress: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -306,6 +383,14 @@ impl Audio {
                 active: i.route == Route::Bluetooth,
             },
         ]
+        .into_iter()
+        .chain((!i.cfg.earpiece_commands.is_empty()).then(|| RouteInfo {
+            route: Route::Earpiece as u8,
+            name: "Earpiece".into(),
+            available: true,
+            active: i.route == Route::Earpiece,
+        }))
+        .collect()
     }
 
     pub fn set_route(&self, route: Route) -> Result<(), String> {
@@ -323,7 +408,7 @@ impl Audio {
         let bt = bluetooth_sink(&nodes()).is_some();
         let Ok(mut i) = self.inner.lock() else { return Route::Speaker };
         let wired = i.wired || i.cfg.assume_wired;
-        let next = next_route(i.route, wired, bt);
+        let next = next_route(i.route, wired, bt, !i.cfg.earpiece_commands.is_empty());
         i.pinned = true;
         apply_route(&mut i, next);
         next
@@ -361,12 +446,27 @@ impl Audio {
         }
     }
 
+    /// Use another device profile's audio from the next call on.
+    pub fn set_config(&self, cfg: Config) {
+        if let Ok(mut i) = self.inner.lock() {
+            i.cfg = cfg;
+        }
+    }
+
     pub fn start_call(&self, audio_port: &str) {
         let Ok(mut i) = self.inner.lock() else { return };
         if i.in_call {
             return;
         }
         i.in_call = true;
+        for c in i.cfg.call_start_commands.clone() {
+            run(&c);
+        }
+        // A phone with an earpiece starts a call there, as phones do, unless a
+        // headset or the owner's choice says otherwise.
+        if !i.cfg.earpiece_commands.is_empty() && i.route == Route::Speaker && !i.pinned {
+            apply_route(&mut i, Route::Earpiece);
+        }
         i.port = audio_port.to_string();
         let route = i.route;
         start_loopbacks(&mut i, route);
@@ -374,15 +474,33 @@ impl Audio {
 
     pub fn stop_call(&self) {
         let Ok(mut i) = self.inner.lock() else { return };
+        if i.in_call {
+            for c in i.cfg.call_stop_commands.clone() {
+                run(&c);
+            }
+        }
         stop_loopbacks(&mut i);
         i.in_call = false;
         i.pinned = false;
         i.muted = false;
     }
 
+    /// How to reach baresip for a SIP call's audio.
+    pub fn set_sip_hook(&self, hook: impl Fn(SipAudio) + Send + Sync + 'static) {
+        if let Ok(mut i) = self.inner.lock() {
+            i.sip = Some(Arc::new(hook));
+        }
+    }
+
     pub fn set_muted(&self, muted: bool) {
         let Ok(mut i) = self.inner.lock() else { return };
         i.muted = muted;
+        if i.port == SIP_PORT {
+            if let Some(h) = i.sip.clone() {
+                h(SipAudio::Mute(muted));
+            }
+            return;
+        }
         if muted {
             if let Some(mut c) = i.uplink.take() {
                 let _ = c.kill();
@@ -390,7 +508,10 @@ impl Audio {
             }
         } else if i.in_call && i.uplink.is_none() {
             if let Some(args) = i.plan.get(1).cloned() {
-                i.uplink = spawn(&args);
+                i.uplink = match i.serial.clone() {
+                    Some(tty) => spawn_serial(&args, &tty, false),
+                    None => spawn(&args),
+                };
             }
         }
     }
@@ -443,11 +564,107 @@ impl Audio {
     pub fn stop_ringing(&self) {
         self.ringing.store(false, Ordering::SeqCst);
     }
+
+    /// Play the country's call-progress tone to whoever is on the call's output.
+    /// Ringback loops until stop_progress (or two minutes); busy and congestion
+    /// play for about four seconds, as a phone does after the call is released.
+    pub fn start_progress(&self, region: &str, p: Progress) {
+        let looping = p == Progress::Ringback;
+        if looping && self.progress.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let Some(file) = progress_file(region, p) else {
+            self.progress.store(false, Ordering::SeqCst);
+            return;
+        };
+        tracing::info!(tone = p.label(), region, "call-progress tone");
+        let flag = self.progress.clone();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            loop {
+                let Ok(mut child) = Command::new("pw-play")
+                    .arg("--media-role=Communication")
+                    .arg(&file)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                else {
+                    break;
+                };
+                loop {
+                    if looping && !flag.load(Ordering::SeqCst) {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return;
+                    }
+                    if let Ok(Some(_)) = child.try_wait() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                if !looping || !flag.load(Ordering::SeqCst) || started.elapsed() > Duration::from_secs(120) {
+                    break;
+                }
+            }
+            if looping {
+                flag.store(false, Ordering::SeqCst);
+            }
+        });
+    }
+
+    pub fn stop_progress(&self) {
+        self.progress.store(false, Ordering::SeqCst);
+    }
+
+    /// Play a tone once, in the background. An alert plays whatever the ringer says;
+    /// that is what an emergency alert is for.
+    pub fn play(&self, tone: Tone) {
+        let Some(file) = tone_file(tone) else { return };
+        let role = if matches!(tone, Tone::Alert) { "Alarm" } else { "Notification" };
+        std::thread::spawn(move || {
+            let _ = Command::new("pw-play")
+                .arg(format!("--media-role={role}"))
+                .arg(&file)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        });
+    }
+
+    /// Say something (a caller's name), when espeak-ng is installed.
+    pub fn speak(&self, words: &str) {
+        let words = words.to_string();
+        std::thread::spawn(move || {
+            let dir = std::env::var_os("XDG_RUNTIME_DIR")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir)
+                .join("dolphone");
+            let wav = dir.join("speech.wav");
+            let made = Command::new("espeak-ng")
+                .args(["-w"])
+                .arg(&wav)
+                .arg(&words)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            if !made {
+                tracing::debug!("espeak-ng is not installed; not speaking the caller");
+                return;
+            }
+            let _ = Command::new("pw-play")
+                .arg("--media-role=Notification")
+                .arg(&wav)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        });
+    }
 }
 
 impl Default for Audio {
     fn default() -> Self {
-        Self::new()
+        Self::new(Config::default())
     }
 }
 
@@ -456,6 +673,7 @@ fn apply_route(i: &mut Inner, route: Route) {
         Route::Speaker => i.cfg.speaker_commands.clone(),
         Route::Wired => i.cfg.wired_commands.clone(),
         Route::Bluetooth => Vec::new(),
+        Route::Earpiece => i.cfg.earpiece_commands.clone(),
     };
     for c in &commands {
         run(c);
@@ -472,6 +690,27 @@ fn apply_route(i: &mut Inner, route: Route) {
 fn start_loopbacks(i: &mut Inner, route: Route) {
     let nodes = nodes();
     let port = i.port.clone();
+    if port == SIP_PORT {
+        let (out, mic) = endpoints(route, &nodes, &i.cfg);
+        if let Some(h) = i.sip.clone() {
+            h(SipAudio::Route(out, mic));
+            if i.muted {
+                h(SipAudio::Mute(true));
+            }
+        }
+        return;
+    }
+    if let Some(tty) = serial_port(&port, &i.cfg) {
+        // Raw bytes both ways: no echo, no newline translation.
+        run(&["stty".into(), "-F".into(), tty.clone(), "raw".into(), "-echo".into()]);
+        let plan = serial_plan(route, &nodes, &i.cfg);
+        tracing::info!(port = %tty, "call audio over serial PCM");
+        i.downlink = plan.first().and_then(|a| spawn_serial(a, &tty, true));
+        i.uplink = if i.muted { None } else { plan.get(1).and_then(|a| spawn_serial(a, &tty, false)) };
+        i.plan = plan;
+        i.serial = Some(tty);
+        return;
+    }
     let Some(modem) = modem_nodes(&nodes, &port, &i.cfg) else {
         if !i.warned_no_modem_audio {
             tracing::info!("no modem audio card: the call's audio stays inside the modem");
@@ -486,6 +725,7 @@ fn start_loopbacks(i: &mut Inner, route: Route) {
 }
 
 fn stop_loopbacks(i: &mut Inner) {
+    i.serial = None;
     for c in [i.downlink.take(), i.uplink.take()].into_iter().flatten() {
         let mut c = c;
         let _ = c.kill();
@@ -504,6 +744,34 @@ fn spawn(args: &[String]) -> Option<Child> {
     }
 }
 
+/// A pw-cat leg wired to the modem's serial port: the downlink reads from it, the
+/// uplink writes to it.
+fn spawn_serial(args: &[String], tty: &str, downlink: bool) -> Option<Child> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let (cmd, rest) = args.split_first()?;
+    // O_NOCTTY: the port must never become phoned's controlling terminal.
+    const O_NOCTTY: i32 = 0o400;
+    let file = match std::fs::OpenOptions::new().read(downlink).write(!downlink).custom_flags(O_NOCTTY).open(tty) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(
+                port = tty,
+                "the modem's audio port cannot be opened: {e} (is the owner in the dialout group?)"
+            );
+            return None;
+        }
+    };
+    let (stdin, stdout) =
+        if downlink { (Stdio::from(file), Stdio::null()) } else { (Stdio::null(), Stdio::from(file)) };
+    match Command::new(cmd).args(rest).stdin(stdin).stdout(stdout).stderr(Stdio::null()).spawn() {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!("{cmd}: {e}");
+            None
+        }
+    }
+}
+
 fn run(args: &[String]) {
     if let Some((cmd, rest)) = args.split_first() {
         if let Err(e) = Command::new(cmd).args(rest).stdout(Stdio::null()).stderr(Stdio::null()).status() {
@@ -513,9 +781,13 @@ fn run(args: &[String]) {
 }
 
 #[derive(Clone, Copy)]
-enum Tone {
+pub enum Tone {
     Ring,
     Waiting,
+    /// A text arrived.
+    Text,
+    /// An emergency alert: the attention signal alert systems use (853 + 960 Hz).
+    Alert,
 }
 
 /// The tone as a WAV in the runtime directory, written on first use.
@@ -525,6 +797,8 @@ fn tone_file(tone: Tone) -> Option<std::path::PathBuf> {
     let path = dir.join(match tone {
         Tone::Ring => "ring.wav",
         Tone::Waiting => "waiting.wav",
+        Tone::Text => "text.wav",
+        Tone::Alert => "alert.wav",
     });
     if !path.exists() {
         std::fs::write(&path, wav(&synth(tone))).ok()?;
@@ -560,6 +834,58 @@ fn synth(tone: Tone) -> Vec<i16> {
             burst(ms(200), &[425.0], 0.4);
             burst(ms(200), &[0.0], 0.0);
             burst(ms(200), &[425.0], 0.4);
+        }
+        Tone::Text => {
+            burst(ms(90), &[1320.0], 0.45);
+            burst(ms(60), &[0.0], 0.0);
+            burst(ms(140), &[1760.0], 0.45);
+        }
+        Tone::Alert => {
+            for _ in 0..4 {
+                burst(ms(900), &[853.0, 960.0], 0.9);
+                burst(ms(150), &[0.0], 0.0);
+            }
+        }
+    }
+    out
+}
+
+/// A call-progress tone as a WAV: one cycle of ringback (it loops), or about four
+/// seconds of busy or congestion.
+fn progress_file(region: &str, p: Progress) -> Option<std::path::PathBuf> {
+    let region: String = region.chars().filter(char::is_ascii_alphabetic).take(2).collect();
+    let dir = runtime_dir();
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{}-{}.wav", p.label(), region.to_ascii_lowercase()));
+    if !path.exists() {
+        let c = tones::cadence(&region, p);
+        let cycles = if p == Progress::Ringback { 1 } else { 4000u32.div_ceil(c.cycle_ms()) };
+        std::fs::write(&path, wav(&synth_cadence(c, cycles))).ok()?;
+    }
+    Some(path)
+}
+
+/// A cadence's on/off pattern, `cycles` times. Progress tones are quieter than the
+/// ringer: they play in the ear.
+fn synth_cadence(c: tones::Cadence, cycles: u32) -> Vec<i16> {
+    let ms = |m: u32| (RATE * m / 1000) as usize;
+    let steps: &[u32] = if c.steps.is_empty() { &[1000, 0] } else { c.steps };
+    let mut out = Vec::new();
+    for _ in 0..cycles {
+        for (i, &len) in steps.iter().enumerate() {
+            let len = ms(len);
+            let on = i % 2 == 0;
+            for n in 0..len {
+                if !on {
+                    out.push(0);
+                    continue;
+                }
+                let t = n as f32 / RATE as f32;
+                let edge = (n.min(len - n) as f32 / ms(5) as f32).min(1.0);
+                let s: f32 =
+                    c.freqs.iter().map(|f| (t * f * std::f32::consts::TAU).sin()).sum::<f32>() / c.freqs.len() as f32;
+                out.push((s * 0.3 * edge * i16::MAX as f32) as i16);
+            }
         }
     }
     out
@@ -603,6 +929,26 @@ mod tests {
     ]"#;
 
     #[test]
+    fn serial_pcm_calls() {
+        let n = parse_nodes(DUMP);
+        let mut cfg = Config::default();
+        assert_eq!(serial_port("", &cfg), None, "no port, no profile: not serial");
+        assert_eq!(serial_port("ttyUSB4", &cfg).as_deref(), Some("/dev/ttyUSB4"), "ModemManager's AudioPort");
+        assert_eq!(serial_port("card2", &cfg), None);
+        cfg.serial_pcm = "/dev/ttyUSB4".into();
+        assert_eq!(serial_port("", &cfg).as_deref(), Some("/dev/ttyUSB4"), "the profile's port");
+        assert_eq!(serial_port(SIP_PORT, &cfg), None, "never for a SIP call");
+        let plan = serial_plan(Route::Speaker, &n, &cfg);
+        assert_eq!(
+            plan[0][..9],
+            ["pw-cat", "--playback", "--raw", "--rate", "8000", "--channels", "1", "--format", "s16"]
+        );
+        assert!(plan[0].contains(&"dolphone_ec_sink".to_string()), "the speaker goes through the echo canceller");
+        assert_eq!(plan[1][1], "--record");
+        assert_eq!(plan[1].last().map(String::as_str), Some("-"));
+    }
+
+    #[test]
     fn parses_and_finds_modem() {
         let n = parse_nodes(DUMP);
         assert_eq!(n.len(), 8);
@@ -611,6 +957,15 @@ mod tests {
         assert!(src.name.starts_with("alsa_input.usb-Quectel"));
         assert!(sink.name.starts_with("alsa_output.usb-Quectel"));
         assert_eq!(bluetooth_sink(&n).unwrap().description, "Pixel Buds");
+    }
+
+    #[test]
+    fn progress_tones_have_their_cadence() {
+        let au = synth_cadence(tones::cadence("AU", Progress::Ringback), 1);
+        assert_eq!(au.len(), RATE as usize * 3, "0.4 + 0.2 + 0.4 + 2.0 s");
+        assert!(au[RATE as usize..].iter().all(|&s| s == 0), "silent after the double ring");
+        let us = synth_cadence(tones::cadence("US", Progress::Busy), 4);
+        assert_eq!(us.len(), RATE as usize * 4);
     }
 
     #[test]
@@ -636,11 +991,13 @@ mod tests {
 
     #[test]
     fn route_cycle_skips_missing() {
-        assert_eq!(next_route(Route::Speaker, false, false), Route::Speaker);
-        assert_eq!(next_route(Route::Speaker, true, false), Route::Wired);
-        assert_eq!(next_route(Route::Wired, true, false), Route::Speaker);
-        assert_eq!(next_route(Route::Speaker, false, true), Route::Bluetooth);
-        assert_eq!(next_route(Route::Bluetooth, true, true), Route::Speaker);
+        assert_eq!(next_route(Route::Speaker, false, false, false), Route::Speaker);
+        assert_eq!(next_route(Route::Speaker, true, false, false), Route::Wired);
+        assert_eq!(next_route(Route::Wired, true, false, false), Route::Speaker);
+        assert_eq!(next_route(Route::Speaker, false, true, false), Route::Bluetooth);
+        assert_eq!(next_route(Route::Bluetooth, true, true, false), Route::Speaker);
+        assert_eq!(next_route(Route::Earpiece, false, false, true), Route::Speaker, "a phone: ear, then speaker");
+        assert_eq!(next_route(Route::Speaker, false, false, true), Route::Earpiece, "and back");
     }
 
     #[test]

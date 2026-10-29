@@ -14,8 +14,18 @@
 //! case, a script or tool doing it quietly, and SECURITY.md says so.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use zbus::message::Header;
+
+/// Whether front ends in an AppImage count (the panel apps run that way). An owner
+/// who uses only the desktop app can turn this off, so only root-owned /usr/bin
+/// front ends are trusted and a user-writable AppImage mount cannot pose as one.
+static TRUST_APPIMAGES: AtomicBool = AtomicBool::new(true);
+
+pub fn set_trust_appimages(on: bool) {
+    TRUST_APPIMAGES.store(on, Ordering::SeqCst);
+}
 
 /// Our front ends, by executable name.
 const FRONT_ENDS: &[&str] = &["dolphone-dialer", "dolphone-messages", "dolphone-settings", "dolphone-desktop"];
@@ -50,6 +60,9 @@ pub fn is_front_end(exe: &Path) -> bool {
     let s = exe.to_string_lossy();
     if s.starts_with("/usr/bin/") {
         return root_owned(exe);
+    }
+    if !TRUST_APPIMAGES.load(Ordering::SeqCst) {
+        return false;
     }
     // An AppImage runs from its squashfs, mounted at /tmp/.mount_<random>, or from a
     // directory it was extracted to when FUSE is missing.
@@ -150,5 +163,15 @@ mod tests {
         assert!(!is_front_end(Path::new("/tmp/.mount_x/usr/bin/python3")));
         // /usr/bin must be root-owned; a missing file is not.
         assert!(!is_front_end(Path::new("/usr/bin/dolphone-nonexistent")));
+    }
+
+    #[test]
+    fn appimages_can_be_left_untrusted() {
+        super::set_trust_appimages(false);
+        let mount = Path::new("/tmp/.mount_dolphoXYZ/usr/bin/dolphone-dialer");
+        let untrusted = !is_front_end(mount);
+        super::set_trust_appimages(true);
+        assert!(untrusted, "with AppImages off, only /usr/bin counts");
+        assert!(is_front_end(mount));
     }
 }

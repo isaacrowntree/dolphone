@@ -26,8 +26,15 @@ struct App {
     ringer: String,
     #[cfg(feature = "device")]
     motor: Option<flipctl_app::Haptic>,
+    /// A vibration pattern being played: what is left of it, and when the next
+    /// step is due.
+    buzzing: Vec<u16>,
+    buzz_next: Instant,
     last_ring_buzz: Instant,
     contacts_loaded: Instant,
+    /// The first call log and conversations have arrived (Today is chosen once
+    /// both are in), or None once the first screen is chosen.
+    first_load: Option<(bool, bool)>,
 }
 
 thread_local! {
@@ -58,8 +65,11 @@ fn main() -> Result<(), slint::PlatformError> {
         ringer: "ring".into(),
         #[cfg(feature = "device")]
         motor: flipctl_app::Haptic::open().ok(),
+        buzzing: Vec::new(),
+        buzz_next: Instant::now(),
         last_ring_buzz: Instant::now(),
         contacts_loaded: Instant::now(),
+        first_load: Some((false, false)),
     };
     APP.with(|a| *a.borrow_mut() = Some(app));
     with_app(|app| {
@@ -71,6 +81,9 @@ fn main() -> Result<(), slint::PlatformError> {
     flipctl_app::apply_status!(&ui, PanelStatus, status.current());
     #[cfg(feature = "device")]
     let mut pad = Swipe::new();
+    // Vibration patterns step on their own, finer timer.
+    let haptics = slint::Timer::default();
+    haptics.start(slint::TimerMode::Repeated, Duration::from_millis(20), || with_app(App::step_buzz));
     let tick = slint::Timer::default();
     tick.start(slint::TimerMode::Repeated, Duration::from_millis(250), move || {
         with_app(|app| {
@@ -80,7 +93,7 @@ fn main() -> Result<(), slint::PlatformError> {
                 flipctl_app::apply_status!(&app.ui, PanelStatus, now);
             }
             #[cfg(feature = "device")]
-            for input in pad.poll() {
+            for input in pad.poll(app.model.keypad_showing()) {
                 app.input(input, true);
                 app.input(input, false);
             }
@@ -127,14 +140,20 @@ impl App {
         self.bus.refresh_calls();
         self.bus.refresh_pending();
         self.bus.refresh_recents(100);
+        self.bus.refresh_threads();
         self.bus.refresh_status();
         self.bus.refresh_routes();
         self.bus.run(|c| async move {
-            Ok(vec![
+            let mut out = vec![
                 Event::Ringer(c.audio.ringer().await?),
-                Event::Setting("vibrate".into(), c.settings.get("vibrate").await?),
-                Event::Setting("region".into(), c.settings.get("region").await?),
-            ])
+                Event::Missed(c.calls.missed().await?),
+                Event::Unread(c.messages.unread().await?),
+            ];
+            let keys = ["vibrate", "region", "voicemail", "steady_decline", "long_press_ms"];
+            for k in keys.into_iter().chain(phone_api::keys::SPEED.iter().map(|s| s.0)) {
+                out.push(Event::Setting(k.into(), c.settings.get(k).await?));
+            }
+            Ok(out)
         });
     }
 
@@ -180,7 +199,10 @@ impl App {
                 actions = self.model.call_removed(id);
                 self.bus.refresh_recents(100);
             }
-            Event::Recents(r) => self.model.set_recents(r),
+            Event::Recents(r) => {
+                self.model.set_recents(r);
+                self.first_screen(true, false);
+            }
             Event::Pending(p) => self.model.set_pending(p),
             Event::Requested(r) => self.model.requested(r),
             Event::Resolved(id, _) => self.model.resolved(id),
@@ -192,9 +214,35 @@ impl App {
                 self.model.routes = r;
             }
             Event::Route(r) => self.model.route = phone_core::model::Route::from_u8(r),
-            Event::Ringer(r) => self.ringer = r,
+            Event::Ringer(r) => {
+                self.model.ringer = r.clone();
+                self.ringer = r;
+            }
             Event::Setting(k, v) if k == "vibrate" => self.vibrate = v == "true",
-            Event::Setting(k, v) if k == "region" => self.model.region = v,
+            Event::Setting(k, v) => self.model.setting(&k, v),
+            Event::Missed(n) => {
+                actions = self.model.missed_changed(n);
+                self.bus.refresh_recents(100);
+            }
+            Event::Threads(t) => {
+                self.model.threads = t;
+                self.first_screen(false, true);
+            }
+            Event::Unread(n) => {
+                self.model.unread = n;
+                self.bus.refresh_threads();
+            }
+            Event::MessageAdded(m) if m.direction == 0 => actions = vec![Action::Buzz(Buzz::Text)],
+            Event::MessageChanged(_, s) if s == phone_core::model::MessageState::Failed as u8 => {
+                actions = vec![Action::Buzz(Buzz::Failed)]
+            }
+            Event::Alert(a) => actions = self.model.alert_received(a),
+            Event::ContactsChanged | Event::ContactsImported { .. } => {
+                self.model.book =
+                    phone_core::contacts::Book::load(&phone_core::store::contacts_dir(), &self.model.region);
+                self.contacts_loaded = Instant::now();
+            }
+            Event::Unlock(left) => self.model.unlocked(left),
             Event::Ussd(text) => self.model.ussd_reply(text),
             Event::Error(text) => self.model.error(&text),
             Event::Placed { kind: "call", placed } if placed.pending == 0 => self.model.browse = model::Browse::Keypad,
@@ -204,6 +252,19 @@ impl App {
         self.draw();
     }
 
+    /// Open on Today when something is waiting, once there is enough to tell.
+    fn first_screen(&mut self, recents: bool, threads: bool) {
+        let Some((r, t)) = self.first_load.as_mut() else { return };
+        *r |= recents;
+        *t |= threads;
+        if *r && *t {
+            self.first_load = None;
+            if self.model.number.is_empty() && self.model.browse == model::Browse::Keypad {
+                self.model.opened();
+            }
+        }
+    }
+
     fn act(&mut self, actions: Vec<Action>) {
         for a in actions {
             match a {
@@ -211,6 +272,17 @@ impl App {
                 Action::Answer(id) => self.bus.run(move |c| async move { c.calls.answer(id).await.map(|_| vec![]) }),
                 Action::Hangup(id) => self.bus.run(move |c| async move { c.calls.hangup(id).await.map(|_| vec![]) }),
                 Action::Swap => self.bus.run(|c| async move { c.calls.swap().await.map(|_| vec![]) }),
+                Action::Merge => self.bus.run(|c| async move { c.calls.merge().await.map(|_| vec![]) }),
+                Action::Unlock(pin) => {
+                    self.bus.run(move |c| async move { Ok(vec![Event::Unlock(c.modem.unlock(&pin).await?)]) })
+                }
+                Action::SetSetting(k, v) => {
+                    self.bus.run(move |c| async move { c.settings.set(&k, &v).await.map(|_| vec![]) })
+                }
+                Action::SetRinger(r) => {
+                    self.ringer = r.clone();
+                    self.bus.run(move |c| async move { c.audio.set_ringer(&r).await.map(|_| vec![]) })
+                }
                 Action::Dtmf(id, d) => {
                     self.bus.run(move |c| async move { c.calls.send_dtmf(id, &d).await.map(|_| vec![]) })
                 }
@@ -237,10 +309,31 @@ impl App {
                 Action::Quit => {
                     let _ = slint::quit_event_loop();
                 }
-                Action::Buzz(Buzz::Tick) => self.buzz_ms(10),
-                Action::Buzz(Buzz::Thump) => self.buzz_ms(80),
+                Action::Buzz(b) => self.buzz(b),
             }
         }
+    }
+
+    /// Play a pattern. Key ticks always play; anything announcing an event obeys
+    /// a silent ringer, except an emergency alert.
+    fn buzz(&mut self, b: Buzz) {
+        let quiet = self.ringer == "silent" && !matches!(b, Buzz::Tick | Buzz::Thump | Buzz::Alert);
+        if quiet {
+            return;
+        }
+        self.buzzing = b.pattern().to_vec();
+        self.buzz_next = Instant::now();
+        self.step_buzz();
+    }
+
+    fn step_buzz(&mut self) {
+        if self.buzzing.is_empty() || Instant::now() < self.buzz_next {
+            return;
+        }
+        let on = self.buzzing.remove(0);
+        let off = if self.buzzing.is_empty() { 0 } else { self.buzzing.remove(0) };
+        self.buzz_ms(on);
+        self.buzz_next = Instant::now() + Duration::from_millis(u64::from(on) + u64::from(off));
     }
 
     fn buzz_ms(&mut self, ms: u16) {
@@ -353,11 +446,15 @@ fn find_bundle(stem: &str) -> Option<std::path::PathBuf> {
     })
 }
 
-/// The touchpad as D-pad steps: a stroke moves the selection once per stride.
+/// The touchpad: a stroke moves the selection once per stride, and on a keypad a
+/// tap (a touch that barely moved) presses the cell under the finger, once the
+/// pad's range has been learnt.
 #[cfg(feature = "device")]
 struct Swipe {
     pad: Option<flipctl_app::TouchpadSource>,
     origin: Option<(i32, i32)>,
+    moved: bool,
+    map: model::PadMap,
 }
 
 #[cfg(feature = "device")]
@@ -365,15 +462,22 @@ impl Swipe {
     const STRIDE: i32 = 48;
 
     fn new() -> Self {
-        Self { pad: flipctl_app::TouchpadSource::open().ok(), origin: None }
+        Self { pad: flipctl_app::TouchpadSource::open().ok(), origin: None, moved: false, map: Default::default() }
     }
 
-    fn poll(&mut self) -> Vec<Input> {
+    fn poll(&mut self, keypad: bool) -> Vec<Input> {
         let mut out = Vec::new();
         let Some(pad) = self.pad.as_mut() else { return out };
         while let Some(t) = pad.poll() {
+            self.map.observe(t.x, t.y);
             if !t.down {
+                if let (Some((ox, oy)), false, true) = (self.origin, self.moved, keypad) {
+                    if let Some((r, c)) = self.map.cell(ox, oy, Self::STRIDE * 3) {
+                        out.push(Input::Tap(r, c));
+                    }
+                }
                 self.origin = None;
+                self.moved = false;
                 continue;
             }
             let (ox, oy) = *self.origin.get_or_insert((t.x, t.y));
@@ -391,6 +495,7 @@ impl Swipe {
                     Input::Up
                 });
                 self.origin = Some((t.x, t.y));
+                self.moved = true;
             }
         }
         out
@@ -462,6 +567,7 @@ mod tests {
             connected_at: if state == CallState::Active { 1_792_999_917 } else { 0 },
             muted: false,
             emergency: false,
+            internet: false,
         }
     }
 
@@ -543,6 +649,7 @@ mod tests {
                 duration: 0,
                 outcome: 1,
                 seen: false,
+                sim: String::new(),
             },
             CallRecordInfo {
                 id: 2,
@@ -552,6 +659,7 @@ mod tests {
                 duration: 125,
                 outcome: 0,
                 seen: true,
+                sim: String::new(),
             },
             CallRecordInfo {
                 id: 1,
@@ -561,6 +669,7 @@ mod tests {
                 duration: 40,
                 outcome: 0,
                 seen: true,
+                sim: String::new(),
             },
         ]);
         m.browse = model::Browse::Recents;
@@ -581,7 +690,8 @@ mod tests {
         let mut m = model();
         let t = Instant::now();
         m.sel = (0, 0);
-        assert_eq!(m.key(Input::Ok, true, t), vec![Action::Buzz(Buzz::Tick)]);
+        // 1 on an empty keypad types on release (a hold would be voicemail).
+        assert_eq!(tap(&mut m, Input::Ok, t), vec![Action::Buzz(Buzz::Tick)]);
         m.key(Input::Char('2'), true, t);
         assert_eq!(m.number, "12");
         m.key(Input::Edit, true, t);
@@ -670,5 +780,428 @@ mod tests {
         assert_eq!(m.book.contacts[m.contacts_sel].name, "Sam Sample");
         m.key(Input::Left, true, Instant::now());
         assert_eq!(m.book.contacts[m.contacts_sel].name, "Jordan Doe");
+    }
+
+    fn alert_info(level: phone_core::model::AlertLevel) -> phone_api::AlertInfo {
+        phone_api::AlertInfo {
+            id: 1,
+            channel: 4370,
+            level: level as u8,
+            text: "Emergency Alert: Bushfire. Leave now if you are in Example Valley. Follow police directions.".into(),
+            at: 1_792_999_000,
+        }
+    }
+
+    #[test]
+    fn new_screens() {
+        let mut m = model();
+        m.missed = 1;
+        m.unread = 2;
+        shot("keypad-waiting-strip", &m);
+        let mut m = model();
+        m.alert_received(alert_info(phone_core::model::AlertLevel::Extreme));
+        assert!(ink(&shot("alert", &m)) > 500);
+        let mut m = model();
+        m.status.state = "locked".into();
+        m.number = "12".into();
+        shot("sim-pin", &m);
+        let mut m = model();
+        m.browse = model::Browse::Contacts;
+        m.speed[0] = "+61491570156".into();
+        shot("contacts-speed", &m);
+        m.browse = model::Browse::SpeedPick(1);
+        shot("speed-pick", &m);
+        let mut m = model();
+        m.number = "567".into();
+        shot("keypad-t9", &m);
+        let mut m = model();
+        m.number = "106".into();
+        shot("keypad-relay", &m);
+    }
+
+    fn hold(m: &mut Model, input: Input, t: Instant) -> Vec<Action> {
+        let mut a = m.key(input, true, t);
+        a.extend(m.key(input, false, t + model::HOLD));
+        a
+    }
+
+    fn tap(m: &mut Model, input: Input, t: Instant) -> Vec<Action> {
+        let mut a = m.key(input, true, t);
+        a.extend(m.key(input, false, t + Duration::from_millis(100)));
+        a
+    }
+
+    #[test]
+    fn hold_for_voicemail_and_speed_dial() {
+        let mut m = model();
+        let t = Instant::now();
+        m.voicemail = "101".into();
+        m.speed[1] = "+61491570157".into();
+        m.sel = (0, 0);
+        assert!(hold(&mut m, Input::Ok, t).contains(&Action::Dial("101".into())), "hold 1 is voicemail");
+        m.sel = (0, 2);
+        assert!(hold(&mut m, Input::Ok, t).contains(&Action::Dial("+61491570157".into())), "hold 3");
+        m.sel = (0, 1);
+        assert!(hold(&mut m, Input::Ok, t).iter().all(|a| !matches!(a, Action::Dial(_))));
+        assert!(m.notice.is_some(), "an empty key says how to fill it");
+        m.notice = None;
+        m.sel = (0, 2);
+        tap(&mut m, Input::Ok, t);
+        assert_eq!(m.number, "3", "a short press still types");
+        tap(&mut m, Input::Ok, t);
+        assert_eq!(m.number, "33", "and types at once after the first digit");
+    }
+
+    #[test]
+    fn assigning_speed_dial_from_contacts() {
+        let mut m = model();
+        let t = Instant::now();
+        m.browse = model::Browse::Contacts;
+        hold(&mut m, Input::Ok, t);
+        assert_eq!(m.browse, model::Browse::SpeedPick(0));
+        m.key(Input::Down, true, t);
+        let a = m.key(Input::Run, true, t);
+        assert_eq!(a, vec![Action::SetSetting("speed_3".into(), "+61491570156".into())]);
+        assert_eq!(m.speed[1], "+61491570156");
+        assert_eq!(m.browse, model::Browse::Contacts);
+        assert_eq!(tap(&mut m, Input::Ok, t), vec![Action::Dial("+61491570156".into())], "a short Ok calls");
+    }
+
+    #[test]
+    fn t9_finds_names() {
+        let mut m = model();
+        m.number = "567".into();
+        assert_eq!(m.t9_match().map(|c| c.name.as_str()), Some("Jordan Doe"));
+        assert_eq!(m.key(Input::Run, true, Instant::now()), vec![Action::Dial("+61293744000".into())]);
+        m.number = "000".into();
+        assert!(m.t9_match().is_none(), "never instead of an emergency number");
+        m.number = "567890".into();
+        assert!(m.t9_match().is_none(), "six digits is a number");
+    }
+
+    #[test]
+    fn sim_pin_on_the_keypad() {
+        let mut m = model();
+        m.status.state = "locked".into();
+        m.number = "1234".into();
+        assert_eq!(m.key(Input::Run, true, Instant::now()), vec![Action::Unlock("1234".into())]);
+        m.number = "000".into();
+        assert_eq!(m.key(Input::Run, true, Instant::now()), vec![Action::Dial("000".into())], "000 works locked");
+        m.unlocked(2);
+        assert_eq!(m.notice.as_ref().unwrap()[1], "2 tries left");
+    }
+
+    #[test]
+    fn alerts_take_the_screen_until_dismissed() {
+        let mut m = model();
+        assert_eq!(
+            m.alert_received(alert_info(phone_core::model::AlertLevel::National)),
+            vec![Action::Buzz(Buzz::Alert)]
+        );
+        assert!(matches!(m.top(), Top::Alert(_)));
+        m.set_calls(vec![call(1, "+61491570156", CallState::RingingIn, 0)]);
+        assert!(matches!(m.top(), Top::Incoming(_)), "a ringing call can still be answered");
+        m.set_calls(Vec::new());
+        std::thread::sleep(model::FRESH);
+        m.key(Input::Run, true, Instant::now());
+        assert_eq!(m.top(), Top::Browse);
+        assert!(m.alert_received(alert_info(phone_core::model::AlertLevel::Info)).is_empty(), "info is quiet");
+    }
+
+    #[test]
+    fn swap_merge_and_steady_decline() {
+        let mut m = model();
+        m.set_calls(vec![call(1, "+61491570156", CallState::Active, 1), call(2, "+61491570157", CallState::Held, 0)]);
+        std::thread::sleep(model::FRESH);
+        let t = Instant::now();
+        assert_eq!(tap(&mut m, Input::Ok, t), vec![Action::Swap]);
+        assert_eq!(hold(&mut m, Input::Ok, t), vec![Action::Merge]);
+
+        let mut m = model();
+        m.steady_decline = true;
+        m.set_calls(vec![call(3, "+61491570156", CallState::RingingIn, 0)]);
+        std::thread::sleep(model::FRESH);
+        let t = Instant::now();
+        assert!(tap(&mut m, Input::Escape, t).is_empty(), "a press does not decline");
+        assert_eq!(m.hint, Some("Hold Decline to decline"));
+        assert_eq!(hold(&mut m, Input::Escape, t), vec![Action::Hangup(3)]);
+    }
+
+    #[test]
+    fn ptt_held_cycles_the_ringer() {
+        let mut m = model();
+        let t = Instant::now();
+        assert!(hold(&mut m, Input::Ptt, t).contains(&Action::SetRinger("vibrate".into())));
+        assert!(hold(&mut m, Input::Ptt, t).contains(&Action::SetRinger("silent".into())));
+        assert!(hold(&mut m, Input::Ptt, t).contains(&Action::SetRinger("ring".into())));
+    }
+
+    #[test]
+    fn haptics_tell_events_apart() {
+        let mut m = model();
+        m.set_calls(vec![call(1, "+61491570156", CallState::Active, 1)]);
+        assert_eq!(m.call_removed(1), vec![Action::Buzz(Buzz::Dropped)], "the far end hanging up");
+        m.set_calls(vec![call(2, "+61491570156", CallState::Active, 1)]);
+        std::thread::sleep(model::FRESH);
+        m.key(Input::Run, true, Instant::now() + model::END_LOCKOUT);
+        assert_eq!(m.call_removed(2), vec![Action::Buzz(Buzz::Thump)], "ending it here");
+        assert_eq!(m.missed_changed(1), vec![Action::Buzz(Buzz::Missed)]);
+        assert!(m.missed_changed(0).is_empty());
+        let patterns: Vec<_> = [Buzz::Text, Buzz::Missed, Buzz::Waiting, Buzz::Dropped, Buzz::Failed, Buzz::Alert]
+            .iter()
+            .map(|b| b.pattern())
+            .collect();
+        for (i, a) in patterns.iter().enumerate() {
+            assert!(patterns[i + 1..].iter().all(|b| a != b), "every pattern is its own");
+        }
+    }
+
+    #[test]
+    fn touchpad_taps_land_on_cells() {
+        let mut map = model::PadMap::default();
+        assert_eq!(map.cell(10, 10, 100), None, "not before the range is known");
+        map.observe(0, 0);
+        map.observe(299, 399);
+        assert_eq!(map.cell(0, 0, 100), Some((0, 0)));
+        assert_eq!(map.cell(299, 399, 100), Some((3, 2)));
+        assert_eq!(map.cell(150, 250, 100), Some((2, 1)), "the 8");
+        let mut m = model();
+        assert_eq!(m.key(Input::Tap(2, 1), true, Instant::now()), vec![Action::Buzz(Buzz::Tick)]);
+        assert_eq!(m.number, "8");
+    }
+
+    #[test]
+    fn today_lists_what_is_waiting_and_opens_on_it() {
+        let mut m = model();
+        m.set_recents(vec![
+            CallRecordInfo {
+                id: 2,
+                peer: "+61491570156".into(),
+                direction: 0,
+                started: 1_792_999_000,
+                duration: 0,
+                outcome: 1,
+                seen: false,
+                sim: String::new(),
+            },
+            CallRecordInfo {
+                id: 1,
+                peer: "+61491570156".into(),
+                direction: 0,
+                started: 1_792_998_000,
+                duration: 0,
+                outcome: 1,
+                seen: false,
+                sim: String::new(),
+            },
+        ]);
+        m.threads = vec![phone_api::ThreadInfo {
+            peer: "+61491570157".into(),
+            last_body: "x".into(),
+            last_at: 1_792_999_500,
+            last_direction: 0,
+            unread: 2,
+        }];
+        m.speed[0] = "+61293744000".into();
+        let t = m.today();
+        assert_eq!(t.len(), 3, "two missed calls from one caller are one line");
+        assert!(matches!(t[0], model::TodayItem::Missed { count: 2, .. }));
+        m.opened();
+        assert_eq!(m.browse, model::Browse::Today(0));
+        shot("today", &m);
+        assert_eq!(m.key(Input::Run, true, Instant::now()), vec![Action::Dial("+61491570156".into())]);
+        m.key(Input::Down, true, Instant::now());
+        assert_eq!(m.key(Input::Run, true, Instant::now()), vec![Action::Text("+61491570157".into())]);
+        m.key(Input::Escape, true, Instant::now());
+        assert_eq!(m.browse, model::Browse::Keypad);
+
+        let mut quiet = model();
+        quiet.opened();
+        assert_eq!(quiet.browse, model::Browse::Keypad, "nothing waiting: the keypad");
+    }
+
+    #[test]
+    fn the_hold_time_is_the_owners() {
+        let mut m = model();
+        m.setting("long_press_ms", "1000".into());
+        m.sel = (0, 1);
+        m.speed[0] = "+61491570157".into();
+        let t = Instant::now();
+        m.key(Input::Ok, true, t);
+        assert!(m.key(Input::Ok, false, t + Duration::from_millis(700)).iter().all(|a| !matches!(a, Action::Dial(_))));
+        assert_eq!(m.number, "2", "0.7 s is a press when holds are 1 s");
+        m.number.clear();
+        m.key(Input::Ok, true, t);
+        assert!(m
+            .key(Input::Ok, false, t + Duration::from_millis(1000))
+            .contains(&Action::Dial("+61491570157".into())));
+        m.setting("long_press_ms", "50".into());
+        assert_eq!(m.hold, Duration::from_millis(300), "kept within reason");
+    }
+
+    // Live: the real app against a running phoned and fake-mm (scripts/ui-e2e.sh
+    // starts them). Keys go in through the app's own input path, phoned's signals
+    // come back through its bus, and each step is rendered from the app's window.
+
+    struct Live {
+        app: App,
+        rx: std::sync::mpsc::Receiver<phone_bus::Event>,
+    }
+
+    impl Live {
+        fn start() -> Option<Self> {
+            std::env::var_os("DOLPHONE_LIVE")?;
+            let _ = panel();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let bus = Bus::start(move |e| {
+                let _ = tx.send(e);
+            });
+            let ui = AppWindow::new().expect("window");
+            let app = App {
+                ui,
+                model: Model::new("AU", phone_core::contacts::Book::load(&phone_core::store::contacts_dir(), "AU")),
+                bus,
+                frame: 0,
+                vibrate: true,
+                ringer: "ring".into(),
+                #[cfg(feature = "device")]
+                motor: None,
+                buzzing: Vec::new(),
+                buzz_next: Instant::now(),
+                last_ring_buzz: Instant::now(),
+                contacts_loaded: Instant::now(),
+                // The live test starts on the keypad.
+                first_load: None,
+            };
+            let mut live = Self { app, rx };
+            live.until("phoned connects", |m| m.connected && m.status.present);
+            Some(live)
+        }
+
+        /// Pass phoned's events to the app until `done`, or fail after 10 s.
+        fn until(&mut self, what: &str, done: impl Fn(&Model) -> bool) {
+            let end = Instant::now() + Duration::from_secs(10);
+            while !done(&self.app.model) {
+                let left = end.saturating_duration_since(Instant::now());
+                assert!(!left.is_zero(), "timed out waiting: {what}");
+                if let Ok(e) = self.rx.recv_timeout(left.min(Duration::from_millis(100))) {
+                    self.app.event(e);
+                }
+            }
+        }
+
+        /// Let events settle (for steps whose effect is elsewhere).
+        fn settle(&mut self, ms: u64) {
+            let end = Instant::now() + Duration::from_millis(ms);
+            while Instant::now() < end {
+                if let Ok(e) = self.rx.recv_timeout(Duration::from_millis(20)) {
+                    self.app.event(e);
+                }
+            }
+        }
+
+        fn press(&mut self, i: Input) {
+            self.app.input(i, true);
+            self.app.input(i, false);
+        }
+
+        fn shot(&mut self, name: &str) -> Vec<u8> {
+            let window = panel();
+            self.app.draw();
+            self.app.ui.show().expect("show");
+            slint::platform::update_timers_and_animations();
+            window.request_redraw();
+            let frame: Vec<u8> = render_frame(&window).expect("frame").iter().map(|p| p.0).collect();
+            let dir = std::path::Path::new("target/render/live");
+            std::fs::create_dir_all(dir).unwrap();
+            let f = std::fs::File::create(dir.join(format!("dialer-{name}.png"))).unwrap();
+            let mut e =
+                png::Encoder::new(std::io::BufWriter::new(f), u32::from(theme::PANEL_W), u32::from(theme::PANEL_H));
+            e.set_color(png::ColorType::Grayscale);
+            e.set_depth(png::BitDepth::Eight);
+            e.write_header().unwrap().write_image_data(&frame).unwrap();
+            frame
+        }
+    }
+
+    fn phonectl(args: &[&str]) -> String {
+        let out = std::process::Command::new("phonectl").args(args).output().expect("phonectl on PATH");
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr)
+    }
+
+    #[test]
+    #[ignore = "needs phoned and fake-mm: scripts/ui-e2e.sh"]
+    fn live_dialer() {
+        let Some(mut l) = Live::start() else { return };
+        l.shot("01-keypad");
+
+        // A call rings: the Dialer shows it, and Run answers it.
+        phonectl(&["fake", "ring", "+61491570156"]);
+        l.until("the call rings", |m| matches!(m.top(), Top::Incoming(_)));
+        assert!(ink(&l.shot("02-incoming")) > 500);
+        std::thread::sleep(model::FRESH);
+        l.press(Input::Run);
+        l.until("answered", |m| m.current().is_some_and(|c| CallState::from_u8(c.state) == CallState::Active));
+        l.shot("03-in-call");
+
+        // The in-call keypad sends tones to the network. Keys are ignored for a
+        // moment after a screen appears by itself, as they would be for a person.
+        std::thread::sleep(model::FRESH);
+        l.press(Input::View);
+        l.press(Input::Ok);
+        l.settle(300);
+        l.shot("04-in-call-keypad");
+        let dump = phonectl(&["fake", "dump"]);
+        assert!(dump.contains("dtmf=1"), "the tone reached the modem: {dump}");
+        l.press(Input::Escape);
+
+        // End, once the lockout after answering has passed.
+        std::thread::sleep(model::END_LOCKOUT);
+        l.press(Input::Run);
+        l.until("the call ends", |m| m.calls.is_empty());
+        l.until("the call is in Recents", |m| !m.recents.is_empty());
+        l.press(Input::View);
+        l.shot("05-recents");
+        l.press(Input::Escape);
+
+        // Typing a number and calling it: the far end answers.
+        phonectl(&["fake", "autoanswer", "800"]);
+        for c in "0491570157".chars() {
+            l.app.input(Input::Char(c), true);
+        }
+        l.shot("06-typed");
+        l.press(Input::Run);
+        l.until("it connects", |m| m.current().is_some_and(|c| CallState::from_u8(c.state) == CallState::Active));
+        std::thread::sleep(model::END_LOCKOUT);
+        l.press(Input::Run);
+        l.until("hung up", |m| m.calls.is_empty());
+        phonectl(&["fake", "autoanswer", "0"]);
+
+        // Another program wants to call a premium number: the Dialer asks.
+        let placed = phonectl(&["dial", "1900123456"]);
+        assert!(placed.contains("waiting for confirmation"), "{placed}");
+        l.until("the confirmation shows", |m| matches!(m.top(), Top::Confirm(_)));
+        l.shot("07-confirm");
+        std::thread::sleep(model::FRESH);
+        l.press(Input::Escape);
+        l.until("denied", |m| m.pending.is_empty());
+
+        // An emergency alert takes the screen until it is dismissed.
+        phonectl(&["fake", "broadcast", "4370", "Emergency Alert: this is a test of the live UI."]);
+        l.until("the alert shows", |m| matches!(m.top(), Top::Alert(_)));
+        l.shot("08-alert");
+        std::thread::sleep(model::FRESH);
+        l.press(Input::Run);
+        assert_eq!(l.app.model.top(), Top::Browse);
+
+        // A locked SIM: the keypad takes the PIN.
+        phonectl(&["fake", "lock", "on"]);
+        l.until("locked", |m| m.locked());
+        for c in "1234".chars() {
+            l.app.input(Input::Char(c), true);
+        }
+        l.shot("09-sim-pin");
+        l.press(Input::Run);
+        l.until("unlocked", |m| !m.locked());
     }
 }

@@ -32,6 +32,8 @@ buttons. Apps > Phone has the three apps.
 phonectl fake ring 0491570156          # the phone rings; the Dialer comes up by itself
 phonectl fake sms 0491570156 "hello"
 phonectl fake answer | hangup | busy   # the far end
+phonectl fake broadcast 4370 "test"    # an emergency alert
+phonectl fake lock on                  # the SIM asks for its PIN (1234)
 phonectl fake signal 30 5G             # FlipCTL's own status bar follows
 phonectl watch                         # every event phoned sends
 journalctl --user -u phoned -f
@@ -44,12 +46,30 @@ fake-mm is close enough to ModemManager that `mmcli -m 0`, `mmcli -m 0
 
 ```sh
 cargo test --workspace                       # core, daemon, CLI, desktop
-scripts/e2e.sh                               # 48 checks: fake-mm + phoned + phonectl on real buses
+scripts/e2e.sh                               # 212 checks: fake-mm, fake-mmsd, phoned, a SIP far end, phonectl, on real buses
+scripts/ui-e2e.sh                            # the four apps driven live against phoned; screenshots in */target/render/live/
+scripts/kdeconnect-e2e.sh                    # 11 checks against the real kdeconnectd (apt install kdeconnect)
 cd apps/dialer && DOLPHONE_RENDER=1 cargo test  # behaviour, and every screen to target/render/
 python3 tools/showcase.py                    # README pictures from the renders
 ```
 
-CI runs all of it on GitHub's arm64 runners, and a nightly job rebuilds the panel
+`scripts/e2e.sh` also starts a second baresip on loopback (when baresip is
+installed) to be the far end of SIP calls, driven with `phonectl fake sip ...`, and
+runs phoned's own baresip with a test tone for a microphone (`DOLPHONE_SIP_TEST_AUDIO`,
+debug builds only). It plays mmsd-tng with `fake-mmsd` (`phonectl fake mms ...`),
+encrypts and unlocks the store where `systemd-creds --user` works (systemd 256 and
+later; skipped in containers), and bridges serial call audio through a pty and the
+session's real PipeWire when there is one.
+
+`scripts/ui-e2e.sh` runs each app's `live_*` test (ignored by a plain `cargo test`):
+the app is built as it runs on the device, its bus events are fed through its own
+event handler, keys go in through its own input path, and each step is rendered from
+its window. It waits as a person would, including the 400 ms after a call appears
+unasked, during which the Dialer ignores keys.
+
+CI runs all of it in Debian 13 containers on GitHub's arm64 runners (the release
+Flipper OS is built on, so baresip and PipeWire's tools are a board's versions), with
+a system bus of the container's own for fake-mm. A nightly job rebuilds the panel
 apps against flipctl-slint's newest commit.
 
 ## Panel bundles and the package
@@ -57,7 +77,7 @@ apps against flipctl-slint's newest commit.
 ```sh
 scripts/bundle.sh             # target/bundles/dolphone-*-aarch64.fap.AppImage (upstream's own tooling)
 INSTALL=1 scripts/bundle.sh   # and into ~/Apps/Phone
-scripts/package-deb.sh        # target/deb/dolphone_<version>_arm64.deb
+scripts/package-deb.sh        # target/deb/dolphone_<version>_<arch>.deb (arm64 with the panel apps; amd64 without)
 scripts/source-tarball.sh     # the GPL corresponding source for a release
 scripts/gen-third-party-licenses.sh   # after any dependency change
 ```
@@ -71,6 +91,8 @@ it was built against.
 
 ## Conventions
 
-Comments explain why, in full sentences. Every panel position is computed in Rust
+The Flipper One comes first: a feature is designed for its panel and buttons, and
+other machines get it through their device profile and the desktop app. Hardware
+facts in a profile cite their source. Comments explain why, in full sentences. Every panel position is computed in Rust
 and text is measured in the font that draws it. Nothing blocking runs on an async
 thread. A user-facing string says what to do, not what went wrong inside.

@@ -51,6 +51,7 @@ enum About {
     Message(String),
     Missed(String),
     Request(u32),
+    Alert(String),
 }
 
 pub struct Notifier {
@@ -95,6 +96,7 @@ struct Style {
 const RINGING: Style = Style { urgency: 2, category: "call.incoming", timeout: 0, icon: "call-start" };
 const MISSED: Style = Style { urgency: 1, category: "call.unanswered", timeout: -1, icon: "call-missed" };
 const MESSAGE: Style = Style { urgency: 1, category: "im.received", timeout: -1, icon: "mail-message-new" };
+const ALERT: Style = Style { urgency: 2, category: "x-dolphone.alert", timeout: 0, icon: "dialog-warning" };
 const CONFIRM: Style = Style { urgency: 2, category: "x-dolphone.confirm", timeout: 0, icon: "dialog-warning" };
 
 impl Notifier {
@@ -175,13 +177,30 @@ impl Notifier {
             "call" => format!("{} wants to call {name}", r.requester),
             "sms" => format!("{} wants to text {name}", r.requester),
             "wipe" => "Delete all messages and calls?".to_string(),
+            "modem" => format!("{} wants to set up the modem", r.requester),
+            "grant" => format!("{} wants to text {} without asking", r.requester, r.target),
+            "contact" => format!("{} wants to {} in your contacts", r.requester, r.target),
             _ => format!("{} wants to use the phone", r.requester),
         };
-        let body = if r.kind == "sms" { r.body.clone() } else { r.reason.clone() };
+        let body = match r.kind.as_str() {
+            "sms" => r.body.clone(),
+            "contact" => "A contact decides who a caller shows as".into(),
+            _ => r.reason.clone(),
+        };
         // No Allow button: a notification is a weaker channel than the device (any
         // server could fake a press), so allowing happens on the panel or in the
         // desktop app, which Review opens.
         self.post(About::Request(r.id), CONFIRM, &what, &body, &["review", "Review", "deny", "Deny"]).await;
+    }
+
+    /// A warning about the phone itself (the network fell back to 2G).
+    pub async fn warning(&self, summary: &str, body: &str) {
+        self.post(About::Alert(summary.to_string()), MISSED, summary, body, &["default", "Open"]).await;
+    }
+
+    /// An emergency alert. Its text is always shown: it is public, and it matters.
+    pub async fn alert(&self, label: &str, body: &str) {
+        self.post(About::Alert(body.to_string()), ALERT, label, body, &["default", "Open"]).await;
     }
 
     pub async fn withdraw_request(&self, id: u32) {
@@ -262,5 +281,6 @@ async fn act(phone: &Arc<Phone>, about: About, action: &str, owner: &Caller) {
             let _ = phone.deny(id).await;
         }
         (About::Request(_), _) => crate::launch::desktop(&["--call"]),
+        (About::Alert(_), _) => crate::launch::desktop(&["--alerts"]),
     }
 }

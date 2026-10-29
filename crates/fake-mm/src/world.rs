@@ -37,6 +37,8 @@ pub mod sms_state {
 
 /// MMModemAccessTechnology bits.
 pub mod tech {
+    pub const GSM: u32 = 1 << 1;
+    pub const EDGE: u32 = 1 << 4;
     pub const UMTS: u32 = 1 << 5;
     pub const LTE: u32 = 1 << 14;
     pub const NR5G: u32 = 1 << 15;
@@ -46,6 +48,7 @@ pub mod tech {
             "5g" | "5gnr" | "nr" => NR5G | LTE,
             "lte" | "4g" => LTE,
             "3g" | "umts" => UMTS,
+            "2g" | "gsm" | "edge" => GSM | EDGE,
             _ => 0,
         }
     }
@@ -61,6 +64,10 @@ pub struct World {
     pub sms: Vec<String>,
     pub quality: u32,
     pub tech: u32,
+    /// (allowed, preferred) MMModemMode, as SetCurrentModes left it.
+    pub modes: (u32, u32),
+    /// The NetworkManager stand-in, when it could claim the name.
+    pub nm: Option<(zbus::Connection, crate::nm::Shared)>,
     pub registered: bool,
     pub roaming: bool,
     pub operator: String,
@@ -72,6 +79,20 @@ pub struct World {
     pub send_fails: bool,
     pub ussd_reply: String,
     pub ussd_state: u32,
+    /// The SIM wants its PIN; Voice and Messaging are hidden until it gets it.
+    pub locked: bool,
+    pub pin: String,
+    pub pin_retries: u32,
+    /// The modem is powered up (ModemManager "enabled").
+    pub enabled: bool,
+    /// Call waiting on the network: off, a second caller is turned away.
+    pub call_waiting: bool,
+    /// Cell broadcast messages the modem holds, and the channels it listens to.
+    pub cbm: Vec<String>,
+    pub next_cbm: u32,
+    pub channels: Vec<(u32, u32)>,
+    /// What AT commands have set.
+    pub at: crate::at::At,
 }
 
 pub type Shared = Arc<Mutex<World>>;
@@ -86,6 +107,9 @@ impl World {
             sms: Vec::new(),
             quality: 72,
             tech: tech::LTE,
+            // 2G, 3G and 4G allowed, 4G preferred.
+            modes: (2 | 4 | 8, 8),
+            nm: None,
             registered: true,
             roaming: false,
             operator: "Fakecom AU".into(),
@@ -95,6 +119,15 @@ impl World {
             send_fails: false,
             ussd_reply: "Your balance is $12.34. Expires 30/11.".into(),
             ussd_state: 1,
+            locked: false,
+            pin: "1234".into(),
+            pin_retries: 3,
+            enabled: true,
+            call_waiting: true,
+            cbm: Vec::new(),
+            next_cbm: 1,
+            channels: Vec::new(),
+            at: crate::at::At::default(),
         }))
     }
 
@@ -111,11 +144,21 @@ impl World {
     }
 }
 
-/// The modem's State: registered (8) or searching (7).
+/// The modem's State: disabled (3), locked (2), registered (8) or searching (7).
 pub fn modem_state(w: &World) -> i32 {
-    if w.registered {
+    if !w.enabled {
+        3
+    } else if w.locked {
+        2
+    } else if w.registered {
         8
     } else {
         7
     }
 }
+
+/// MMCbmState: 2 received.
+pub const CBM_RECEIVED: u32 = 2;
+/// MMSmsDeliveryState: 0 completed and received; 0x100 not known yet.
+pub const DELIVERED: u32 = 0x00;
+pub const DELIVERY_UNKNOWN: u32 = 0x100;

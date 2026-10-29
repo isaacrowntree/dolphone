@@ -1,0 +1,7 @@
+# Let a cellular modem on USB wake the machine, so an incoming call or text
+# reaches a board that is asleep (see crates/phoned/src/power.rs). Vendors:
+# 2c7c Quectel (RM520N-GL, EG25-G, EC25), 1e0e Qualcomm/Option (the ID SIMCom's
+# SIM7600 reports), 2cb7 Fibocom.
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="2c7c", TEST=="power/wakeup", ATTR{power/wakeup}="enabled"
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="1e0e", TEST=="power/wakeup", ATTR{power/wakeup}="enabled"
+ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="2cb7", TEST=="power/wakeup", ATTR{power/wakeup}="enabled"

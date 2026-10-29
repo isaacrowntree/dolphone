@@ -1,0 +1,11 @@
+[Unit]
+Description=Dolphone's optional HTTP gateway to texts (localhost, with a token)
+Documentation=https://isaacrowntree.github.io/dolphone/
+After=phoned.service
+
+[Service]
+ExecStart=/usr/bin/dolphone-gateway
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

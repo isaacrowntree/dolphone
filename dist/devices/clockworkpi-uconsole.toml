@@ -1,0 +1,21 @@
+# The ClockworkPi uConsole: a Raspberry Pi compute module in a handheld with a
+# keyboard, and an optional 4G extension, a SIMCom SIM7600G-H on USB.
+id = "clockworkpi-uconsole"
+name = "ClockworkPi uConsole"
+status = "untested"
+source = "ClockworkPi's uConsole wiki (How to use the 4G extension: SIMCOM_SIM7600G-H) and shipped config.txt (dtoverlay=clockworkpi-uconsole); SIMCom's SIM7100/SIM7500/SIM7600 Series USB AUDIO Application Note V1.03 (AT+CPCMREG, 8 kHz 16-bit PCM on the Audio port); Waveshare's SIM7600X voice-call guide (/dev/ttyUSB4 is that port)"
+notes = "The SIM7600 sends call audio as raw PCM on a serial port, not as a USB sound card: phoned starts it with AT+CPCMREG=1 once a call connects and bridges the port to PipeWire with pw-cat. That needs ModemManager in debug mode (docs/HARDWARE.md) and the owner in the dialout group. Power the extension first (uconsole-4g-cm4 enable)."
+# SIMCom's note: AT+CPCMREG=1 after the call has begun, =0 after it ends.
+call_at_start = ["AT+CPCMREG=1"]
+call_at_end = ["AT+CPCMREG=0"]
+front_ends = ["desktop"]
+
+[match]
+file_contains = [["/boot/firmware/config.txt", "clockworkpi-uconsole"], ["/boot/config.txt", "clockworkpi-uconsole"]]
+priority = 60
+
+[audio]
+modem_match = ["SIMCOM", "SIM7600"]
+# The fifth USB serial port (interface 4, "Audio 9001" in SIMCom's note). When
+# ModemManager's SIMCom plugin names the call's audio port, that wins.
+serial_pcm = "/dev/ttyUSB4"

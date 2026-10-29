@@ -4,7 +4,9 @@
 //! Right or Run; an adjustable row ("< Ring >") steps with Left and Right; a row
 //! with a chevron opens a page with Run or Ok. Escape goes up a page.
 
-use phone_api::{BtDevice, ModemStatus, RouteInfo};
+use std::collections::HashMap;
+
+use phone_api::{keys, AlertInfo, AuditEntry, BtDevice, Grant, ModemStatus, RouteInfo};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Input {
@@ -27,7 +29,19 @@ pub enum Page {
     Blocked,
     Modem,
     About,
+    Calls,
+    Texts,
+    Alerts,
+    Privacy,
+    Grants,
+    Audit,
+    /// Calls over the internet.
+    Sip,
+    /// Laptops, over KDE Connect.
+    Laptops,
 }
+
+const PAGES: usize = 14;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -39,13 +53,74 @@ pub enum Action {
     BtPair(String),
     BtConnect(String, bool),
     BtForget(String),
+    LaptopUnpair(String),
+    /// Copy a paired phone's contacts over Bluetooth.
+    ImportContacts(String),
     Unblock(String),
+    Revoke(i64),
+    /// Open the keyboard for a typed setting.
+    EditText(Field),
     Wipe,
+    /// Make the modem's one-time setup (it restarts).
+    ApplyModemSetup,
+    /// Turn on ModemManager's debug mode, which the setup needs (a password).
+    ModemAccess,
     Refresh(Page),
     Quit,
 }
 
+/// A setting typed on the keyboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Field {
+    Voicemail,
+    SipAccount,
+    SipPassword,
+    SipProxy,
+    UplinkTo,
+    UplinkIface,
+}
+
+impl Field {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Voicemail => keys::VOICEMAIL.0,
+            Self::SipAccount => keys::SIP_ACCOUNT.0,
+            Self::SipPassword => keys::SIP_PASSWORD.0,
+            Self::SipProxy => keys::SIP_PROXY.0,
+            Self::UplinkTo => keys::UPLINK_ALERT_TO.0,
+            Self::UplinkIface => keys::UPLINK_INTERFACE.0,
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Voicemail => "Voicemail number",
+            Self::SipAccount => "SIP address (sip:you@provider)",
+            Self::SipPassword => "SIP password",
+            Self::SipProxy => "Proxy (sip:host), or empty",
+            Self::UplinkTo => "Text this number when the link drops",
+            Self::UplinkIface => "Interface to watch (eth0), or empty",
+        }
+    }
+}
+
+/// The SIP page's rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SipRow {
+    Enabled,
+    Account,
+    Password,
+    Proxy,
+    Use,
+    Status,
+}
+
+pub const SIP: [SipRow; 6] =
+    [SipRow::Enabled, SipRow::Account, SipRow::Password, SipRow::Proxy, SipRow::Use, SipRow::Status];
+
 pub const RINGER: [&str; 3] = ["ring", "vibrate", "silent"];
+/// How long a hold is, in milliseconds.
+pub const HOLD_TIMES: [&str; 5] = ["400", "600", "800", "1000", "1500"];
 pub const REGIONS: [&str; 12] = ["AU", "NZ", "GB", "IE", "US", "CA", "DE", "FR", "NL", "IN", "SG", "JP"];
 
 /// A main-page row: what it is, so keys and drawing agree.
@@ -55,43 +130,114 @@ pub enum MainRow {
     Vibrate,
     Audio,
     Bluetooth,
-    Blocked,
-    Private,
-    DeleteFromSim,
+    Calls,
+    Sip,
+    Laptops,
+    Texts,
+    Alerts,
+    Privacy,
     Region,
+    HoldTime,
     Modem,
     Wipe,
     About,
 }
 
-pub const MAIN: [MainRow; 11] = [
+pub const MAIN: [MainRow; 15] = [
     MainRow::Ringer,
     MainRow::Vibrate,
     MainRow::Audio,
     MainRow::Bluetooth,
-    MainRow::Blocked,
-    MainRow::Private,
-    MainRow::DeleteFromSim,
+    MainRow::Calls,
+    MainRow::Sip,
+    MainRow::Laptops,
+    MainRow::Texts,
+    MainRow::Alerts,
+    MainRow::Privacy,
     MainRow::Region,
+    MainRow::HoldTime,
     MainRow::Modem,
     MainRow::Wipe,
     MainRow::About,
 ];
 
+/// An ON/OFF row on a sub-page: its label and the setting it is.
+pub type Flag = (&'static str, (&'static str, &'static str));
+
+/// Calls: the voicemail row, then these.
+pub const CALL_FLAGS: [Flag; 7] = [
+    ("Call waiting", keys::CALL_WAITING),
+    ("Silence unknown callers", keys::SILENCE_UNKNOWN),
+    ("Say who is calling", keys::SPEAK_CALLER),
+    ("Hold to decline", keys::STEADY_DECLINE),
+    ("Ringback on this phone", keys::LOCAL_RINGBACK),
+    ("Keep off 2G", keys::DISABLE_2G),
+    ("Warn when on 2G", keys::WARN_2G),
+];
+
+pub const TEXT_FLAGS: [Flag; 4] = [
+    ("Delivery reports", keys::DELIVERY_REPORTS),
+    ("Text tone", keys::TEXT_TONE),
+    ("Hide texts in alerts", keys::PRIVATE_NOTIFY),
+    ("Clear texts from SIM", keys::DELETE_FROM_SIM),
+];
+
+/// Emergency alerts: national alerts are always on (row 0, not a flag), then these,
+/// then the alerts received.
+pub const ALERT_FLAGS: [Flag; 4] = [
+    ("Extreme alerts", keys::ALERTS_EXTREME),
+    ("Severe alerts", keys::ALERTS_SEVERE),
+    ("Amber alerts", keys::ALERTS_AMBER),
+    ("Test alerts", keys::ALERTS_TEST),
+];
+
+/// Every flag a page shows, for loading them.
+pub fn all_flags() -> impl Iterator<Item = (&'static str, &'static str)> {
+    CALL_FLAGS.iter().chain(TEXT_FLAGS.iter()).chain(ALERT_FLAGS.iter()).map(|f| f.1).chain([
+        keys::VIBRATE,
+        keys::SIP_ENABLED,
+        keys::KDECONNECT,
+    ])
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrivacyRow {
+    Blocked,
+    Grants,
+    Audit,
+}
+
+pub const PRIVACY: [PrivacyRow; 3] = [PrivacyRow::Blocked, PrivacyRow::Grants, PrivacyRow::Audit];
+
 pub struct Model {
     pub page: Page,
-    pub sel: [usize; 6],
+    pub sel: [usize; PAGES],
     pub ringer: String,
-    pub vibrate: bool,
-    pub private: bool,
-    pub delete_from_sim: bool,
+    /// The ON/OFF settings, by key.
+    pub flags: HashMap<&'static str, bool>,
+    pub voicemail: String,
+    pub sip_account: String,
+    pub sip_proxy: String,
+    pub sip_password_set: bool,
+    pub sip_use: String,
+    pub hold_ms: String,
+    pub uplink_to: String,
+    pub uplink_iface: String,
     pub region: String,
+    pub alerts: Vec<AlertInfo>,
+    pub device: Option<phone_api::DeviceInfo>,
+    /// Laptops linked over KDE Connect: (id, name, paired).
+    pub laptops: Vec<(String, String, bool)>,
+    pub grants: Vec<Grant>,
+    pub audit: Vec<AuditEntry>,
     pub routes: Vec<RouteInfo>,
     pub bt_available: bool,
     pub bt_powered: bool,
     pub devices: Vec<BtDevice>,
     pub blocked: Vec<String>,
     pub status: Option<ModemStatus>,
+    /// The modem's one-time setup, as last checked.
+    pub setup: Vec<(String, String, String)>,
     /// A modal, and what Run does on it.
     pub modal: Option<(Vec<String>, Option<Action>)>,
     pub connected: bool,
@@ -101,18 +247,30 @@ impl Default for Model {
     fn default() -> Self {
         Self {
             page: Page::Main,
-            sel: [0; 6],
+            sel: [0; PAGES],
             ringer: "ring".into(),
-            vibrate: true,
-            private: false,
-            delete_from_sim: true,
+            flags: all_flags().map(|(k, d)| (k, d == "true")).collect(),
+            voicemail: String::new(),
+            sip_account: String::new(),
+            sip_proxy: String::new(),
+            sip_password_set: false,
+            sip_use: "fallback".into(),
+            hold_ms: "600".into(),
+            uplink_to: String::new(),
+            uplink_iface: String::new(),
             region: "AU".into(),
+            alerts: Vec::new(),
+            device: None,
+            laptops: Vec::new(),
+            grants: Vec::new(),
+            audit: Vec::new(),
             routes: Vec::new(),
             bt_available: false,
             bt_powered: false,
             devices: Vec::new(),
             blocked: Vec::new(),
             status: None,
+            setup: Vec::new(),
             modal: None,
             connected: false,
         }
@@ -124,6 +282,79 @@ fn page_index(p: Page) -> usize {
 }
 
 impl Model {
+    pub fn flag(&self, key: (&str, &str)) -> bool {
+        self.flags.get(key.0).copied().unwrap_or(key.1 == "true")
+    }
+
+    /// A setting phoned reported. Returns false for keys this app does not show.
+    pub fn setting(&mut self, key: &str, value: &str) -> bool {
+        if key == keys::VOICEMAIL.0 {
+            self.voicemail = value.to_string();
+            return true;
+        }
+        if key == keys::REGION.0 {
+            self.region = value.to_string();
+            return true;
+        }
+        match key {
+            k if k == keys::SIP_ACCOUNT.0 => self.sip_account = value.to_string(),
+            k if k == keys::SIP_PROXY.0 => self.sip_proxy = value.to_string(),
+            k if k == keys::SIP_PASSWORD.0 => self.sip_password_set = value == "set",
+            k if k == keys::SIP_USE.0 => self.sip_use = value.to_string(),
+            k if k == keys::LONG_PRESS_MS.0 => self.hold_ms = value.to_string(),
+            k if k == keys::UPLINK_ALERT_TO.0 => self.uplink_to = value.to_string(),
+            k if k == keys::UPLINK_INTERFACE.0 => self.uplink_iface = value.to_string(),
+            _ => {
+                return match all_flags().find(|(k, _)| *k == key) {
+                    Some((k, _)) => {
+                        self.flags.insert(k, value == "true");
+                        true
+                    }
+                    None => false,
+                }
+            }
+        }
+        true
+    }
+
+    /// The text a typed setting starts from (a password always starts empty).
+    pub fn field_text(&self, f: Field) -> String {
+        match f {
+            Field::Voicemail => self.voicemail.clone(),
+            Field::SipAccount => self.sip_account.clone(),
+            Field::SipProxy => self.sip_proxy.clone(),
+            Field::UplinkTo => self.uplink_to.clone(),
+            Field::UplinkIface => self.uplink_iface.clone(),
+            Field::SipPassword => String::new(),
+        }
+    }
+
+    fn toggle(&mut self, key: (&'static str, &'static str)) -> Vec<Action> {
+        let on = !self.flag(key);
+        self.flags.insert(key.0, on);
+        vec![Action::Set(key.0, on.to_string())]
+    }
+
+    /// Whether the modem's setup has something to change.
+    pub fn setup_needed(&self) -> bool {
+        self.setup.iter().any(|(_, state, _)| state == "change")
+    }
+
+    /// Whether the setup could not run because ModemManager passes no AT commands.
+    pub fn needs_access(&self) -> bool {
+        self.setup.iter().any(|(_, state, why)| state == "error" && why.contains("debug mode"))
+    }
+
+    /// What the setup did, for a modal.
+    pub fn setup_done(&mut self, steps: Vec<(String, String, String)>) {
+        let failed = steps.iter().find(|(_, state, _)| state == "error").map(|(_, _, d)| d.clone());
+        self.modal = Some(match failed {
+            Some(why) => (vec!["Not set up:".into(), why], None),
+            None => (vec!["Modem set up.".into(), "It is restarting;".into(), "back in half a minute.".into()], None),
+        });
+        self.setup = steps;
+    }
+
     pub fn sel(&self) -> usize {
         self.sel[page_index(self.page)]
     }
@@ -142,6 +373,15 @@ impl Model {
             Page::Bluetooth => 2 + self.devices.len(),
             Page::Blocked => self.blocked.len().max(1),
             Page::Modem | Page::About => 1,
+            Page::Calls => 1 + CALL_FLAGS.len(),
+            // The flags, then the uplink watch's number and interface.
+            Page::Texts => TEXT_FLAGS.len() + 2,
+            Page::Alerts => 1 + ALERT_FLAGS.len() + self.alerts.len(),
+            Page::Privacy => PRIVACY.len(),
+            Page::Grants => self.grants.len().max(1),
+            Page::Sip => SIP.len(),
+            Page::Laptops => 1 + self.laptops.len(),
+            Page::Audit => self.audit.len().max(1),
         }
     }
 
@@ -163,11 +403,13 @@ impl Model {
                 return Vec::new();
             }
             Input::Escape => {
-                if self.page == Page::Main {
-                    return vec![Action::Quit];
-                }
-                self.page = Page::Main;
-                return vec![Action::Refresh(Page::Main)];
+                let up = match self.page {
+                    Page::Main => return vec![Action::Quit],
+                    Page::Blocked | Page::Grants | Page::Audit => Page::Privacy,
+                    _ => Page::Main,
+                };
+                self.page = up;
+                return vec![Action::Refresh(up)];
             }
             _ => {}
         }
@@ -195,7 +437,122 @@ impl Model {
                 },
                 _ => Vec::new(),
             },
-            Page::Modem | Page::About => Vec::new(),
+            Page::Modem if input == Input::Run && self.needs_access() => {
+                self.modal = Some((
+                    vec!["Let Dolphone send".into(), "AT commands? It turns".into(), "on MM debug mode.".into()],
+                    Some(Action::ModemAccess),
+                ));
+                Vec::new()
+            }
+            Page::Modem if input == Input::Run && self.setup_needed() => {
+                self.modal = Some((
+                    vec!["Set up the modem?".into(), "USB audio and VoLTE,".into(), "saved in it; it restarts.".into()],
+                    Some(Action::ApplyModemSetup),
+                ));
+                Vec::new()
+            }
+            Page::Modem | Page::About | Page::Audit => Vec::new(),
+            Page::Calls => {
+                let toggle = matches!(input, Input::Left | Input::Right | Input::Run | Input::Ok);
+                match self.sel() {
+                    0 if matches!(input, Input::Run | Input::Ok | Input::Edit) => {
+                        vec![Action::EditText(Field::Voicemail)]
+                    }
+                    i if toggle && i >= 1 => self.toggle(CALL_FLAGS[(i - 1).min(CALL_FLAGS.len() - 1)].1),
+                    _ => Vec::new(),
+                }
+            }
+            Page::Texts => match self.sel() {
+                i if i < TEXT_FLAGS.len() && matches!(input, Input::Left | Input::Right | Input::Run | Input::Ok) => {
+                    self.toggle(TEXT_FLAGS[i].1)
+                }
+                i if i == TEXT_FLAGS.len() && matches!(input, Input::Run | Input::Ok | Input::Edit) => {
+                    vec![Action::EditText(Field::UplinkTo)]
+                }
+                i if i == TEXT_FLAGS.len() + 1 && matches!(input, Input::Run | Input::Ok | Input::Edit) => {
+                    vec![Action::EditText(Field::UplinkIface)]
+                }
+                _ => Vec::new(),
+            },
+            Page::Alerts => {
+                let toggle = matches!(input, Input::Left | Input::Right | Input::Run | Input::Ok);
+                match self.sel() {
+                    0 if toggle => {
+                        self.modal = Some((vec!["National alerts are".into(), "always on.".into()], None));
+                        Vec::new()
+                    }
+                    i if toggle && (1..=ALERT_FLAGS.len()).contains(&i) => self.toggle(ALERT_FLAGS[i - 1].1),
+                    i if matches!(input, Input::Run | Input::Ok) => {
+                        if let Some(a) = self.alerts.get(i - 1 - ALERT_FLAGS.len()) {
+                            let mut lines = vec![phone_core::model::AlertLevel::from_u8(a.level).label().to_string()];
+                            lines.extend(wrap_modal(&a.text));
+                            self.modal = Some((lines, None));
+                        }
+                        Vec::new()
+                    }
+                    _ => Vec::new(),
+                }
+            }
+            Page::Privacy if matches!(input, Input::Run | Input::Ok | Input::Right) => {
+                self.page = match PRIVACY[self.sel().min(PRIVACY.len() - 1)] {
+                    PrivacyRow::Blocked => Page::Blocked,
+                    PrivacyRow::Grants => Page::Grants,
+                    PrivacyRow::Audit => Page::Audit,
+                };
+                self.set_sel(0);
+                vec![Action::Refresh(self.page)]
+            }
+            Page::Grants if matches!(input, Input::Run | Input::Ok | Input::Edit) => {
+                if let Some(g) = self.grants.get(self.sel()) {
+                    self.modal = Some((
+                        vec![format!("Revoke {}'s grant?", g.program), "It will have to ask".into(), "again.".into()],
+                        Some(Action::Revoke(g.id)),
+                    ));
+                }
+                Vec::new()
+            }
+            Page::Sip => {
+                let toggle = matches!(input, Input::Left | Input::Right | Input::Run | Input::Ok);
+                let open = matches!(input, Input::Run | Input::Ok | Input::Edit);
+                match SIP[self.sel().min(SIP.len() - 1)] {
+                    SipRow::Enabled if toggle => self.toggle(keys::SIP_ENABLED),
+                    SipRow::Account if open => vec![Action::EditText(Field::SipAccount)],
+                    SipRow::Password if open => vec![Action::EditText(Field::SipPassword)],
+                    SipRow::Proxy if open => vec![Action::EditText(Field::SipProxy)],
+                    SipRow::Use if toggle => {
+                        self.sip_use = if self.sip_use == "always" { "fallback".into() } else { "always".into() };
+                        vec![Action::Set(keys::SIP_USE.0, self.sip_use.clone())]
+                    }
+                    _ => Vec::new(),
+                }
+            }
+            Page::Laptops => match self.sel() {
+                0 if matches!(input, Input::Left | Input::Right | Input::Run | Input::Ok) => {
+                    self.toggle(keys::KDECONNECT)
+                }
+                i if i >= 1 && matches!(input, Input::Run | Input::Ok | Input::Edit) => {
+                    match self.laptops.get(i - 1) {
+                        Some((id, name, true)) => {
+                            self.modal =
+                                Some((vec![format!("Unpair {name}?")], Some(Action::LaptopUnpair(id.clone()))));
+                        }
+                        Some((_, name, false)) => {
+                            self.modal = Some((
+                                vec![
+                                    format!("Pair from {name}:"),
+                                    "KDE Connect > this phone".into(),
+                                    "> Pair, then allow here".into(),
+                                ],
+                                None,
+                            ));
+                        }
+                        None => {}
+                    }
+                    Vec::new()
+                }
+                _ => Vec::new(),
+            },
+            Page::Privacy | Page::Grants => Vec::new(),
         }
     }
 
@@ -213,29 +570,36 @@ impl Model {
                 self.ringer = step(&RINGER, &self.ringer, fwd);
                 vec![Action::SetRinger(self.ringer.clone())]
             }
-            MainRow::Vibrate if toggle => {
-                self.vibrate = !self.vibrate;
-                vec![Action::Set("vibrate", self.vibrate.to_string())]
-            }
-            MainRow::Private if toggle => {
-                self.private = !self.private;
-                vec![Action::Set("private_notify", self.private.to_string())]
-            }
-            MainRow::DeleteFromSim if toggle => {
-                self.delete_from_sim = !self.delete_from_sim;
-                vec![Action::Set("delete_from_sim", self.delete_from_sim.to_string())]
-            }
+            MainRow::Vibrate if toggle => self.toggle(keys::VIBRATE),
             MainRow::Region if toggle => {
                 self.region = step(&REGIONS, &self.region, fwd);
                 vec![Action::Set("region", self.region.clone())]
             }
-            MainRow::Audio | MainRow::Bluetooth | MainRow::Blocked | MainRow::Modem | MainRow::About
+            MainRow::HoldTime if toggle => {
+                self.hold_ms = step(&HOLD_TIMES, &self.hold_ms, fwd);
+                vec![Action::Set(keys::LONG_PRESS_MS.0, self.hold_ms.clone())]
+            }
+            MainRow::Audio
+            | MainRow::Bluetooth
+            | MainRow::Calls
+            | MainRow::Sip
+            | MainRow::Laptops
+            | MainRow::Texts
+            | MainRow::Alerts
+            | MainRow::Privacy
+            | MainRow::Modem
+            | MainRow::About
                 if matches!(input, Input::Run | Input::Ok | Input::Right) =>
             {
                 self.page = match row {
                     MainRow::Audio => Page::Audio,
                     MainRow::Bluetooth => Page::Bluetooth,
-                    MainRow::Blocked => Page::Blocked,
+                    MainRow::Calls => Page::Calls,
+                    MainRow::Sip => Page::Sip,
+                    MainRow::Laptops => Page::Laptops,
+                    MainRow::Texts => Page::Texts,
+                    MainRow::Alerts => Page::Alerts,
+                    MainRow::Privacy => Page::Privacy,
                     MainRow::Modem => Page::Modem,
                     _ => Page::About,
                 };
@@ -273,6 +637,21 @@ impl Model {
                     vec![Action::BtConnect(d.address.clone(), !d.connected)]
                 }
             }
+            (i, Input::View) if i >= 2 => {
+                let Some(d) = self.devices.get(i - 2) else { return Vec::new() };
+                if !d.paired {
+                    return Vec::new();
+                }
+                self.modal = Some((
+                    vec![
+                        format!("Copy contacts from {}?", d.name),
+                        "Names and numbers only.".into(),
+                        "Allow it on the phone.".into(),
+                    ],
+                    Some(Action::ImportContacts(d.address.clone())),
+                ));
+                Vec::new()
+            }
             (i, Input::Edit) if i >= 2 => {
                 let Some(d) = self.devices.get(i - 2) else { return Vec::new() };
                 if d.paired {
@@ -284,10 +663,86 @@ impl Model {
         }
     }
 
+    /// The keyboard closed on a typed setting.
+    pub fn written(&mut self, f: Field, text: Option<String>) -> Vec<Action> {
+        let Some(t) = text else { return Vec::new() };
+        let t = t.trim().to_string();
+        match f {
+            Field::Voicemail => {
+                let n: String = t.chars().filter(|c| c.is_ascii_digit() || *c == '+').collect();
+                self.voicemail = n.clone();
+                vec![Action::Set(keys::VOICEMAIL.0, n)]
+            }
+            Field::SipAccount => {
+                // A bare user@host is a SIP address too.
+                let a = if t.is_empty() || t.starts_with("sip") { t } else { format!("sip:{t}") };
+                self.sip_account = a.clone();
+                vec![Action::Set(keys::SIP_ACCOUNT.0, a)]
+            }
+            Field::SipProxy => {
+                let p = if t.is_empty() || t.starts_with("sip") { t } else { format!("sip:{t}") };
+                self.sip_proxy = p.clone();
+                vec![Action::Set(keys::SIP_PROXY.0, p)]
+            }
+            Field::SipPassword => {
+                self.sip_password_set = !t.is_empty();
+                vec![Action::Set(keys::SIP_PASSWORD.0, t)]
+            }
+            Field::UplinkTo => {
+                let n: String = t.chars().filter(|c| c.is_ascii_digit() || *c == '+').collect();
+                self.uplink_to = n.clone();
+                vec![Action::Set(keys::UPLINK_ALERT_TO.0, n)]
+            }
+            Field::UplinkIface => {
+                let i: String =
+                    t.chars().filter(|c| c.is_ascii_alphanumeric() || "-_.".contains(*c)).take(15).collect();
+                self.uplink_iface = i.clone();
+                vec![Action::Set(keys::UPLINK_INTERFACE.0, i)]
+            }
+        }
+    }
+
+    pub fn imported(&mut self, added: u32, merged: u32, unchanged: u32, error: &str) {
+        self.modal = Some((
+            if error.is_empty() {
+                vec![
+                    "Contacts copied".into(),
+                    format!("{added} new, {merged} updated,"),
+                    format!("{unchanged} already here"),
+                ]
+            } else {
+                let mut l = vec!["Contacts not copied".to_string()];
+                l.extend(wrap_modal(error).into_iter().take(3));
+                l
+            },
+            None,
+        ));
+    }
+
     pub fn passkey(&mut self, name: &str, key: u32) {
         self.modal =
             Some((vec![format!("Pairing with {name}"), format!("Code {key:06}"), "Check it matches.".into()], None));
     }
+}
+
+/// Split text into modal lines of about 30 characters, at most four.
+fn wrap_modal(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for w in text.split_whitespace() {
+        if !line.is_empty() && line.len() + 1 + w.len() > 30 {
+            out.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(w);
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    out.truncate(4);
+    out
 }
 
 #[cfg(test)]
@@ -319,7 +774,7 @@ mod tests {
     #[test]
     fn wipe_asks_first() {
         let mut m = Model::default();
-        for _ in 0..9 {
+        for _ in 0..MAIN.iter().position(|r| *r == MainRow::Wipe).unwrap() {
             m.key(Input::Down);
         }
         assert!(m.key(Input::Run).is_empty());
@@ -328,6 +783,28 @@ mod tests {
         // Escape on the modal cancels.
         m.key(Input::Run);
         assert!(m.key(Input::Escape).is_empty());
+    }
+
+    #[test]
+    fn contacts_from_a_paired_phone() {
+        let mut m = Model::default();
+        m.page = Page::Bluetooth;
+        m.bt_available = true;
+        m.bt_powered = true;
+        m.devices = vec![BtDevice {
+            address: "AA:BB:CC:00:11:22".into(),
+            name: "Pixel 9".into(),
+            paired: true,
+            connected: false,
+            headset: false,
+            speaker: false,
+        }];
+        m.key(Input::Down);
+        m.key(Input::Down);
+        assert!(m.key(Input::View).is_empty());
+        assert_eq!(m.key(Input::Run), vec![Action::ImportContacts("AA:BB:CC:00:11:22".into())]);
+        m.imported(120, 3, 0, "");
+        assert_eq!(m.modal.as_ref().unwrap().0[1], "120 new, 3 updated,");
     }
 
     #[test]
@@ -349,5 +826,87 @@ mod tests {
         assert_eq!(m.key(Input::Run), vec![Action::BtPair("AA".into())]);
         m.devices[0].paired = true;
         assert_eq!(m.key(Input::Run), vec![Action::BtConnect("AA".into(), true)]);
+    }
+
+    #[test]
+    fn call_settings_and_voicemail() {
+        let mut m = Model::default();
+        for _ in 0..4 {
+            m.key(Input::Down);
+        }
+        assert_eq!(m.key(Input::Run), vec![Action::Refresh(Page::Calls)]);
+        assert_eq!(m.key(Input::Run), vec![Action::EditText(Field::Voicemail)]);
+        assert_eq!(m.written(Field::Voicemail, Some("1 0 1".into())), vec![Action::Set("voicemail", "101".into())]);
+        m.key(Input::Down);
+        assert_eq!(m.key(Input::Run), vec![Action::Set("call_waiting", "false".into())]);
+        m.key(Input::Down);
+        assert_eq!(m.key(Input::Right), vec![Action::Set("silence_unknown", "true".into())]);
+        assert_eq!(m.key(Input::Escape), vec![Action::Refresh(Page::Main)]);
+    }
+
+    #[test]
+    fn national_alerts_cannot_be_turned_off() {
+        let mut m = Model::default();
+        m.page = Page::Alerts;
+        assert!(m.key(Input::Run).is_empty());
+        assert!(m.modal.is_some());
+        m.key(Input::Escape);
+        m.key(Input::Down);
+        m.key(Input::Down);
+        m.key(Input::Down);
+        m.key(Input::Down);
+        assert_eq!(m.key(Input::Run), vec![Action::Set("alerts_test", "true".into())]);
+    }
+
+    #[test]
+    fn grants_are_revoked_after_asking() {
+        let mut m = Model::default();
+        m.page = Page::Grants;
+        m.grants = vec![Grant { id: 3, program: "cron".into(), numbers: "+61491570158".into(), per_hour: 2, until: 0 }];
+        assert!(m.key(Input::Run).is_empty());
+        assert_eq!(m.key(Input::Run), vec![Action::Revoke(3)]);
+        m.page = Page::Grants;
+        assert_eq!(m.key(Input::Escape), vec![Action::Refresh(Page::Privacy)], "back to Privacy, not Main");
+    }
+
+    #[test]
+    fn sip_account_from_the_panel() {
+        let mut m = Model::default();
+        m.page = Page::Sip;
+        assert_eq!(m.key(Input::Run), vec![Action::Set("sip_enabled", "true".into())]);
+        m.key(Input::Down);
+        assert_eq!(m.key(Input::Run), vec![Action::EditText(Field::SipAccount)]);
+        assert_eq!(
+            m.written(Field::SipAccount, Some("me@voip.example.net".into())),
+            vec![Action::Set("sip_account", "sip:me@voip.example.net".into())]
+        );
+        assert_eq!(m.field_text(Field::SipPassword), "", "a password is never shown back");
+        m.key(Input::Down);
+        m.key(Input::Down);
+        m.key(Input::Down);
+        assert_eq!(m.key(Input::Right), vec![Action::Set("sip_use", "always".into())]);
+    }
+
+    #[test]
+    fn modem_setup_asks_first() {
+        let mut m = Model::default();
+        m.page = Page::Modem;
+        assert!(m.key(Input::Run).is_empty() && m.modal.is_none(), "nothing to set up, nothing asked");
+        m.setup = vec![("volte".into(), "change".into(), String::new())];
+        assert!(m.key(Input::Run).is_empty());
+        assert!(m.modal.is_some(), "it asks, since the modem restarts");
+        assert_eq!(m.key(Input::Run), vec![Action::ApplyModemSetup]);
+        m.setup_done(vec![("modem".into(), "error".into(), "no modem".into())]);
+        assert_eq!(m.modal.as_ref().map(|(l, _)| l[1].as_str()), Some("no modem"));
+    }
+
+    #[test]
+    fn modem_access_asks_first() {
+        let mut m = Model::default();
+        m.page = Page::Modem;
+        m.setup = vec![("modem".into(), "error".into(), "ModemManager passes AT commands only in debug mode".into())];
+        assert!(m.needs_access() && !m.setup_needed());
+        assert!(m.key(Input::Run).is_empty() && m.modal.is_some());
+        assert_eq!(m.key(Input::Run), vec![Action::ModemAccess]);
     }
 }

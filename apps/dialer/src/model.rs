@@ -12,7 +12,7 @@
 
 use std::time::{Duration, Instant};
 
-use phone_api::{CallInfo, CallRecordInfo, ModemStatus, Request, RouteInfo};
+use phone_api::{AlertInfo, CallInfo, CallRecordInfo, ModemStatus, Request, RouteInfo, ThreadInfo};
 use phone_core::contacts::{Book, Contact};
 use phone_core::model::{CallState, Route};
 use phone_core::number::{self, Class};
@@ -32,6 +32,8 @@ pub enum Input {
     Run,
     Ptt,
     Char(char),
+    /// A tap on the touchpad over a keypad cell (row, column).
+    Tap(usize, usize),
 }
 
 /// What the model asks the app to do.
@@ -41,6 +43,8 @@ pub enum Action {
     Answer(u32),
     Hangup(u32),
     Swap,
+    /// Join the active and held calls.
+    Merge,
     Dtmf(u32, String),
     Mute(bool),
     CycleRoute,
@@ -54,22 +58,58 @@ pub enum Action {
     Text(String),
     Reply(String, String),
     MarkSeen,
+    Unlock(String),
+    SetSetting(String, String),
+    SetRinger(String),
     Quit,
     Buzz(Buzz),
 }
 
+/// The vibration vocabulary: each thing the phone tells you has its own feel, so
+/// it can be told apart in a pocket.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Buzz {
     /// A key press.
     Tick,
     /// A call connecting or ending.
     Thump,
+    /// A text arrived: two short.
+    Text,
+    /// A call was missed: three short.
+    Missed,
+    /// A second call is waiting: two long.
+    Waiting,
+    /// A call dropped that nobody here ended: one long.
+    Dropped,
+    /// A text failed to send: short, short, long.
+    Failed,
+    /// An emergency alert: long, long, long.
+    Alert,
+}
+
+impl Buzz {
+    /// On and off times in milliseconds, on first.
+    pub fn pattern(self) -> &'static [u16] {
+        match self {
+            Self::Tick => &[10],
+            Self::Thump => &[80],
+            Self::Text => &[60, 120, 60],
+            Self::Missed => &[60, 100, 60, 100, 60],
+            Self::Waiting => &[300, 200, 300],
+            Self::Dropped => &[600],
+            Self::Failed => &[60, 100, 60, 100, 400],
+            Self::Alert => &[900, 200, 900, 200, 900],
+        }
+    }
 }
 
 /// Where the user is when nothing is ringing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Browse {
     Keypad,
+    /// What is waiting: missed calls, unread conversations, favourites. Where the
+    /// Dialer opens when there is any of that.
+    Today(usize),
     Recents,
     Contacts,
     /// A USSD session: the network's last words, and whether it wants a reply.
@@ -77,11 +117,16 @@ pub enum Browse {
         text: String,
         awaiting: bool,
     },
+    /// Giving the selected contact a speed-dial key, 2 to 9 (the index is the key
+    /// less two).
+    SpeedPick(usize),
 }
 
 /// What is on top, derived from the state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Top {
+    /// An emergency alert, over everything but a ringing call.
+    Alert(AlertInfo),
     Confirm(Request),
     Incoming(CallInfo),
     InCall,
@@ -95,8 +140,16 @@ pub const KEYS: [[(char, &str); 3]; 4] = [
     [('*', ""), ('0', "+"), ('#', "")],
 ];
 
-/// A long press is at least this.
+/// A long press is at least this, unless the owner chose otherwise.
 pub const HOLD: Duration = Duration::from_millis(600);
+
+/// One line of the Today screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TodayItem {
+    Missed { peer: String, count: u32, at: i64 },
+    Unread { peer: String, count: u32, at: i64 },
+    Favourite { key: usize, number: String },
+}
 /// After a call is answered, End is ignored for this long, so the press that
 /// answered (or a nervous second one) cannot hang up.
 pub const END_LOCKOUT: Duration = Duration::from_millis(1500);
@@ -133,6 +186,25 @@ pub struct Model {
     pub connected: bool,
     /// The keypad is typing a reply to a USSD menu rather than a number.
     pub ussd_replying: bool,
+    /// Hold-1 calls this; empty when there is none.
+    pub voicemail: String,
+    /// Hold-2 .. Hold-9.
+    pub speed: [String; 8],
+    /// Decline needs a hold, for unsteady hands.
+    pub steady_decline: bool,
+    pub ringer: String,
+    pub missed: u32,
+    pub unread: u32,
+    /// The emergency alert on screen, until dismissed.
+    pub alert: Option<AlertInfo>,
+    /// Conversations, for the unread ones on Today.
+    pub threads: Vec<ThreadInfo>,
+    /// How long a hold is.
+    pub hold: Duration,
+    /// A one-line hint on the incoming screen ("Hold Decline to decline").
+    pub hint: Option<&'static str>,
+    /// The call the owner just ended here, so its going is not a drop.
+    ending: Vec<u32>,
     answered_at: Option<Instant>,
     top_since: (Option<Top>, Instant),
     held: Option<(Input, Instant)>,
@@ -162,6 +234,7 @@ impl Model {
                 own_number: String::new(),
                 emergency_only: false,
                 state: "ready".into(),
+                sip: String::new(),
             },
             routes: Vec::new(),
             route: Route::Speaker,
@@ -173,6 +246,17 @@ impl Model {
             notice: None,
             connected: false,
             ussd_replying: false,
+            voicemail: String::new(),
+            speed: Default::default(),
+            steady_decline: false,
+            ringer: "ring".into(),
+            missed: 0,
+            unread: 0,
+            alert: None,
+            threads: Vec::new(),
+            hold: HOLD,
+            hint: None,
+            ending: Vec::new(),
             answered_at: None,
             top_since: (None, Instant::now()),
             held: None,
@@ -199,6 +283,12 @@ impl Model {
     }
 
     pub fn top(&self) -> Top {
+        // A ringing call first: it cannot wait, and answering it does not hide the
+        // alert, which is back on top once the call is dealt with.
+        let ringing = self.ringing().cloned();
+        if let (Some(a), None) = (&self.alert, &ringing) {
+            return Top::Alert(a.clone());
+        }
         if let Some(r) = self.pending.first() {
             return Top::Confirm(r.clone());
         }
@@ -218,6 +308,7 @@ impl Model {
         let same = match (&self.top_since.0, &top) {
             (Some(Top::Confirm(a)), Top::Confirm(b)) => a.id == b.id,
             (Some(Top::Incoming(a)), Top::Incoming(b)) => a.id == b.id,
+            (Some(Top::Alert(a)), Top::Alert(b)) => a.id == b.id,
             (Some(a), b) => std::mem::discriminant(a) == std::mem::discriminant(b),
             (None, _) => false,
         };
@@ -225,6 +316,7 @@ impl Model {
             if !matches!(top, Top::Incoming(_)) {
                 self.info = false;
                 self.replies = None;
+                self.hint = None;
             }
             if !matches!(top, Top::InCall) {
                 self.dtmf_open = false;
@@ -250,6 +342,77 @@ impl Model {
         self.book.search(&self.number).into_iter().next()
     }
 
+    /// A contact whose name the typed digits spell on the keypad's letters ("567"
+    /// is Jordan), when no number matches. Run calls it while what is typed is too
+    /// short to be a phone number.
+    pub fn t9_match(&self) -> Option<&Contact> {
+        let d = number::digits(&self.number);
+        if self.typed_match().is_some() || d.len() >= T9_MAX || self.number.contains(['*', '#', '+']) {
+            return None;
+        }
+        if self.classify_typed() == Class::Emergency {
+            return None;
+        }
+        self.book.search_t9(&d).into_iter().next()
+    }
+
+    /// A keypad is on screen (the dialler's, or the in-call one).
+    pub fn keypad_showing(&self) -> bool {
+        match self.top() {
+            Top::Browse => self.browse == Browse::Keypad,
+            Top::InCall => self.dtmf_open,
+            _ => false,
+        }
+    }
+
+    /// What Today lists: missed calls not yet seen (one line a caller), unread
+    /// conversations, then the speed-dial favourites.
+    pub fn today(&self) -> Vec<TodayItem> {
+        let mut out: Vec<TodayItem> = Vec::new();
+        for r in self.recents.iter().filter(|r| r.outcome == phone_core::model::Outcome::Missed as u8 && !r.seen) {
+            let same = out
+                .iter_mut()
+                .find(|i| matches!(i, TodayItem::Missed { peer, .. } if number::same_party(peer, &r.peer)));
+            match same {
+                Some(TodayItem::Missed { count, .. }) => *count += 1,
+                _ => out.push(TodayItem::Missed { peer: r.peer.clone(), count: 1, at: r.started }),
+            }
+        }
+        for t in self.threads.iter().filter(|t| t.unread > 0) {
+            out.push(TodayItem::Unread { peer: t.peer.clone(), count: t.unread, at: t.last_at });
+        }
+        for (i, n) in self.speed.iter().enumerate().filter(|(_, n)| !n.is_empty()) {
+            out.push(TodayItem::Favourite { key: i + 2, number: n.clone() });
+        }
+        out
+    }
+
+    /// Where to open: Today when something is waiting, the keypad otherwise.
+    pub fn opened(&mut self) {
+        let waiting = self.today().iter().any(|i| !matches!(i, TodayItem::Favourite { .. }));
+        self.browse = if waiting { Browse::Today(0) } else { Browse::Keypad };
+    }
+
+    pub fn locked(&self) -> bool {
+        self.connected && self.status.present && self.status.state == "locked"
+    }
+
+    /// What Hold-N calls, if anything.
+    pub fn held_number(&self, d: char) -> Option<String> {
+        let n = match d {
+            '1' => self.voicemail.clone(),
+            '2'..='9' => self.speed[(d as u8 - b'2') as usize].clone(),
+            _ => String::new(),
+        };
+        (!n.is_empty()).then_some(n)
+    }
+
+    /// The Australian National Relay Service, for a Deaf caller, a caller with a
+    /// speech impairment, or someone calling one.
+    pub fn relay_hint(&self) -> Option<&'static str> {
+        (self.region == "AU" && number::digits(&self.number) == "106").then_some("TTY relay; or text 0423 677 767")
+    }
+
     pub fn is_ussd(&self) -> bool {
         let n = self.number.trim();
         n.len() > 1 && (n.starts_with('*') || n.starts_with('#')) && n.ends_with('#')
@@ -269,6 +432,9 @@ impl Model {
         let was = self.calls.iter().find(|x| x.id == c.id).map(|x| CallState::from_u8(x.state));
         let now = CallState::from_u8(c.state);
         let mut out = Vec::new();
+        if now == CallState::Waiting && was.is_none() {
+            out.push(Action::Buzz(Buzz::Waiting));
+        }
         if now == CallState::Active && was != Some(CallState::Active) && was != Some(CallState::Held) {
             self.answered_at = Some(Instant::now());
             out.push(Action::Buzz(Buzz::Thump));
@@ -282,13 +448,56 @@ impl Model {
     }
 
     pub fn call_removed(&mut self, id: u32) -> Vec<Action> {
-        let had = self.calls.len();
+        let gone = self.calls.iter().find(|c| c.id == id).map(|c| CallState::from_u8(c.state));
         self.calls.retain(|c| c.id != id);
+        let ours = self.ending.contains(&id);
+        self.ending.retain(|e| *e != id);
         self.settle();
-        if self.calls.len() < had {
-            vec![Action::Buzz(Buzz::Thump)]
+        match gone {
+            // A live call ending that nobody ended here: the far end hung up, or the
+            // network lost it. Either way it should feel different from End.
+            Some(CallState::Active | CallState::Held) if !ours => vec![Action::Buzz(Buzz::Dropped)],
+            Some(_) => vec![Action::Buzz(Buzz::Thump)],
+            None => Vec::new(),
+        }
+    }
+
+    pub fn missed_changed(&mut self, n: u32) -> Vec<Action> {
+        let more = n > self.missed;
+        self.missed = n;
+        if more {
+            vec![Action::Buzz(Buzz::Missed)]
         } else {
             Vec::new()
+        }
+    }
+
+    pub fn alert_received(&mut self, a: AlertInfo) -> Vec<Action> {
+        // Public information is kept, but does not take the screen.
+        if a.level == phone_core::model::AlertLevel::Info as u8 {
+            return Vec::new();
+        }
+        self.alert = Some(a);
+        self.settle();
+        vec![Action::Buzz(Buzz::Alert)]
+    }
+
+    pub fn setting(&mut self, key: &str, value: String) {
+        match key {
+            "region" => self.region = value,
+            "voicemail" => self.voicemail = value,
+            "steady_decline" => self.steady_decline = value == "true",
+            "long_press_ms" => {
+                if let Ok(ms) = value.parse::<u64>() {
+                    self.hold = Duration::from_millis(ms.clamp(300, 1500));
+                }
+            }
+            k if k.starts_with("speed_") => {
+                if let Some(i) = k[6..].parse::<usize>().ok().filter(|i| (2..=9).contains(i)) {
+                    self.speed[i - 2] = value;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -334,6 +543,13 @@ impl Model {
             return Vec::new();
         }
         match self.top() {
+            Top::Alert(_) => {
+                if matches!(input, Input::Run | Input::Ok | Input::Escape) {
+                    self.alert = None;
+                    self.settle();
+                }
+                Vec::new()
+            }
             Top::Confirm(r) => self.key_confirm(&r, input),
             Top::Incoming(c) => self.key_incoming(&c, input),
             Top::InCall => self.key_in_call(input, now),
@@ -341,24 +557,94 @@ impl Model {
         }
     }
 
-    /// Releases matter for two things: a long press of 0 typing `+`, and a long
-    /// press of Edit clearing the number.
+    /// Releases are where long presses are told from short ones: 0 or +, a digit or
+    /// its speed dial, swap or merge, a pressed or a held Decline, and Edit or PTT
+    /// held on the keypad.
     fn release(&mut self, input: Input, now: Instant) -> Vec<Action> {
         let Some((pressed, at)) = self.held.take() else { return Vec::new() };
-        if pressed != input || !matches!(self.top(), Top::Browse) || self.browse != Browse::Keypad {
+        if pressed != input {
             return Vec::new();
         }
-        let long = now.duration_since(at) >= HOLD;
+        let long = now.duration_since(at) >= self.hold;
+        match self.top() {
+            Top::Incoming(c) if input == Input::Escape && self.steady_decline && self.replies.is_none() => {
+                if long {
+                    return vec![Action::Hangup(c.id)];
+                }
+                self.hint = Some("Hold Decline to decline");
+                return Vec::new();
+            }
+            Top::InCall if input == Input::Ok && !self.dtmf_open && self.other().is_some() => {
+                return vec![if long { Action::Merge } else { Action::Swap }];
+            }
+            Top::Browse => {}
+            _ => return Vec::new(),
+        }
+        match (&self.browse, input) {
+            (Browse::Contacts, Input::Ok) => {
+                let Some(c) = self.book.contacts.get(self.contacts_sel) else { return Vec::new() };
+                if long {
+                    self.browse = Browse::SpeedPick(0);
+                    return vec![Action::Buzz(Buzz::Tick)];
+                }
+                return c.numbers.first().map(|p| vec![Action::Dial(p.number.clone())]).unwrap_or_default();
+            }
+            (Browse::Keypad, _) => {}
+            _ => return Vec::new(),
+        }
         match input {
-            Input::Ok if KEYS[self.sel.0][self.sel.1].0 == '0' => {
-                self.number.push(if long { '+' } else { '0' });
-                vec![Action::Buzz(Buzz::Tick)]
+            Input::Ok => {
+                let d = KEYS[self.sel.0][self.sel.1].0;
+                self.release_digit(d, long)
             }
             Input::Edit if long => {
                 self.number.clear();
                 Vec::new()
             }
+            // Hold PTT on the keypad: Ring, then Vibrate, then Silent.
+            Input::Ptt if long => {
+                let next = match self.ringer.as_str() {
+                    "ring" => "vibrate",
+                    "vibrate" => "silent",
+                    _ => "ring",
+                };
+                self.ringer = next.into();
+                let shown = match next {
+                    "ring" => "Ringer on",
+                    "vibrate" => "Vibrate only",
+                    _ => "Silent",
+                };
+                self.notice = Some(vec![shown.into()]);
+                vec![Action::SetRinger(next.into()), Action::Buzz(Buzz::Thump)]
+            }
             _ => Vec::new(),
+        }
+    }
+
+    /// A digit that waited for its release: 0 (held: +), and 1 to 9 on an empty
+    /// keypad (held: voicemail and speed dial).
+    fn release_digit(&mut self, d: char, long: bool) -> Vec<Action> {
+        if d == '0' {
+            self.number.push(if long { '+' } else { '0' });
+            return vec![Action::Buzz(Buzz::Tick)];
+        }
+        if !d.is_ascii_digit() || !self.number.is_empty() || self.locked() || self.ussd_replying {
+            return Vec::new();
+        }
+        if !long {
+            self.number.push(d);
+            return vec![Action::Buzz(Buzz::Tick)];
+        }
+        match self.held_number(d) {
+            Some(n) => vec![Action::Buzz(Buzz::Thump), Action::Dial(n)],
+            None if d == '1' => {
+                self.notice = Some(wrap_lines("No voicemail number. Set one in Phone Settings."));
+                Vec::new()
+            }
+            None => {
+                self.notice = Some(wrap_lines(&format!("Nothing on {d} yet. Hold Ok on a contact to put it there.")));
+                Vec::new()
+            }
         }
     }
 
@@ -394,6 +680,8 @@ impl Model {
         }
         match input {
             Input::Run => vec![Action::Answer(c.id)],
+            // With steady decline, the release decides (a hold declines).
+            Input::Escape if self.steady_decline => Vec::new(),
             Input::Escape => vec![Action::Hangup(c.id)],
             Input::View => {
                 self.info = !self.info;
@@ -421,6 +709,12 @@ impl Model {
                     self.dtmf.push(d);
                     return vec![Action::Dtmf(cur.id, d.to_string()), Action::Buzz(Buzz::Tick)];
                 }
+                Input::Tap(r, c) => {
+                    self.dtmf_sel = (r, c);
+                    let d = KEYS[r][c].0;
+                    self.dtmf.push(d);
+                    return vec![Action::Dtmf(cur.id, d.to_string()), Action::Buzz(Buzz::Tick)];
+                }
                 Input::Char(c) if c.is_ascii_digit() || c == '*' || c == '#' => {
                     self.dtmf.push(c);
                     return vec![Action::Dtmf(cur.id, c.to_string())];
@@ -438,6 +732,7 @@ impl Model {
                 if locked {
                     Vec::new()
                 } else {
+                    self.ending.push(cur.id);
                     vec![Action::Hangup(cur.id)]
                 }
             }
@@ -447,8 +742,8 @@ impl Model {
             }
             Input::Edit => vec![Action::CycleRoute],
             Input::Ptt => vec![Action::Mute(!cur.muted)],
-            // Two calls: Ok swaps between them.
-            Input::Ok if self.other().is_some() => vec![Action::Swap],
+            // Two calls: Ok swaps between them, a held Ok merges them (on release).
+            Input::Ok if self.other().is_some() => Vec::new(),
             Input::Char(c) if c.is_ascii_digit() || c == '*' || c == '#' => {
                 vec![Action::Dtmf(cur.id, c.to_string())]
             }
@@ -461,6 +756,8 @@ impl Model {
             Browse::Keypad => self.key_keypad(input),
             Browse::Recents => self.key_recents(input),
             Browse::Contacts => self.key_contacts(input),
+            Browse::SpeedPick(i) => self.key_speed_pick(i, input),
+            Browse::Today(i) => self.key_today(i, input),
             Browse::Ussd { awaiting, .. } => match input {
                 Input::Escape => {
                     self.browse = Browse::Keypad;
@@ -491,10 +788,17 @@ impl Model {
             }
             Input::Ok => {
                 let d = KEYS[self.sel.0][self.sel.1].0;
-                // 0 is typed on release, so a long press can make it a +.
-                if d == '0' {
+                // Typed on release when a hold means something else: 0 (or +),
+                // and 1 to 9 on an empty keypad (voicemail, speed dial).
+                if self.waits_for_release(d) {
                     return Vec::new();
                 }
+                self.number.push(d);
+                vec![Action::Buzz(Buzz::Tick)]
+            }
+            Input::Tap(r, c) => {
+                self.sel = (r, c);
+                let d = KEYS[r][c].0;
                 self.number.push(d);
                 vec![Action::Buzz(Buzz::Tick)]
             }
@@ -505,6 +809,15 @@ impl Model {
             Input::Edit => {
                 self.number.pop();
                 Vec::new()
+            }
+            Input::Run if self.locked() && !matches!(self.classify_typed(), Class::Emergency) => {
+                // A locked SIM: what is typed is its PIN. Emergency numbers still
+                // dial, locked or not.
+                let pin = std::mem::take(&mut self.number);
+                if pin.is_empty() {
+                    return Vec::new();
+                }
+                vec![Action::Unlock(pin)]
             }
             Input::Run => {
                 if self.ussd_replying {
@@ -523,6 +836,11 @@ impl Model {
                     let code = std::mem::take(&mut self.number);
                     self.browse = Browse::Ussd { text: "Sending...".into(), awaiting: false };
                     return vec![Action::Ussd(code)];
+                }
+                if let Some(c) = self.t9_match().and_then(|c| c.numbers.first()) {
+                    let n = c.number.clone();
+                    self.number.clear();
+                    return vec![Action::Dial(n)];
                 }
                 let n = std::mem::take(&mut self.number);
                 vec![Action::Dial(n)]
@@ -573,7 +891,9 @@ impl Model {
             // Left and right jump a letter, for a long book on a five-row screen.
             Input::Right => self.contacts_sel = self.letter_jump(true),
             Input::Left => self.contacts_sel = self.letter_jump(false),
-            Input::Run | Input::Ok => {
+            // Ok calls on release; held, it gives the contact a speed-dial key.
+            Input::Ok => {}
+            Input::Run => {
                 if let Some(p) = self.book.contacts.get(self.contacts_sel).and_then(|c| c.numbers.first()) {
                     return vec![Action::Dial(p.number.clone())];
                 }
@@ -583,11 +903,74 @@ impl Model {
                     return vec![Action::Text(p.number.clone())];
                 }
             }
-            Input::View => self.browse = Browse::Keypad,
+            Input::View => self.browse = Browse::Today(0),
             Input::Escape => self.browse = Browse::Keypad,
             _ => {}
         }
         Vec::new()
+    }
+
+    fn key_today(&mut self, sel: usize, input: Input) -> Vec<Action> {
+        let items = self.today();
+        let n = items.len();
+        let number_of = |i: &TodayItem| match i {
+            TodayItem::Missed { peer, .. } | TodayItem::Unread { peer, .. } => peer.clone(),
+            TodayItem::Favourite { number, .. } => number.clone(),
+        };
+        match input {
+            Input::Up => self.browse = Browse::Today(sel.saturating_sub(1)),
+            Input::Down if n > 0 => self.browse = Browse::Today((sel + 1).min(n - 1)),
+            // A conversation opens in Messages; anything else is called back.
+            Input::Run | Input::Ok => match items.get(sel) {
+                Some(TodayItem::Unread { peer, .. }) => return vec![Action::Text(peer.clone())],
+                Some(i) => return vec![Action::Dial(number_of(i))],
+                None => {}
+            },
+            Input::Edit => {
+                if let Some(i) = items.get(sel) {
+                    return vec![Action::Text(number_of(i))];
+                }
+            }
+            Input::View | Input::Escape => self.browse = Browse::Keypad,
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn waits_for_release(&self, d: char) -> bool {
+        d == '0' || (d.is_ascii_digit() && self.number.is_empty() && !self.locked() && !self.ussd_replying)
+    }
+
+    fn key_speed_pick(&mut self, i: usize, input: Input) -> Vec<Action> {
+        match input {
+            Input::Up => self.browse = Browse::SpeedPick(i.saturating_sub(1)),
+            Input::Down => self.browse = Browse::SpeedPick((i + 1).min(7)),
+            Input::Run | Input::Ok => {
+                let Some(n) = self.book.contacts.get(self.contacts_sel).and_then(|c| c.numbers.first()) else {
+                    return Vec::new();
+                };
+                let n = n.number.clone();
+                self.speed[i] = n.clone();
+                self.browse = Browse::Contacts;
+                self.notice = Some(vec![format!("Hold {} to call", i + 2)]);
+                return vec![Action::SetSetting(format!("speed_{}", i + 2), n)];
+            }
+            Input::Edit if !self.speed[i].is_empty() => {
+                self.speed[i].clear();
+                return vec![Action::SetSetting(format!("speed_{}", i + 2), String::new())];
+            }
+            Input::Escape => self.browse = Browse::Contacts,
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    pub fn unlocked(&mut self, left: u32) {
+        self.notice = Some(if left == 0 {
+            vec!["SIM unlocked".into()]
+        } else {
+            vec!["Wrong PIN".into(), format!("{left} {} left", if left == 1 { "try" } else { "tries" })]
+        });
     }
 
     fn letter_jump(&self, forward: bool) -> usize {
@@ -621,6 +1004,38 @@ impl Model {
         } else {
             self.notice = Some(wrap_lines(text));
         }
+    }
+}
+
+/// Typed digits at or past this are a number, not a name: T9 stops matching.
+pub const T9_MAX: usize = 6;
+
+/// The touchpad as an absolute keypad. The pad reports raw positions and not their
+/// range, so the range is learnt from the strokes seen; until a fair part of the
+/// pad has been touched, taps are not mapped and swipes do the work.
+#[derive(Clone, Debug, Default)]
+pub struct PadMap {
+    min: Option<(i32, i32)>,
+    max: Option<(i32, i32)>,
+}
+
+impl PadMap {
+    pub fn observe(&mut self, x: i32, y: i32) {
+        let (a, b) = (self.min.unwrap_or((x, y)), self.max.unwrap_or((x, y)));
+        self.min = Some((a.0.min(x), a.1.min(y)));
+        self.max = Some((b.0.max(x), b.1.max(y)));
+    }
+
+    /// The keypad cell under a tap, once the range is known well enough.
+    pub fn cell(&self, x: i32, y: i32, span_needed: i32) -> Option<(usize, usize)> {
+        let (lo, hi) = (self.min?, self.max?);
+        let (w, h) = (hi.0 - lo.0, hi.1 - lo.1);
+        if w < span_needed || h < span_needed {
+            return None;
+        }
+        let c = (((x - lo.0) * 3) / (w + 1)).clamp(0, 2) as usize;
+        let r = (((y - lo.1) * 4) / (h + 1)).clamp(0, 3) as usize;
+        Some((r, c))
     }
 }
 

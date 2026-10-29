@@ -22,6 +22,7 @@ const MODEM_INTERFACES: &[&str] = &[
     "org.freedesktop.ModemManager1.Modem.Voice",
     "org.freedesktop.ModemManager1.Modem.Messaging",
     "org.freedesktop.ModemManager1.Modem.Modem3gpp.Ussd",
+    "org.freedesktop.ModemManager1.Modem.CellBroadcast",
 ];
 
 type Props = HashMap<String, OwnedVariant>;
@@ -37,8 +38,11 @@ impl ObjectManager {
         let mut ifaces = HashMap::new();
         for name in MODEM_INTERFACES {
             let iface = zbus::names::InterfaceName::try_from(*name).expect("interface name");
-            let all = props.get_all(iface).await?;
-            ifaces.insert(name.to_string(), all.into_iter().collect());
+            // An interface the modem does not have right now (Voice while the SIM is
+            // locked) is simply not listed, as ModemManager does.
+            if let Ok(all) = props.get_all(iface).await {
+                ifaces.insert(name.to_string(), all.into_iter().collect());
+            }
         }
         Ok(HashMap::from([(OwnedObjectPath::try_from(MODEM.to_string()).expect("path"), ifaces)]))
     }

@@ -7,7 +7,7 @@ use phone_core::model::{CallState, Outcome, Route};
 use phone_core::number::{self, Class};
 use phone_core::when;
 
-use crate::model::{Browse, Model, Top, CANNED, KEYS};
+use crate::model::{Browse, Model, TodayItem, Top, CANNED, KEYS};
 
 /// One string on the canvas. `font`: 0 title, 1 row, 2 bold row. `align`: 0
 /// centred on x, -1 starting at x, 1 ending at x.
@@ -108,6 +108,7 @@ fn fit(s: &str, budget: i32) -> String {
 
 pub fn view(m: &Model, now: i64, frame: u32) -> View {
     let mut v = match m.top() {
+        Top::Alert(a) => return alert(&a, now),
         Top::Confirm(_) | Top::Browse => browse(m, now),
         Top::Incoming(c) => incoming(m, &c, frame),
         Top::InCall => in_call(m, now),
@@ -119,6 +120,9 @@ pub fn view(m: &Model, now: i64, frame: u32) -> View {
             "call" => format!("call {}", fit(&target, 170)),
             "sms" => format!("text {}", fit(&target, 170)),
             "wipe" => "delete all calls and texts".into(),
+            "modem" => "set up the modem".into(),
+            "grant" => "text without asking".into(),
+            "contact" => fit(&r.target, 230),
             other => other.to_string(),
         };
         let why = match r.reason.as_str() {
@@ -127,9 +131,16 @@ pub fn view(m: &Model, now: i64, frame: u32) -> View {
             "international" => "International number",
             "emergency" => "EMERGENCY number",
             "wipe" => "This cannot be undone",
+            "modem" => "Saved in the modem; it restarts",
+            "grant" => "Revoke it in Phone Settings",
+            "contact" => "Contacts decide caller names",
             _ => "Asked by another program",
         };
-        let first = if r.kind == "wipe" { "Delete everything?".to_string() } else { format!("{who} wants to") };
+        let first = match r.kind.as_str() {
+            "wipe" => "Delete everything?".to_string(),
+            "contact" => format!("{who} wants to change contacts:"),
+            _ => format!("{who} wants to"),
+        };
         v.modal = Some(Modal { lines: vec![first, line2, why.into()], left: "Deny".into(), right: "Allow".into() });
     } else if let Some(n) = &m.notice {
         v.modal = Some(Modal { lines: n.clone(), left: String::new(), right: "Ok".into() });
@@ -171,21 +182,34 @@ fn browse(m: &Model, now: i64) -> View {
             if m.number.is_empty() {
                 let line = if !m.connected {
                     "Phone service not running".to_string()
+                } else if !m.status.present && m.status.sip == "registered" {
+                    "Calls over SIP (no modem)".to_string()
                 } else if !m.status.present {
                     "No modem".to_string()
-                } else if m.status.state == "locked" {
-                    "SIM locked: unlock it in 5G Modem".to_string()
+                } else if m.locked() {
+                    "SIM locked: type its PIN, then Unlock".to_string()
                 } else if m.status.state == "disabled" {
                     "Modem is off".to_string()
+                } else if m.status.emergency_only && m.status.sip == "registered" {
+                    "No mobile signal; calls over SIP".to_string()
                 } else if m.status.emergency_only {
                     "Emergency calls only".to_string()
                 } else if m.ussd_replying {
                     "Type your reply".to_string()
                 } else {
                     let op = if m.status.operator.is_empty() { "Searching" } else { &m.status.operator };
-                    format!("{op}{}", if m.status.roaming { " (roaming)" } else { "" })
+                    let tech = if m.status.tech == "2G" { " - 2G" } else { "" };
+                    format!("{op}{tech}{}", if m.status.roaming { " (roaming)" } else { "" })
+                };
+                // What is waiting goes beside the operator: "Fakecom AU - 1 missed".
+                let line = match waiting_strip(m.missed, m.unread) {
+                    Some(w) if m.connected && m.status.present && !m.locked() => format!("{line} - {w}"),
+                    _ => line,
                 };
                 texts.push(t(CX, 18, fit(&line, 240), 1, 0));
+            } else if m.locked() && m.classify_typed() != Class::Emergency {
+                // A PIN is not shown, only how many digits have been typed.
+                texts.push(t(CX, 16, "*".repeat(m.number.chars().count()), 2, 0));
             } else {
                 // The end of a long number is the part being typed, so it is the end
                 // that stays when it no longer fits.
@@ -199,20 +223,35 @@ fn browse(m: &Model, now: i64) -> View {
             }
             let note = if m.number.is_empty() {
                 String::new()
+            } else if m.locked() && m.classify_typed() != Class::Emergency {
+                "SIM PIN".into()
             } else if m.is_ussd() {
                 "Service code".into()
+            } else if let Some(h) = m.relay_hint() {
+                h.into()
             } else {
                 match m.classify_typed() {
                     Class::Emergency => "Emergency call".into(),
                     Class::Premium => "Premium number".into(),
-                    _ => m.typed_match().map(|c| c.name.clone()).unwrap_or_default(),
+                    _ => match (m.typed_match(), m.t9_match()) {
+                        (Some(c), _) => c.name.clone(),
+                        (None, Some(c)) => format!("Call {}?", c.name),
+                        _ if m.status.roaming => "Roaming: charges may apply".into(),
+                        _ => String::new(),
+                    },
                 }
             };
             if !note.is_empty() {
                 texts.push(t(CX, 28, fit(&note, 240), 1, 0));
             }
             keypad(&mut s, &mut texts, m.sel);
-            let run = if m.ussd_replying {
+            let run = if m.locked() && m.classify_typed() != Class::Emergency {
+                if m.number.is_empty() {
+                    ""
+                } else {
+                    "Unlock"
+                }
+            } else if m.ussd_replying {
                 "Reply"
             } else if m.is_ussd() {
                 "Send"
@@ -238,6 +277,7 @@ fn browse(m: &Model, now: i64) -> View {
                         (Outcome::Missed, _) => "missed",
                         (Outcome::Declined, _) => "declined",
                         (Outcome::Blocked, _) => "blocked",
+                        (Outcome::Silenced, _) => "silenced",
                         (Outcome::Cancelled | Outcome::Failed, _) => "no answer",
                         (Outcome::Answered, 0) => "in",
                         (Outcome::Answered, _) => "out",
@@ -276,7 +316,7 @@ fn browse(m: &Model, now: i64) -> View {
                 .iter()
                 .map(|c| Item {
                     label: fit(&c.name, 130),
-                    tag: String::new(),
+                    tag: speed_key(m, c).map(|k| format!("[{k}]")).unwrap_or_default(),
                     status: c.numbers.first().map(|p| number::display(&p.number, &m.region)).unwrap_or_default(),
                     dim: true,
                 })
@@ -302,6 +342,73 @@ fn browse(m: &Model, now: i64) -> View {
                     if empty { "" } else { "Text" },
                     if empty { "" } else { "Call" },
                 ]),
+                modal: None,
+            }
+        }
+        Browse::Today(sel) => {
+            let today = m.today();
+            let mut items: Vec<Item> = today
+                .iter()
+                .map(|i| match i {
+                    TodayItem::Missed { peer, count, at } => Item {
+                        label: fit(&m.name_for(peer), 120),
+                        tag: if *count > 1 { format!("{count} missed") } else { "missed".into() },
+                        status: when::short(*at, now),
+                        dim: false,
+                    },
+                    TodayItem::Unread { peer, count, at } => Item {
+                        label: fit(&m.name_for(peer), 120),
+                        tag: format!("{count} new"),
+                        status: when::short(*at, now),
+                        dim: false,
+                    },
+                    TodayItem::Favourite { key, number } => Item {
+                        label: fit(&m.name_for(number), 120),
+                        tag: format!("[{key}]"),
+                        status: String::new(),
+                        dim: true,
+                    },
+                })
+                .collect();
+            let empty = items.is_empty();
+            if empty {
+                items.push(Item {
+                    label: "Nothing waiting".into(),
+                    tag: String::new(),
+                    status: String::new(),
+                    dim: true,
+                });
+            }
+            let (selected, scroll) = window(*sel, items.len());
+            let run = match today.get(*sel) {
+                Some(TodayItem::Unread { .. }) => "Open",
+                Some(_) => "Call",
+                None => "",
+            };
+            View {
+                body: Body::Menu { items, selected, scroll, breadcrumb: "> Today".into() },
+                buttons: buttons(["Keypad", "Keypad", "", if empty { "" } else { "Text" }, run]),
+                modal: None,
+            }
+        }
+        Browse::SpeedPick(sel) => {
+            let who = m.book.contacts.get(m.contacts_sel).map(|c| c.name.clone()).unwrap_or_default();
+            let items: Vec<Item> = (0..8)
+                .map(|i| {
+                    let on = &m.speed[i];
+                    Item {
+                        label: format!("Hold {}", i + 2),
+                        tag: String::new(),
+                        status: if on.is_empty() { "free".into() } else { fit(&m.name_for(on), 110) },
+                        dim: on.is_empty(),
+                    }
+                })
+                .collect();
+            let (selected, scroll) = window(*sel, items.len());
+            let clear = if m.speed[*sel].is_empty() { "" } else { "Clear" };
+            View {
+                body: Body::Menu { items, selected, scroll, breadcrumb: format!("> Speed dial: {}", fit(&who, 120)) },
+                buttons: buttons(["Back", "", "", clear, "Set"]),
                 modal: None,
             }
         }
@@ -373,12 +480,12 @@ fn incoming(m: &Model, c: &phone_api::CallInfo, frame: u32) -> View {
             texts.push(t(CX, 108, "Answer holds it", 1, 0));
         }
     } else {
-        texts.push(t(CX, 100, "PTT to silence", 1, 0));
+        texts.push(t(CX, 100, m.hint.unwrap_or("PTT to silence"), 1, 0));
     }
     let reply = if c.number.is_empty() { "" } else { "Reply" };
     View {
         body: Body::Canvas { surface: s, texts },
-        buttons: buttons(["Decline", "Info", "", reply, "Answer"]),
+        buttons: buttons([if m.steady_decline { "Hold:Decl" } else { "Decline" }, "Info", "", reply, "Answer"]),
         modal: None,
     }
 }
@@ -401,6 +508,7 @@ fn in_call(m: &Model, now: i64) -> View {
         Route::Speaker => "Speaker",
         Route::Wired => "Headset",
         Route::Bluetooth => "BT",
+        Route::Earpiece => "Ear",
     };
     if m.dtmf_open {
         texts.push(t(CX, 16, if m.dtmf.is_empty() { "Keypad".to_string() } else { tail_fit(&m.dtmf, 236) }, 2, 0));
@@ -416,6 +524,7 @@ fn in_call(m: &Model, now: i64) -> View {
         format!("Emergency {}", timer(c, now))
     } else {
         match state {
+            CallState::Dialing if c.internet => "Calling over SIP...".to_string(),
             CallState::Dialing => "Calling...".to_string(),
             CallState::RingingOut => "Ringing...".to_string(),
             CallState::Held => "On hold".to_string(),
@@ -431,15 +540,50 @@ fn in_call(m: &Model, now: i64) -> View {
     }
     if let Some(o) = m.other() {
         s.round_frame(4, 70, 248, 17, 3, color::DIVIDER);
-        texts.push(t(CX, 73, fit(&format!("On hold: {} - Ok swaps", m.name_for(&o.number)), 236), 1, 0));
+        texts.push(t(CX, 73, fit(&format!("Held: {} - Ok swap, hold Ok merge", m.name_for(&o.number)), 240), 1, 0));
     }
     let audio = if c.muted { format!("{route_name} - muted") } else { route_name };
+    let audio = if c.internet { format!("SIP - {audio}") } else { audio };
     texts.push(t(CX, 96, fit(&audio, 240), 1, 0));
     texts.push(t(CX, 108, if c.muted { "PTT to unmute" } else { "PTT to mute" }, 1, 0));
     View {
         body: Body::Canvas { surface: s, texts },
         buttons: buttons(["", "Keypad", "", route_key, "End"]),
         modal: None,
+    }
+}
+
+/// An emergency alert, full screen: the level as the title, the whole text.
+fn alert(a: &phone_api::AlertInfo, now: i64) -> View {
+    let level = phone_core::model::AlertLevel::from_u8(a.level);
+    let mut rows = vec![
+        Row { kind: 5, label: level.label().to_uppercase(), value: when::short(a.at, now) },
+        Row { kind: 1, label: String::new(), value: String::new() },
+    ];
+    rows.extend(wrap(&a.text, 240).into_iter().map(|l| Row { kind: 3, label: l, value: String::new() }));
+    View {
+        body: Body::Detail { rows, breadcrumb: "> Emergency alert".into() },
+        buttons: buttons(["", "", "", "", "Dismiss"]),
+        modal: None,
+    }
+}
+
+/// Which speed-dial key a contact is on, if any.
+fn speed_key(m: &Model, c: &phone_core::contacts::Contact) -> Option<usize> {
+    m.speed
+        .iter()
+        .position(|s| !s.is_empty() && c.numbers.iter().any(|p| number::same_party(&p.number, s)))
+        .map(|i| i + 2)
+}
+
+/// "1 missed - 2 texts", or nothing when nothing is waiting.
+pub fn waiting_strip(missed: u32, unread: u32) -> Option<String> {
+    let plural = |n: u32, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    match (missed, unread) {
+        (0, 0) => None,
+        (m, 0) => Some(plural(m, "missed call", "missed calls")),
+        (0, u) => Some(plural(u, "new text", "new texts")),
+        (m, u) => Some(format!("{m} missed - {}", plural(u, "text", "texts"))),
     }
 }
 

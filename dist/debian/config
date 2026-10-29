@@ -1,0 +1,12 @@
+#!/bin/sh
+# Ask whether ModemManager may pass Dolphone's AT commands (templates). Yes is
+# the default on a Flipper One, where call audio depends on it.
+set -e
+. /usr/share/debconf/confmodule
+if ! db_fget dolphone/modem-access seen 2>/dev/null || [ "$RET" = false ]; then
+    if [ -r /proc/device-tree/model ] && tr -d '\0' < /proc/device-tree/model | grep -qi "flipper one"; then
+        db_set dolphone/modem-access true
+    fi
+fi
+db_input high dolphone/modem-access || true
+db_go || true

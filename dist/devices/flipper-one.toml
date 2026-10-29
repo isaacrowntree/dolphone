@@ -1,0 +1,29 @@
+# The Flipper One, the machine Dolphone is built for: Rockchip RK3576, a Nuvoton
+# NAU8822 codec for the speaker and the 3.5 mm jack, an RP2350 microcontroller
+# that watches the jack and the headset button, and an M.2 Key-B slot for a 5G
+# modem such as the Quectel RM520N-GL, whose call audio comes over USB (UAC) and
+# is bridged by phoned.
+id = "flipper-one"
+name = "Flipper One"
+status = "expected"
+source = "Flipper One docs (hardware, M.2 port, MCU firmware architecture); mixer controls from sound/soc/codecs/nau8822.c (Speaker Playback Switch, Headphone Playback Switch); LED names from flipctl-slint's Network LEDs test app"
+notes = "Flipper has not published the board's device tree yet, so the strings below are assumed; if detection misses, choose it with phonectl device use flipper-one. The jack is reported by the RP2350, so how it reaches Linux is part of docs/HARDWARE.md."
+front_ends = ["flipctl", "desktop"]
+# The four RGB LEDs along the top (Flipper's Network LEDs test app). They show the
+# network interfaces' carrier; they flash while a call rings and then go back.
+# The RM520N-GL forgets where call audio goes when it restarts: AT+QPCMV=1,2
+# sends it to the USB sound card (Quectel LTE Standard UAC Application Note §3;
+# reported working on the RM520N on Quectel's forum). phoned sends it each time the
+# modem appears; ModemManager must be in debug mode to pass it (docs/HARDWARE.md).
+modem_at = ["AT+QPCMV=1,2"]
+ring_leds = ["flipper-one:rgb:eth0", "flipper-one:rgb:eth1", "flipper-one:rgb:wifi", "flipper-one:rgb:link"]
+
+[match]
+dt_compatible = ["flipperdevices,flipper-one"]
+dt_model = ["Flipper One"]
+priority = 100
+
+[audio]
+speaker_commands = [["amixer", "-q", "sset", "Speaker", "unmute"], ["amixer", "-q", "sset", "Headphone", "mute"]]
+wired_commands = [["amixer", "-q", "sset", "Speaker", "mute"], ["amixer", "-q", "sset", "Headphone", "unmute"]]
+modem_match = ["Quectel", "RM520", "RM500"]

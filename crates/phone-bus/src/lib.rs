@@ -54,6 +54,37 @@ pub enum Event {
         placed: Placed,
     },
     Ussd(String),
+    /// An emergency alert arrived.
+    Alert(AlertInfo),
+    Alerts(Vec<AlertInfo>),
+    Grants(Vec<Grant>),
+    Audit(Vec<AuditEntry>),
+    /// The address book changed (a contact added, edited, removed or imported).
+    ContactsChanged,
+    /// A contacts import finished: added, merged, already here, and an error if
+    /// it failed.
+    ContactsImported {
+        added: u32,
+        merged: u32,
+        unchanged: u32,
+        error: String,
+    },
+    /// The SIM PIN was tried: 0 when it unlocked, otherwise the tries left.
+    Unlock(u32),
+    /// Laptops linked over KDE Connect: (id, name, paired).
+    Laptops(Vec<(String, String, bool)>),
+    /// Texts found by a search, newest first.
+    Found(String, Vec<MessageInfo>),
+    /// The device profile phoned is using.
+    Device(DeviceInfo),
+    /// The modem's one-time setup: (step, state, in words). `applied` when it was
+    /// just made rather than checked.
+    ModemSetup {
+        steps: Vec<(String, String, String)>,
+        applied: bool,
+    },
+    /// Something a job finished, to tell the owner in passing.
+    Notice(String),
     /// A call the UI made failed; the text is phoned's message.
     Error(String),
 }
@@ -68,6 +99,7 @@ pub struct Clients {
     pub bluetooth: BluetoothProxy<'static>,
     pub modem: ModemProxy<'static>,
     pub settings: SettingsProxy<'static>,
+    pub contacts: ContactsProxy<'static>,
 }
 
 type Job = Box<dyn FnOnce(Clients) -> Pin<Box<dyn Future<Output = Vec<Event>> + Send>> + Send>;
@@ -94,6 +126,17 @@ impl Bus {
 
     /// Run `f` against phoned and deliver what it returns. Errors become
     /// [`Event::Error`].
+    /// Run blocking work (a child process waiting on a password prompt) off the
+    /// bus's own thread, from inside a job.
+    pub async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+        tokio::task::spawn_blocking(f).await.ok()
+    }
+
+    /// Wait, inside a job.
+    pub async fn pause(d: std::time::Duration) {
+        tokio::time::sleep(d).await
+    }
+
     pub fn run<F, Fut>(&self, f: F)
     where
         F: FnOnce(Clients) -> Fut + Send + 'static,
@@ -207,6 +250,7 @@ async fn clients(conn: &zbus::Connection) -> zbus::Result<Clients> {
         bluetooth: proxy!(BluetoothProxy),
         modem: proxy!(ModemProxy),
         settings: proxy!(SettingsProxy),
+        contacts: proxy!(ContactsProxy),
     })
 }
 
@@ -246,6 +290,14 @@ async fn listen(conn: zbus::Connection, c: Clients, deliver: std::sync::Arc<dyn 
     let mut missed = c.calls.receive_missed_changed().await;
     let mut unread = c.messages.receive_unread_changed().await;
     let mut route = c.audio.receive_route_changed().await;
+    let (Ok(mut alerts), Ok(mut book), Ok(mut imported)) = (
+        c.messages.receive_alert_received().await,
+        c.contacts.receive_changed().await,
+        c.contacts.receive_imported().await,
+    ) else {
+        deliver(Event::Error("could not subscribe to phoned".into()));
+        return;
+    };
 
     let up = dbus.name_has_owner(zbus::names::BusName::try_from(SERVICE).expect("name")).await.unwrap_or(false);
     deliver(Event::Connected(up));
@@ -269,6 +321,12 @@ async fn listen(conn: zbus::Connection, c: Clients, deliver: std::sync::Arc<dyn 
             Some(p) = missed.next() => match p.get().await { Ok(n) => Event::Missed(n), Err(_) => continue },
             Some(p) = unread.next() => match p.get().await { Ok(n) => Event::Unread(n), Err(_) => continue },
             Some(p) = route.next() => match p.get().await { Ok(n) => Event::Route(n), Err(_) => continue },
+            Some(s) = alerts.next() => match s.args() { Ok(a) => Event::Alert(a.alert), Err(_) => continue },
+            Some(_) = book.next() => Event::ContactsChanged,
+            Some(s) = imported.next() => match s.args() {
+                Ok(a) => Event::ContactsImported { added: a.added, merged: a.merged, unchanged: a.unchanged, error: a.error.to_string() },
+                Err(_) => continue,
+            },
             else => break,
         };
         deliver(e);

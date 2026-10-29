@@ -38,7 +38,7 @@ fi
 echo "== packages =="
 sudo env DEBIAN_FRONTEND=noninteractive apt-get update -qq
 sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    build-essential git curl pkg-config file desktop-file-utils squashfs-tools \
+    build-essential git curl pkg-config libssl-dev file desktop-file-utils squashfs-tools \
     sway fuse3 dbus-user-session modemmanager \
     pipewire pipewire-pulse wireplumber pipewire-bin \
     bluez baresip python3 >/dev/null

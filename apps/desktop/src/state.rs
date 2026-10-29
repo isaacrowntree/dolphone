@@ -2,14 +2,49 @@
 
 use std::time::{Duration, Instant};
 
-use phone_api::{BtDevice, CallInfo, CallRecordInfo, MessageInfo, ModemStatus, Request, RouteInfo, ThreadInfo};
+use phone_api::{
+    keys, AlertInfo, AuditEntry, BtDevice, CallInfo, CallRecordInfo, Grant, MessageInfo, ModemStatus, Request,
+    RouteInfo, ThreadInfo,
+};
 use phone_bus::{Bus, Event};
 use phone_core::contacts::Book;
 use phone_core::model::{CallState, MessageState, Outcome, Route};
 use phone_core::{number, text, when};
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
-use crate::{with_app, AppWindow, Bubble, Choice, Row};
+use crate::{with_app, AppWindow, Bubble, Choice, Row, Toggle};
+
+/// The ON/OFF settings the desktop shows, by group: (key, default, label).
+type Flag = ((&'static str, &'static str), &'static str);
+const CALL_FLAGS: [Flag; 8] = [
+    (keys::VIBRATE, "Vibrate when ringing"),
+    (keys::CALL_WAITING, "Call waiting"),
+    (keys::SILENCE_UNKNOWN, "Silence callers who are not in contacts"),
+    (keys::SPEAK_CALLER, "Say who is calling (needs espeak-ng)"),
+    (keys::STEADY_DECLINE, "On the panel, hold Decline to decline"),
+    (keys::LOCAL_RINGBACK, "Play the ringing tone on this phone"),
+    (keys::DISABLE_2G, "Keep the modem off 2G (weak encryption; less coverage)"),
+    (keys::WARN_2G, "Warn when the modem falls back to 2G"),
+];
+const TEXT_FLAGS: [Flag; 4] = [
+    (keys::DELIVERY_REPORTS, "Ask for delivery reports"),
+    (keys::TEXT_TONE, "Play a tone when a text arrives"),
+    (keys::PRIVATE_NOTIFY, "Hide message text in notifications"),
+    (keys::DELETE_FROM_SIM, "Clear texts from the SIM once saved"),
+];
+const ALERT_FLAGS: [Flag; 4] = [
+    (keys::ALERTS_EXTREME, "Extreme alerts"),
+    (keys::ALERTS_SEVERE, "Severe alerts"),
+    (keys::ALERTS_AMBER, "Amber alerts (missing children)"),
+    (keys::ALERTS_TEST, "Test alerts"),
+];
+
+/// The panel's hold times, in milliseconds, as the desktop's menu lists them.
+const HOLDS: [&str; 5] = ["400", "600", "800", "1000", "1500"];
+
+fn all_flags() -> impl Iterator<Item = &'static Flag> {
+    CALL_FLAGS.iter().chain(TEXT_FLAGS.iter()).chain(ALERT_FLAGS.iter())
+}
 
 pub struct App {
     pub ui: AppWindow,
@@ -28,7 +63,22 @@ pub struct App {
     pub routes: Vec<RouteInfo>,
     pub route: u8,
     pub ringer: String,
-    pub flags: [(&'static str, bool); 3],
+    pub flags: Vec<(&'static str, bool)>,
+    pub voicemail: String,
+    pub sip_password_set: bool,
+    pub hold_ms: String,
+    pub sip_always: bool,
+    pub grants: Vec<Grant>,
+    pub audit: Vec<AuditEntry>,
+    pub alerts: Vec<AlertInfo>,
+    /// What the last search found.
+    pub found: Vec<MessageInfo>,
+    /// Laptops over KDE Connect: (id, name, paired).
+    pub laptops: Vec<(String, String, bool)>,
+    /// The tray icon and launcher badge, when running for real.
+    pub tray: Option<crate::tray::Tray>,
+    /// The alert on screen, until dismissed.
+    pub alert: Option<AlertInfo>,
     pub bt: (bool, bool),
     pub devices: Vec<BtDevice>,
     pub blocked: Vec<String>,
@@ -66,7 +116,18 @@ impl App {
             routes: Vec::new(),
             route: 0,
             ringer: "ring".into(),
-            flags: [("vibrate", true), ("private_notify", false), ("delete_from_sim", true)],
+            flags: all_flags().map(|((k, d), _)| (*k, *d == "true")).collect(),
+            voicemail: String::new(),
+            sip_password_set: false,
+            hold_ms: "600".into(),
+            sip_always: false,
+            grants: Vec::new(),
+            audit: Vec::new(),
+            alerts: Vec::new(),
+            found: Vec::new(),
+            tray: None,
+            laptops: Vec::new(),
+            alert: None,
             bt: (false, false),
             devices: Vec::new(),
             blocked: Vec::new(),
@@ -104,9 +165,34 @@ impl App {
         b.refresh_routes();
         b.run(|c| async move {
             let mut out = vec![Event::Ringer(c.audio.ringer().await?), Event::Blocked(c.settings.blocked().await?)];
-            for k in ["vibrate", "private_notify", "delete_from_sim", "region"] {
+            let extra = [
+                "region",
+                "voicemail",
+                "sip_enabled",
+                "sip_account",
+                "sip_proxy",
+                "sip_password",
+                "sip_use",
+                "long_press_ms",
+                "uplink_alert_to",
+                "uplink_interface",
+            ];
+            for k in all_flags().map(|f| f.0 .0).chain(extra) {
                 out.push(Event::Setting(k.into(), c.settings.get(k).await?));
             }
+            out.push(Event::Alerts(c.messages.alerts(20).await?));
+            // Grants and the audit log are for Dolphone's own apps; a desktop
+            // installed somewhere phoned does not trust just goes without them.
+            if let Ok(g) = c.settings.grants().await {
+                out.push(Event::Grants(g));
+            }
+            if let Ok(a) = c.settings.audit(100).await {
+                out.push(Event::Audit(a));
+            }
+            if let Ok(l) = c.settings.kdeconnect_devices().await {
+                out.push(Event::Laptops(l));
+            }
+            out.push(Event::Setting("kdeconnect".into(), c.settings.get("kdeconnect").await?));
             let available = c.bluetooth.available().await.unwrap_or(false);
             out.push(Event::Bluetooth {
                 available,
@@ -119,6 +205,21 @@ impl App {
         });
         if !self.peer.is_empty() {
             b.load_conversation(self.peer.clone());
+        }
+    }
+
+    /// Put text on the clipboard: wl-copy on Wayland, xclip on X. A one-time code
+    /// is cleared again after a minute, so it does not sit there to be pasted
+    /// somewhere by mistake.
+    pub fn copy(&mut self, text: &str, secret: bool) {
+        match copy_to_clipboard(text) {
+            Ok(()) if secret => {
+                let t = text.to_string();
+                slint::Timer::single_shot(Duration::from_secs(60), move || clear_clipboard_if(&t));
+                self.say("Code copied; the clipboard clears in a minute");
+            }
+            Ok(()) => self.say("Copied"),
+            Err(e) => self.say(format!("Could not copy: {e}")),
         }
     }
 
@@ -287,9 +388,53 @@ impl App {
             Event::Setting(k, v) => {
                 if k == "region" {
                     self.region = v;
+                } else if k == "voicemail" {
+                    self.voicemail = v.clone();
+                    self.ui.set_voicemail(v.into());
+                } else if k == "sip_enabled" {
+                    self.ui.set_sip_enabled(v == "true");
+                } else if k == "sip_account" {
+                    self.ui.set_sip_account(v.into());
+                } else if k == "sip_proxy" {
+                    self.ui.set_sip_proxy(v.into());
+                } else if k == "sip_password" {
+                    self.sip_password_set = v == "set";
+                } else if k == "kdeconnect" {
+                    self.ui.set_kdeconnect(v == "true");
+                } else if k == "uplink_alert_to" {
+                    self.ui.set_uplink_to(v.into());
+                } else if k == "uplink_interface" {
+                    self.ui.set_uplink_iface(v.into());
+                } else if k == "long_press_ms" {
+                    self.hold_ms = v;
+                } else if k == "sip_use" {
+                    self.sip_always = v == "always";
                 } else if let Some(f) = self.flags.iter_mut().find(|(n, _)| *n == k) {
                     f.1 = v == "true";
                 }
+            }
+            Event::Alerts(a) => self.alerts = a,
+            Event::Laptops(l) => self.laptops = l,
+            Event::Found(q, found) if q == self.ui.get_search_text().trim() => self.found = found,
+            Event::ContactsChanged => {
+                self.book = Book::load(&phone_core::store::contacts_dir(), &self.region);
+            }
+            Event::ContactsImported { added, merged, unchanged, error } => {
+                self.book = Book::load(&phone_core::store::contacts_dir(), &self.region);
+                if error.is_empty() {
+                    self.say(format!("Contacts copied: {added} new, {merged} updated, {unchanged} already here"));
+                } else {
+                    self.say(format!("Contacts not copied: {error}"));
+                }
+            }
+            Event::Grants(g) => self.grants = g,
+            Event::Audit(a) => self.audit = a,
+            Event::Alert(a) => {
+                if a.level != phone_core::model::AlertLevel::Info as u8 {
+                    self.alert = Some(a.clone());
+                    self.ui.window().show().ok();
+                }
+                self.alerts.insert(0, a);
             }
             Event::Bluetooth { available, powered } => self.bt = (available, powered),
             Event::Devices(d) => self.devices = d,
@@ -299,7 +444,7 @@ impl App {
                 "{} is waiting for you to allow it",
                 if kind == "call" { "The call" } else { "The text" }
             )),
-            Event::Ussd(t) => self.say(t),
+            Event::Ussd(t) | Event::Notice(t) => self.say(t),
             Event::Error(t) => self.say(t),
             _ => {}
         }
@@ -335,6 +480,9 @@ impl App {
         }
         ui.set_unread(self.unread as i32);
         ui.set_missed(self.missed as i32);
+        if let Some(t) = &self.tray {
+            t.set(crate::tray::Counts { missed: self.missed, unread: self.unread });
+        }
 
         let recents: Vec<Row> = self
             .recents
@@ -345,6 +493,7 @@ impl App {
                     (Outcome::Missed, _) => "Missed".to_string(),
                     (Outcome::Declined, _) => "Declined".into(),
                     (Outcome::Blocked, _) => "Blocked".into(),
+                    (Outcome::Silenced, _) => "Unknown caller, silenced".into(),
                     (Outcome::Cancelled | Outcome::Failed, _) => "No answer".into(),
                     (Outcome::Answered, 0) => format!("Incoming, {}", when::duration(r.duration)),
                     (Outcome::Answered, _) => format!("Outgoing, {}", when::duration(r.duration)),
@@ -381,12 +530,29 @@ impl App {
             })
             .collect();
         ui.set_threads(ModelRc::new(VecModel::from(threads)));
+        let found: Vec<Row> = self
+            .found
+            .iter()
+            .map(|m| Row {
+                title: self.name_for(&m.peer).into(),
+                subtitle: format!(
+                    "{}{}",
+                    if m.direction == 1 { "You: " } else { "" },
+                    m.body.lines().next().unwrap_or("")
+                )
+                .into(),
+                aside: when::short(m.at, now).into(),
+                mark: 0,
+                key: m.peer.as_str().into(),
+            })
+            .collect();
+        ui.set_found(ModelRc::new(VecModel::from(found)));
 
         if self.peer.is_empty() {
             ui.set_thread_title("".into());
         } else {
             ui.set_thread_title(self.name_for(&self.peer).into());
-            ui.set_thread_number(number::display(&self.peer, &self.region).into());
+            ui.set_thread_number(number::display_peer(&self.peer, &self.region).into());
         }
         let bubbles: Vec<Bubble> = self
             .messages
@@ -398,7 +564,31 @@ impl App {
                 state: match MessageState::from_u8(m.state) {
                     MessageState::Sending => "Sending".into(),
                     MessageState::Failed => "Not sent".into(),
+                    MessageState::Delivered => "Delivered".into(),
                     _ => SharedString::new(),
+                },
+                code: if m.direction == 0 {
+                    text::one_time_code(&m.body).unwrap_or_default().into()
+                } else {
+                    "".into()
+                },
+                // The first picture is shown; anything else is named.
+                picture: m
+                    .parts
+                    .iter()
+                    .find(|(mime, _)| mime.starts_with("image/"))
+                    .and_then(|(_, path)| slint::Image::load_from_path(std::path::Path::new(path)).ok())
+                    .unwrap_or_default(),
+                parts: {
+                    let first_pic = m.parts.iter().position(|(mime, _)| mime.starts_with("image/"));
+                    m.parts
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| Some(*i) != first_pic)
+                        .map(|(_, (mime, _))| format!("[{}]", phone_core::model::kind_of(mime)))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .into()
                 },
             })
             .collect();
@@ -441,9 +631,28 @@ impl App {
             })
             .collect();
         ui.set_contacts(ModelRc::new(VecModel::from(contacts)));
+        let phones: Vec<Row> = self
+            .devices
+            .iter()
+            .filter(|d| d.paired && !d.headset && !d.speaker)
+            .map(|d| Row {
+                title: d.name.as_str().into(),
+                subtitle: SharedString::new(),
+                aside: SharedString::new(),
+                mark: 0,
+                key: d.address.as_str().into(),
+            })
+            .collect();
+        ui.set_phones(ModelRc::new(VecModel::from(phones)));
 
         // Settings.
-        let mut choices: Vec<Choice> = [Route::Speaker, Route::Wired, Route::Bluetooth]
+        // The routes phoned offers, in its order (an earpiece only on phones).
+        let offered: Vec<Route> = if self.routes.is_empty() {
+            vec![Route::Speaker, Route::Wired, Route::Bluetooth]
+        } else {
+            self.routes.iter().map(|r| Route::from_u8(r.route)).collect()
+        };
+        let choices: Vec<Choice> = offered
             .iter()
             .map(|r| {
                 let info = self.routes.iter().find(|x| x.route == *r as u8);
@@ -455,17 +664,100 @@ impl App {
                 Choice { label: label.into(), value: (*r as u8).to_string().into() }
             })
             .collect();
-        choices.truncate(3);
+        let names: Vec<SharedString> = choices.iter().map(|c| c.label.clone()).collect();
+        ui.set_route_names(ModelRc::new(VecModel::from(names)));
+        ui.set_route_index(offered.iter().position(|r| *r as u8 == self.route).unwrap_or(0) as i32);
         ui.set_routes(ModelRc::new(VecModel::from(choices)));
-        ui.set_route_index(i32::from(self.route.min(2)));
         ui.set_ringer_index(match self.ringer.as_str() {
             "vibrate" => 1,
             "silent" => 2,
             _ => 0,
         });
-        ui.set_vibrate(self.flags[0].1);
-        ui.set_private_notify(self.flags[1].1);
-        ui.set_delete_from_sim(self.flags[2].1);
+        let toggles = |group: &[Flag]| {
+            let t: Vec<Toggle> = group
+                .iter()
+                .map(|((k, d), label)| Toggle {
+                    key: (*k).into(),
+                    label: (*label).into(),
+                    on: self.flags.iter().find(|(n, _)| n == k).map(|f| f.1).unwrap_or(*d == "true"),
+                })
+                .collect();
+            ModelRc::new(VecModel::from(t))
+        };
+        ui.set_call_toggles(toggles(&CALL_FLAGS));
+        ui.set_text_toggles(toggles(&TEXT_FLAGS));
+        ui.set_alert_toggles(toggles(&ALERT_FLAGS));
+        let grants: Vec<Row> = self
+            .grants
+            .iter()
+            .map(|g| Row {
+                title: g.program.as_str().into(),
+                subtitle: format!(
+                    "{} - {} an hour, {}",
+                    g.numbers.split(',').map(|n| number::display(n, &self.region)).collect::<Vec<_>>().join(", "),
+                    g.per_hour,
+                    if g.until == 0 { "no end".to_string() } else { format!("until {}", when::short(g.until, now)) }
+                )
+                .into(),
+                aside: SharedString::new(),
+                mark: 0,
+                key: g.id.to_string().into(),
+            })
+            .collect();
+        ui.set_grants(ModelRc::new(VecModel::from(grants)));
+        let laptops: Vec<Row> = self
+            .laptops
+            .iter()
+            .map(|(id, name, paired)| Row {
+                title: name.as_str().into(),
+                subtitle: if *paired {
+                    "Paired".into()
+                } else {
+                    "Not paired: pair from the laptop, then allow it here".into()
+                },
+                aside: if *paired { "Unpair".into() } else { SharedString::new() },
+                mark: 0,
+                key: id.as_str().into(),
+            })
+            .collect();
+        ui.set_laptops(ModelRc::new(VecModel::from(laptops)));
+        let audit: Vec<Row> = self
+            .audit
+            .iter()
+            .map(|e| Row {
+                title: format!("{} {} {}", e.program, e.action, e.target).trim_end().to_string().into(),
+                subtitle: e.result.as_str().into(),
+                aside: when::short(e.at, now).into(),
+                mark: if matches!(e.result.as_str(), "denied" | "refused" | "over its grant's limit") { 2 } else { 0 },
+                key: SharedString::new(),
+            })
+            .collect();
+        ui.set_audit(ModelRc::new(VecModel::from(audit)));
+        let alerts: Vec<Row> = self
+            .alerts
+            .iter()
+            .map(|a| Row {
+                title: phone_core::model::AlertLevel::from_u8(a.level).label().into(),
+                subtitle: a.text.as_str().into(),
+                aside: when::short(a.at, now).into(),
+                mark: 2,
+                key: a.id.to_string().into(),
+            })
+            .collect();
+        ui.set_alerts(ModelRc::new(VecModel::from(alerts)));
+        ui.set_sip_password_set(self.sip_password_set);
+        ui.set_hold_index(HOLDS.iter().position(|h| *h == self.hold_ms).unwrap_or(1) as i32);
+        ui.set_sip_always(self.sip_always);
+        ui.set_sip_status(self.status.as_ref().map(|s| s.sip.as_str()).unwrap_or("").into());
+        match &self.alert {
+            Some(a) => {
+                ui.set_alert_visible(true);
+                ui.set_alert_title(phone_core::model::AlertLevel::from_u8(a.level).label().to_uppercase().into());
+                ui.set_alert_text(a.text.as_str().into());
+                ui.set_alert_time(when::short(a.at, now).into());
+            }
+            None => ui.set_alert_visible(false),
+        }
         ui.set_bt_available(self.bt.0);
         ui.set_bt_powered(self.bt.1);
         let devices: Vec<Row> = self
@@ -578,17 +870,24 @@ impl App {
                         "call" => format!("{} wants to call {target}", r.requester),
                         "sms" => format!("{} wants to text {target}", r.requester),
                         "wipe" => "Delete all texts, calls and blocked numbers?".into(),
+                        "modem" => format!("{} wants to set up the modem (USB audio, VoLTE)", r.requester),
+                        "grant" => format!("{} wants to text {target} without asking each time", r.requester),
+                        "contact" => format!("{} wants to {} in your contacts", r.requester, r.target),
                         _ => format!("{} wants to use the phone", r.requester),
                     }
                     .into(),
                 );
-                ui.set_confirm_body(r.body.as_str().into());
+                // Only a text's body is for reading; others carry the change itself.
+                ui.set_confirm_body(if r.kind == "sms" { r.body.as_str().into() } else { SharedString::new() });
                 ui.set_confirm_reason(
                     match r.reason.as_str() {
                         "premium" => "Premium number: charges apply",
                         "short" => "Short code: may cost money",
                         "emergency" => "This is an emergency number",
                         "wipe" => "This cannot be undone",
+                        "modem" => "Saved in the modem, which restarts",
+                        "grant" => "You can revoke it in Settings",
+                        "contact" => "A contact decides who a caller shows as",
                         _ => "Asked by another program",
                     }
                     .into(),
@@ -598,6 +897,62 @@ impl App {
         }
         ui.set_toast(self.toast.as_ref().map(|(t, _)| t.as_str()).unwrap_or("").into());
     }
+}
+
+fn clipboard_tool() -> (&'static str, &'static [&'static str], &'static [&'static str]) {
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        ("wl-copy", &[], &["--clear"])
+    } else {
+        ("xclip", &["-selection", "clipboard"], &[])
+    }
+}
+
+fn copy_to_clipboard(text: &str) -> Result<(), String> {
+    use std::io::Write;
+    let (tool, args, _) = clipboard_tool();
+    let mut child = std::process::Command::new(tool)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|_| format!("{tool} is not installed"))?;
+    child.stdin.take().ok_or("no stdin")?.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    child.wait().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Clear the clipboard, but only if it still holds what we put there.
+fn clear_clipboard_if(expected: &str) {
+    let (tool, _, clear) = clipboard_tool();
+    let current = if tool == "wl-copy" {
+        std::process::Command::new("wl-paste").arg("--no-newline").output()
+    } else {
+        std::process::Command::new("xclip").args(["-selection", "clipboard", "-o"]).output()
+    };
+    if current.ok().is_some_and(|o| o.stdout == expected.as_bytes()) {
+        if tool == "wl-copy" {
+            let _ = std::process::Command::new(tool).args(clear).status();
+        } else {
+            let _ = copy_to_clipboard("");
+        }
+    }
+}
+
+/// Where an export goes: the Documents folder (XDG's, or ~/Documents), dated.
+fn export_path() -> std::path::PathBuf {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let docs = std::process::Command::new("xdg-user-dir")
+        .arg("DOCUMENTS")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|d| !d.is_empty() && std::path::Path::new(d).is_dir())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| home.join("Documents"));
+    let _ = std::fs::create_dir_all(&docs);
+    let t = when::local(phone_core::now());
+    docs.join(format!("dolphone-texts-{}-{:02}-{:02}.xml", t.year, t.month + 1, t.day))
 }
 
 /// Percent-decoding for tel: and sms: links. `+` is a space only in a query value;
@@ -672,6 +1027,44 @@ pub fn wire(ui: &AppWindow) {
             if let Some(p) = a.threads.get(i as usize).map(|t| t.peer.clone()) {
                 a.open_peer(&p);
                 a.render();
+            }
+        })
+    });
+    ui.on_search(|q| {
+        with_app(|a| {
+            let q = q.trim().to_string();
+            if q.is_empty() {
+                a.found.clear();
+                a.render();
+                return;
+            }
+            if let Some(b) = a.bus() {
+                b.run(move |c| async move { Ok(vec![Event::Found(q.clone(), c.messages.search(&q, 100).await?)]) });
+            }
+        })
+    });
+    ui.on_open_found(|i| {
+        with_app(|a| {
+            if let Some(p) = a.found.get(i as usize).map(|m| m.peer.clone()) {
+                a.ui.set_search_text("".into());
+                a.found.clear();
+                a.open_peer(&p);
+                a.render();
+            }
+        })
+    });
+    ui.on_export_texts(|| {
+        with_app(|a| {
+            if let Some(b) = a.bus() {
+                b.run(|c| async move {
+                    let xml = c.messages.export().await?;
+                    let path = export_path();
+                    let msg = match std::fs::write(&path, xml) {
+                        Ok(()) => format!("Texts saved to {}", path.display()),
+                        Err(e) => format!("Could not save the texts: {e}"),
+                    };
+                    Ok(vec![Event::Notice(msg)])
+                });
             }
         })
     });
@@ -797,7 +1190,8 @@ pub fn wire(ui: &AppWindow) {
     ui.on_route(|i| {
         with_app(|a| {
             if let Some(b) = a.bus() {
-                let r = i.clamp(0, 2) as u8;
+                // The menu lists phoned's routes in its order; pick by that.
+                let Some(r) = a.routes.get(i.max(0) as usize).map(|r| r.route) else { return };
                 b.run(move |c| async move {
                     c.audio.set_route(r).await?;
                     Ok(vec![Event::Routes(c.audio.routes().await?)])
@@ -914,6 +1308,124 @@ pub fn wire(ui: &AppWindow) {
             }
         })
     });
+    ui.on_copy(|t, secret| with_app(|a| a.copy(&t, secret)));
+    ui.on_set_voicemail(|v| {
+        with_app(|a| {
+            let n: String = v.chars().filter(|c| c.is_ascii_digit() || *c == '+').collect();
+            a.voicemail = n.clone();
+            a.ui.set_voicemail(n.as_str().into());
+            if let Some(b) = a.bus() {
+                b.run(move |c| async move { c.settings.set("voicemail", &n).await.map(|_| vec![]) });
+            }
+            a.say("Voicemail number saved");
+        })
+    });
+    ui.on_save_uplink(|to, iface| {
+        with_app(|a| {
+            let (to, iface) = (to.trim().to_string(), iface.trim().to_string());
+            if let Some(b) = a.bus() {
+                b.run(move |c| async move {
+                    c.settings.set("uplink_alert_to", &to).await?;
+                    c.settings.set("uplink_interface", &iface).await?;
+                    Ok(vec![Event::Notice("Uplink watch saved".into())])
+                });
+            }
+        })
+    });
+    ui.on_set_hold(|i| {
+        with_app(|a| {
+            let ms = HOLDS[i.clamp(0, 4) as usize].to_string();
+            a.hold_ms = ms.clone();
+            if let Some(b) = a.bus() {
+                b.run(move |c| async move { c.settings.set("long_press_ms", &ms).await.map(|_| vec![]) });
+            }
+        })
+    });
+    ui.on_save_sip(|account, password, proxy, always| {
+        with_app(|a| {
+            let (account, password, proxy) =
+                (account.trim().to_string(), password.to_string(), proxy.trim().to_string());
+            a.sip_always = always;
+            a.ui.set_sip_password("".into());
+            if !password.is_empty() {
+                a.sip_password_set = true;
+            }
+            if let Some(b) = a.bus() {
+                b.run(move |c| async move {
+                    if !password.is_empty() {
+                        c.settings.set("sip_password", &password).await?;
+                    }
+                    c.settings.set("sip_proxy", &proxy).await?;
+                    c.settings.set("sip_use", if always { "always" } else { "fallback" }).await?;
+                    c.settings.set("sip_account", &account).await?;
+                    Ok(vec![Event::Notice("SIP account saved".into())])
+                });
+            }
+        })
+    });
+    ui.on_unpair_laptop(|i| {
+        with_app(|a| {
+            if let (Some((id, _, true)), Some(b)) = (a.laptops.get(i as usize).cloned(), a.bus()) {
+                b.run(move |c| async move {
+                    c.settings.kdeconnect_unpair(&id).await?;
+                    Ok(vec![Event::Laptops(c.settings.kdeconnect_devices().await?)])
+                });
+            }
+        })
+    });
+    ui.on_revoke(|i| {
+        with_app(|a| {
+            if let (Some(g), Some(b)) = (a.grants.get(i as usize).cloned(), a.bus()) {
+                b.run(move |c| async move {
+                    c.settings.revoke_grant(g.id).await?;
+                    Ok(vec![Event::Grants(c.settings.grants().await?)])
+                });
+            }
+        })
+    });
+    ui.on_add_contact(|name, num| {
+        with_app(|a| {
+            let (name, num) = (name.to_string(), num.to_string());
+            if let Some(b) = a.bus() {
+                b.run(move |c| async move {
+                    c.contacts.add(&name, vec![("mobile".into(), num)]).await?;
+                    Ok(vec![Event::ContactsChanged])
+                });
+            }
+            a.ui.set_new_contact_name("".into());
+            a.ui.set_new_contact_number("".into());
+        })
+    });
+    ui.on_remove_contact(|i| {
+        with_app(|a| {
+            let Some(&idx) = a.contacts_view.get(i as usize) else { return };
+            let id = a.book.contacts[idx].id();
+            if let Some(b) = a.bus() {
+                b.run(move |c| async move {
+                    c.contacts.remove(&id).await?;
+                    Ok(vec![Event::ContactsChanged])
+                });
+            }
+            a.ui.set_contact_selected(-1);
+        })
+    });
+    ui.on_import_from_phone(|i| {
+        with_app(|a| {
+            let phones: Vec<_> = a.devices.iter().filter(|d| d.paired && !d.headset && !d.speaker).collect();
+            let Some(d) = phones.get(i as usize) else { return };
+            let (addr, name) = (d.address.clone(), d.name.clone());
+            if let Some(b) = a.bus() {
+                b.run(move |c| async move { c.contacts.import_from_phone(&addr).await.map(|_| vec![]) });
+            }
+            a.say(format!("Copying contacts from {name}: allow it on the phone"));
+        })
+    });
+    ui.on_dismiss_alert(|| {
+        with_app(|a| {
+            a.alert = None;
+            a.render();
+        })
+    });
     ui.on_wipe(|| {
         with_app(|a| {
             // phoned asks first, with a confirmation that shows here (and on the panel).
@@ -946,6 +1458,7 @@ pub fn sample(a: &mut App, page: i32) {
         own_number: "+61491570110".into(),
         emergency_only: false,
         state: "ready".into(),
+        sip: String::new(),
     });
     let now = phone_core::now();
     a.recents = vec![
@@ -957,6 +1470,7 @@ pub fn sample(a: &mut App, page: i32) {
             duration: 0,
             outcome: 1,
             seen: false,
+            sim: String::new(),
         },
         CallRecordInfo {
             id: 2,
@@ -966,6 +1480,7 @@ pub fn sample(a: &mut App, page: i32) {
             duration: 125,
             outcome: 0,
             seen: true,
+            sim: String::new(),
         },
         CallRecordInfo {
             id: 1,
@@ -975,6 +1490,7 @@ pub fn sample(a: &mut App, page: i32) {
             duration: 40,
             outcome: 0,
             seen: true,
+            sim: String::new(),
         },
     ];
     a.missed = 1;
@@ -1032,6 +1548,8 @@ pub fn sample(a: &mut App, page: i32) {
                 at: now - 3000,
                 state: 0,
                 read: true,
+                sim: String::new(),
+                parts: Vec::new(),
             },
             MessageInfo {
                 id: 2,
@@ -1041,6 +1559,8 @@ pub fn sample(a: &mut App, page: i32) {
                 at: now - 2900,
                 state: 2,
                 read: true,
+                sim: String::new(),
+                parts: Vec::new(),
             },
             MessageInfo {
                 id: 3,
@@ -1050,6 +1570,8 @@ pub fn sample(a: &mut App, page: i32) {
                 at: now - 300,
                 state: 0,
                 read: true,
+                sim: String::new(),
+                parts: Vec::new(),
             },
         ];
         a.ui.set_thread_selected(0);
@@ -1074,6 +1596,7 @@ pub fn sample_call(a: &mut App, ringing: bool) {
         connected_at: if ringing { 0 } else { now - 83 },
         muted: false,
         emergency: false,
+        internet: false,
     }];
 }
 

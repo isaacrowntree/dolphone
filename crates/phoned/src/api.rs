@@ -4,7 +4,8 @@
 use std::sync::Arc;
 
 use phone_api::{
-    BtDevice, CallInfo, CallRecordInfo, MessageInfo, ModemStatus, Placed, Request, RouteInfo, ThreadInfo, PATH,
+    AlertInfo, AuditEntry, BtDevice, CallInfo, CallRecordInfo, DeviceInfo, Grant, MessageInfo, ModemStatus, Placed,
+    Request, RouteInfo, ThreadInfo, PATH,
 };
 use zbus::message::Header;
 use zbus::object_server::SignalEmitter;
@@ -47,7 +48,11 @@ impl Calls {
         #[zbus(connection)] conn: &Connection,
     ) -> zbus::fdo::Result<Placed> {
         let who = caller::identify(conn, &hdr).await;
-        self.0.dial(number, &who, false).await
+        let r = self.0.dial(number, &who, false).await;
+        let said =
+            if r.as_ref().is_ok_and(|p| p.pending > 0) { "waiting for confirmation".into() } else { outcome(&r) };
+        self.0.audit(&who, "dial", number, &said);
+        r
     }
 
     async fn answer(
@@ -58,13 +63,35 @@ impl Calls {
     ) -> zbus::fdo::Result<()> {
         // Answering is not harmless: auto-answering a call the attacker placed makes
         // the device a room microphone.
+        let who = caller::identify(conn, &hdr).await;
+        if !who.trusted {
+            self.0.audit(&who, "answer", "", "refused");
+        }
         front_end(conn, &hdr, "answer calls").await?;
         self.0.answer(id).await
     }
 
     /// Anyone may hang up: ending a call can only ever stop something.
-    async fn hangup(&self, id: u32) -> zbus::fdo::Result<()> {
-        self.0.hangup(id).await
+    async fn hangup(
+        &self,
+        id: u32,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> zbus::fdo::Result<()> {
+        let who = caller::identify(conn, &hdr).await;
+        let r = self.0.hangup(id).await;
+        self.0.audit(&who, "hang up", "", &outcome(&r));
+        r
+    }
+
+    /// Join the active and held calls into a conference.
+    async fn merge(
+        &self,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> zbus::fdo::Result<()> {
+        front_end(conn, &hdr, "control calls").await?;
+        self.0.merge().await
     }
 
     async fn swap(
@@ -99,7 +126,7 @@ impl Calls {
     }
 
     async fn silence(&self) {
-        self.0.audio.stop_ringing();
+        self.0.stop_ringing();
     }
 
     async fn calls(&self) -> Vec<CallInfo> {
@@ -124,6 +151,7 @@ impl Calls {
                 duration: r.duration,
                 outcome: r.outcome as u8,
                 seen: r.seen,
+                sim: r.sim,
             })
             .collect())
     }
@@ -165,7 +193,70 @@ impl Messages {
         #[zbus(connection)] conn: &Connection,
     ) -> zbus::fdo::Result<Placed> {
         let who = caller::identify(conn, &hdr).await;
-        self.0.send(to, body, &who, false).await
+        let r = self.0.send(to, body, &who, false).await;
+        if r.is_err() {
+            self.0.audit(&who, "send", to, &outcome(&r));
+        }
+        r
+    }
+
+    /// An MMS: to several numbers (a group text), with files, or both.
+    async fn send_mms(
+        &self,
+        to: Vec<String>,
+        body: &str,
+        files: Vec<String>,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> zbus::fdo::Result<Placed> {
+        let who = caller::identify(conn, &hdr).await;
+        let r = self.0.send_mms(&to, body, &files, &who, false).await;
+        if r.is_err() {
+            self.0.audit(&who, "send", &to.join(","), &outcome(&r));
+        }
+        r
+    }
+
+    async fn retry(
+        &self,
+        id: i64,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> zbus::fdo::Result<()> {
+        front_end(conn, &hdr, "resend messages").await?;
+        self.0.retry(id).await
+    }
+
+    async fn search(
+        &self,
+        query: &str,
+        limit: u32,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> zbus::fdo::Result<Vec<MessageInfo>> {
+        let who = reader(conn, &hdr).await?;
+        self.0.audit(&who, "search", "", "allowed");
+        Ok(self.0.store_read(|s| s.search(query, limit.clamp(1, 500)))?.iter().map(to_info).collect())
+    }
+
+    /// The whole history, for moving it to another phone: a reader's, and logged.
+    async fn export(
+        &self,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> zbus::fdo::Result<String> {
+        let who = reader(conn, &hdr).await?;
+        self.0.audit(&who, "export", "", "allowed");
+        let region = self.0.region();
+        let book = phone_core::contacts::Book::load(&phone_core::store::contacts_dir(), &region);
+        self.0.store_read(|s| {
+            s.export_xml(|n| book.lookup(n).map(|c| c.name.clone()).unwrap_or_else(|| "(Unknown)".into()))
+        })
+    }
+
+    /// Emergency alerts are public broadcasts: anyone may read them.
+    async fn alerts(&self, limit: u32) -> zbus::fdo::Result<Vec<AlertInfo>> {
+        self.0.alerts(limit)
     }
 
     async fn threads(
@@ -193,7 +284,8 @@ impl Messages {
         #[zbus(header)] hdr: Header<'_>,
         #[zbus(connection)] conn: &Connection,
     ) -> zbus::fdo::Result<Vec<MessageInfo>> {
-        reader(conn, &hdr).await?;
+        let who = reader(conn, &hdr).await?;
+        self.0.audit(&who, "read", peer, "allowed");
         Ok(self.0.store_read(|s| s.conversation(peer))?.iter().map(to_info).collect())
     }
 
@@ -218,6 +310,10 @@ impl Messages {
         #[zbus(connection)] conn: &Connection,
     ) -> zbus::fdo::Result<()> {
         front_end(conn, &hdr, "delete messages").await?;
+        // An MMS's pictures go with it.
+        if let Ok(gone) = self.0.store_read(|s| s.conversation(peer)) {
+            crate::phone::remove_parts(&gone);
+        }
         self.0.store_read(|s| s.delete_thread(peer))?;
         let _ = self.unread_changed(&em).await;
         Ok(())
@@ -228,6 +324,8 @@ impl Messages {
         self.0.store_read(|s| s.unread_messages()).unwrap_or(0)
     }
 
+    #[zbus(signal)]
+    async fn alert_received(em: &SignalEmitter<'_>, alert: AlertInfo) -> zbus::Result<()>;
     #[zbus(signal)]
     async fn message_added(em: &SignalEmitter<'_>, message: MessageInfo) -> zbus::Result<()>;
     #[zbus(signal)]
@@ -463,8 +561,53 @@ impl Modem {
         self.0.ussd_respond(reply, &who).await
     }
 
+    async fn cells(
+        &self,
+        limit: u32,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> zbus::fdo::Result<Vec<(i64, String, String, bool)>> {
+        let who = reader(conn, &hdr).await?;
+        self.0.audit(&who, "cells", "", "allowed");
+        self.0.store_read(|s| s.cells(limit.clamp(1, 2000)))
+    }
+
+    async fn unlock(
+        &self,
+        pin: &str,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> zbus::fdo::Result<u32> {
+        front_end(conn, &hdr, "unlock the SIM").await?;
+        self.0.unlock(pin).await
+    }
+
     async fn ussd_cancel(&self) -> zbus::fdo::Result<()> {
         self.0.ussd_cancel().await
+    }
+
+    /// The modem's one-time setup (USB audio, VoLTE, carrier profile), checked:
+    /// (step, "ok"/"change"/"unsupported"/"error", in words). Reading it changes
+    /// nothing, so anyone may.
+    async fn setup(&self) -> Vec<(String, String, String)> {
+        self.0.modem_setup(false).await
+    }
+
+    /// Make the setup's changes, which are saved in the modem and restart it. A
+    /// front end does it now and gets the steps back; anyone else waits for a press.
+    async fn apply_setup(
+        &self,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> (Placed, Vec<(String, String, String)>) {
+        let who = caller::identify(conn, &hdr).await;
+        if who.trusted {
+            let steps = self.0.modem_setup(true).await;
+            self.0.audit(&who, "modem setup", "", "done");
+            (Placed { id: 1, pending: 0 }, steps)
+        } else {
+            (self.0.request_modem_setup(&who).await, Vec::new())
+        }
     }
 
     #[zbus(signal)]
@@ -481,6 +624,14 @@ impl Settings {
             .find(|(k, _)| *k == key)
             .map(|(_, d)| *d)
             .ok_or_else(|| zbus::fdo::Error::InvalidArgs(format!("unknown setting {key}")))?;
+        if key == phone_api::keys::VOICEMAIL.0 {
+            // The owner's number, or the SIM carrier's well-known one.
+            return Ok(self.0.voicemail());
+        }
+        if key == phone_api::keys::SIP_PASSWORD.0 {
+            // Never the password itself: only whether there is one.
+            return Ok(if crate::sip::has_password() { "set".into() } else { String::new() });
+        }
         Ok(self.0.setting((key, default)))
     }
 
@@ -495,10 +646,115 @@ impl Settings {
         if key == phone_api::keys::READ_GRANTS.0 {
             caller::set_grants(value);
         }
+        if key == phone_api::keys::TRUST_APPIMAGES.0 {
+            caller::set_trust_appimages(value == "true");
+        }
         if !phone_api::keys::ALL.iter().any(|(k, _)| *k == key) {
             return Err(zbus::fdo::Error::InvalidArgs(format!("unknown setting {key}")));
         }
-        self.0.store_read(|s| s.set_setting(key, value))
+        use phone_api::keys;
+        if key == keys::SIP_PASSWORD.0 {
+            // Kept in a file only the owner can read, not in the settings table
+            // that Get reads back.
+            crate::sip::set_password(value).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+            self.0.sip_changed.notify_one();
+            return Ok(());
+        }
+        if key == keys::SIP_ACCOUNT.0 && !value.is_empty() && !crate::sip::valid_account(value) {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "a SIP account looks like sip:user@provider.example (optionally ;transport=tls)".into(),
+            ));
+        }
+        if key == keys::SIP_PROXY.0 && !value.is_empty() && !crate::sip::valid_proxy(value) {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "a proxy looks like sip:proxy.example (optionally :port and ;transport=tls)".into(),
+            ));
+        }
+        if key == keys::DEVICE_PROFILE.0 && value != "auto" && !crate::devices::all().iter().any(|p| p.id == value) {
+            return Err(zbus::fdo::Error::InvalidArgs(format!("no device profile {value}; see phonectl device list")));
+        }
+        if key == keys::SIP_USE.0 && !matches!(value, "fallback" | "always") {
+            return Err(zbus::fdo::Error::InvalidArgs("fallback or always".into()));
+        }
+        self.0.store_read(|s| s.set_setting(key, value))?;
+        if key == keys::DEVICE_PROFILE.0 {
+            self.0.choose_device(value);
+        }
+        // The modem follows these at once; a new profile may have start-up commands.
+        if key == keys::DISABLE_2G.0 || key == keys::DEVICE_PROFILE.0 {
+            if let Some(m) = self.0.state.lock().await.modem.clone() {
+                self.0.apply_modem_settings(&m).await;
+            }
+        }
+        if key == keys::SIP_ENABLED.0 || key == keys::SIP_ACCOUNT.0 || key == keys::SIP_PROXY.0 {
+            self.0.sip_changed.notify_one();
+        }
+        if key == phone_api::keys::CALL_WAITING.0 {
+            if let Some(m) = self.0.state.lock().await.modem.clone() {
+                self.0.apply_modem_settings(&m).await;
+            }
+        }
+        Ok(())
+    }
+
+    /// What the machine is taken to be. Anyone may ask: it is about the hardware.
+    async fn device(&self) -> DeviceInfo {
+        let (p, why) = self.0.device.lock().map(|d| d.clone()).unwrap_or_default();
+        device_info(&p, &why)
+    }
+
+    async fn kdeconnect_devices(
+        &self,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> zbus::fdo::Result<Vec<(String, String, bool)>> {
+        front_end(conn, &hdr, "list KDE Connect devices").await?;
+        Ok(self.0.kdeconnect.devices())
+    }
+
+    /// Anyone may unpair, as anyone may hang up: it only takes away.
+    async fn kdeconnect_unpair(&self, id: &str) {
+        self.0.kdeconnect.unpair(id);
+    }
+
+    async fn devices(&self) -> Vec<DeviceInfo> {
+        crate::devices::all().iter().map(|p| device_info(p, "")).collect()
+    }
+
+    async fn request_grant(
+        &self,
+        numbers: &str,
+        per_hour: u32,
+        days: u32,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> zbus::fdo::Result<Placed> {
+        let who = caller::identify(conn, &hdr).await;
+        self.0.request_grant(numbers, per_hour, days, &who).await
+    }
+
+    async fn grants(
+        &self,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> zbus::fdo::Result<Vec<Grant>> {
+        front_end(conn, &hdr, "list grants").await?;
+        self.0.grants()
+    }
+
+    /// Anyone may give up a grant, as anyone may hang up: it only takes away.
+    async fn revoke_grant(&self, id: i64) -> zbus::fdo::Result<()> {
+        self.0.revoke_grant(id).await
+    }
+
+    async fn audit(
+        &self,
+        limit: u32,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> zbus::fdo::Result<Vec<AuditEntry>> {
+        front_end(conn, &hdr, "read the audit log").await?;
+        self.0.audit_log(limit)
     }
 
     async fn block(
@@ -540,6 +796,39 @@ impl Settings {
     }
 }
 
+fn device_info(p: &crate::devices::Profile, why: &str) -> DeviceInfo {
+    DeviceInfo {
+        id: p.id.clone(),
+        name: p.name.clone(),
+        status: p.status.clone(),
+        why: why.to_string(),
+        source: p.source.clone(),
+        notes: p.notes.clone(),
+        front_ends: p.front_ends.clone(),
+    }
+}
+
+/// A zbus error in phoned's own words, without the D-Bus name in front.
+pub fn short(e: &zbus::Error) -> String {
+    match e {
+        zbus::Error::MethodError(name, msg, _) => msg.clone().unwrap_or_else(|| name.to_string()),
+        zbus::Error::FDO(f) => {
+            f.to_string().split_once(": ").map(|(_, m)| m.to_string()).unwrap_or_else(|| f.to_string())
+        }
+        other => other.to_string(),
+    }
+}
+
+/// How a request went, in a word for the audit log.
+fn outcome<T>(r: &zbus::fdo::Result<T>) -> String {
+    match r {
+        Ok(_) => "done".into(),
+        Err(zbus::fdo::Error::AccessDenied(_)) => "refused".into(),
+        Err(zbus::fdo::Error::LimitsExceeded(_)) => "over the limit".into(),
+        Err(_) => "failed".into(),
+    }
+}
+
 // Emitting, for the parts of phoned that are not inside a method call.
 
 fn emitter(conn: &Connection) -> Option<SignalEmitter<'static>> {
@@ -571,6 +860,12 @@ pub async fn emit_message_added(conn: &Connection, mut m: MessageInfo) {
     m.body.clear();
     if let Some(em) = emitter(conn) {
         let _ = Messages::message_added(&em, m).await;
+    }
+}
+
+pub async fn emit_alert_received(conn: &Connection, a: AlertInfo) {
+    if let Some(em) = emitter(conn) {
+        let _ = Messages::alert_received(&em, a).await;
     }
 }
 

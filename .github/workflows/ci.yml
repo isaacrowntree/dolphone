@@ -5,46 +5,63 @@ on:
     branches: [main]
   pull_request:
 
-# Everything builds on arm64, the panel's architecture: GitHub's arm runners are free
-# for public repositories, and nothing has to be cross-compiled.
+# Everything builds on arm64, the Flipper One's architecture, in Debian 13: the
+# same release Flipper OS and the dev machine run, so the packages the tests lean
+# on (baresip, PipeWire's tools, dbus) are the ones a board has. GitHub's arm
+# runners are free for public repositories, and nothing is cross-compiled.
 jobs:
   core:
-    name: daemon, CLI, desktop app
+    name: daemon, CLI, desktop app, end to end
     runs-on: ubuntu-24.04-arm
+    container: debian:trixie
     steps:
+      - name: System packages
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev \
+            dbus dbus-user-session procps libfontconfig-dev libxkbcommon-dev fonts-dejavu-core baresip-core
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: System packages
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq dbus dbus-user-session libfontconfig-dev libxkbcommon-dev fonts-dejavu-core
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
-      - name: End to end against the fake modem
+      - name: A system bus of the container's own, which fake-mm may own
+        run: |
+          install -m 0644 dist/dev/dolphone-fake-mm.conf /etc/dbus-1/system.d/
+          mkdir -p /run/dbus
+          dbus-daemon --system --fork
+      - name: End to end against the fake modem (and a SIP far end)
         run: |
           cargo build --workspace
-          # fake-mm takes ModemManager's name on the runner's real system bus.
-          sudo install -m 0644 dist/dev/dolphone-fake-mm.conf /etc/dbus-1/system.d/
-          sudo systemctl reload dbus || sudo kill -HUP "$(pidof dbus-daemon | cut -d' ' -f1)"
           scripts/e2e.sh
 
   apps:
     name: panel apps (${{ matrix.app }})
     runs-on: ubuntu-24.04-arm
+    container: debian:trixie
     strategy:
       fail-fast: false
       matrix:
         app: [dialer, messages, settings]
     steps:
+      - name: System packages
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev \
+            libfontconfig-dev libxkbcommon-dev fonts-dejavu-core
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: apps/${{ matrix.app }}
+      - name: Lints
+        working-directory: apps/${{ matrix.app }}
+        run: cargo clippy --locked --all-targets -- -D warnings
       - name: Tests, including the rendered screens
         working-directory: apps/${{ matrix.app }}
         run: DOLPHONE_RENDER=1 cargo test --locked
@@ -52,3 +69,35 @@ jobs:
         with:
           name: screens-${{ matrix.app }}
           path: apps/${{ matrix.app }}/target/render/*.png
+
+  live-ui:
+    name: the apps against a live phoned
+    runs-on: ubuntu-24.04-arm
+    container: debian:trixie
+    steps:
+      - name: System packages
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends ca-certificates curl git build-essential pkg-config libssl-dev \
+            dbus dbus-user-session procps libfontconfig-dev libxkbcommon-dev fonts-dejavu-core
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            apps/dialer
+            apps/messages
+            apps/settings
+      - name: A system bus of the container's own
+        run: |
+          install -m 0644 dist/dev/dolphone-fake-mm.conf /etc/dbus-1/system.d/
+          mkdir -p /run/dbus
+          dbus-daemon --system --fork
+      - name: Dialer, Messages, Settings and the desktop app, driven against phoned and fake-mm
+        run: APPS_TARGET="$PWD/target/apps" scripts/ui-e2e.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screens-live
+          path: apps/*/target/render/live/*.png

@@ -132,6 +132,7 @@ impl App {
             Ok(vec![
                 Event::Blocked(c.settings.blocked().await?),
                 Event::Setting("region".into(), c.settings.get("region").await?),
+                Event::Missed(c.calls.missed().await?),
             ])
         });
         if !self.model.peer.is_empty() {
@@ -227,6 +228,13 @@ impl App {
             }
             Event::MessageChanged(id, state) => self.model.message_changed(id, state),
             Event::Blocked(b) => self.model.blocked = b,
+            Event::Missed(n) => self.model.missed = n,
+            Event::Found(q, found) if q == self.model.query => self.model.found = found,
+            Event::ContactsChanged | Event::ContactsImported { .. } => {
+                self.model.book =
+                    phone_core::contacts::Book::load(&phone_core::store::contacts_dir(), &self.model.region);
+                self.contacts_loaded = Instant::now();
+            }
             Event::Setting(k, v) if k == "region" => self.model.region = v,
             Event::Placed { kind: "sms", placed } if placed.pending != 0 => {
                 self.model.notice = Some(vec!["Waiting for you to confirm".into(), "on the Phone screen.".into()]);
@@ -250,6 +258,7 @@ impl App {
                 Action::Write(what, text) => {
                     let title = match what {
                         Writing::To => "To (number or name)".to_string(),
+                        Writing::Search => "Search texts".to_string(),
                         Writing::Body => format!("To {}", self.model.name_for(&self.model.peer)),
                     };
                     self.kb = Some((what, TextInput::new(&flipctl_app::font::fit(&title, 200), &text)));
@@ -267,6 +276,10 @@ impl App {
                     c.messages.delete_thread(&peer).await?;
                     Ok(vec![Event::Threads(c.messages.threads().await?)])
                 }),
+                Action::Search(q) => self
+                    .bus
+                    .run(move |c| async move { Ok(vec![Event::Found(q.clone(), c.messages.search(&q, 100).await?)]) }),
+                Action::Retry(id) => self.bus.run(move |c| async move { c.messages.retry(id).await.map(|_| vec![]) }),
                 Action::Quit => {
                     let _ = slint::quit_event_loop();
                 }
@@ -484,6 +497,8 @@ mod tests {
                     at: 1_792_998_000,
                     state: 0,
                     read: true,
+                    sim: String::new(),
+                    parts: Vec::new(),
                 },
                 MessageInfo {
                     id: 2,
@@ -493,6 +508,8 @@ mod tests {
                     at: 1_792_998_100,
                     state: 2,
                     read: true,
+                    sim: String::new(),
+                    parts: Vec::new(),
                 },
                 MessageInfo {
                     id: 3,
@@ -502,6 +519,8 @@ mod tests {
                     at: 1_792_999_000,
                     state: 0,
                     read: true,
+                    sim: String::new(),
+                    parts: Vec::new(),
                 },
             ],
         );
@@ -512,5 +531,171 @@ mod tests {
         shot("compose", &m, Some(&field));
         m.screen = model::Screen::Options;
         shot("options", &m, None);
+        m.screen = model::Screen::QuickReply;
+        m.quick_sel = 3;
+        shot("quick-reply", &m, None);
+        m.messages[1].state = phone_core::model::MessageState::Delivered as u8;
+        m.messages.push(MessageInfo {
+            id: 4,
+            peer: "+61491570156".into(),
+            direction: 1,
+            body: "Grabbing a table.".into(),
+            at: 1_792_999_100,
+            state: phone_core::model::MessageState::Failed as u8,
+            read: true,
+            sim: String::new(),
+            parts: Vec::new(),
+        });
+        m.screen = model::Screen::Conversation;
+        m.scroll = None;
+        shot("conversation-delivered-failed", &m, None);
+        m.screen = model::Screen::Options;
+        shot("options-resend", &m, None);
+        m.screen = model::Screen::Threads;
+        m.missed = 1;
+        shot("threads-missed", &m, None);
+    }
+
+    // Live: the real app against a running phoned and fake-mm (scripts/ui-e2e.sh).
+
+    struct Live {
+        app: App,
+        rx: std::sync::mpsc::Receiver<phone_bus::Event>,
+    }
+
+    impl Live {
+        fn start() -> Option<Self> {
+            std::env::var_os("DOLPHONE_LIVE")?;
+            let _ = panel();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let bus = Bus::start(move |e| {
+                let _ = tx.send(e);
+            });
+            let app = App {
+                ui: AppWindow::new().expect("window"),
+                model: Model::new("AU", phone_core::contacts::Book::load(&phone_core::store::contacts_dir(), "AU")),
+                bus,
+                kb: None,
+                frame: 0,
+                #[cfg(feature = "device")]
+                motor: None,
+                contacts_loaded: Instant::now(),
+            };
+            let mut l = Self { app, rx };
+            l.until("phoned connects", |a| a.model.connected);
+            Some(l)
+        }
+
+        fn until(&mut self, what: &str, done: impl Fn(&App) -> bool) {
+            let end = Instant::now() + Duration::from_secs(10);
+            while !done(&self.app) {
+                let left = end.saturating_duration_since(Instant::now());
+                assert!(!left.is_zero(), "timed out waiting: {what}");
+                if let Ok(e) = self.rx.recv_timeout(left.min(Duration::from_millis(100))) {
+                    self.app.event(e);
+                }
+            }
+        }
+
+        fn press(&mut self, k: Key) {
+            self.app.key(Some(k), "", true);
+            self.app.key(Some(k), "", false);
+        }
+
+        /// Type on a real keyboard, as the remote view or a USB keyboard does.
+        fn type_text(&mut self, t: &str) {
+            for c in t.chars() {
+                self.app.key(None, &c.to_string(), true);
+            }
+        }
+
+        fn shot(&mut self, name: &str) {
+            let window = panel();
+            self.app.draw();
+            self.app.ui.show().expect("show");
+            slint::platform::update_timers_and_animations();
+            window.request_redraw();
+            let frame: Vec<u8> = render_frame(&window).expect("frame").iter().map(|p| p.0).collect();
+            assert!(frame.iter().filter(|p| **p < 128).count() > 200, "{name} draws something");
+            let dir = std::path::Path::new("target/render/live");
+            std::fs::create_dir_all(dir).unwrap();
+            let f = std::fs::File::create(dir.join(format!("messages-{name}.png"))).unwrap();
+            let mut e =
+                png::Encoder::new(std::io::BufWriter::new(f), u32::from(theme::PANEL_W), u32::from(theme::PANEL_H));
+            e.set_color(png::ColorType::Grayscale);
+            e.set_depth(png::BitDepth::Eight);
+            e.write_header().unwrap().write_image_data(&frame).unwrap();
+        }
+    }
+
+    fn phonectl(args: &[&str]) -> String {
+        let out = std::process::Command::new("phonectl").args(args).output().expect("phonectl on PATH");
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr)
+    }
+
+    fn last_body(a: &App) -> String {
+        a.model.messages.last().map(|m| m.body.clone()).unwrap_or_default()
+    }
+
+    #[test]
+    #[ignore = "needs phoned and fake-mm: scripts/ui-e2e.sh"]
+    fn live_messages() {
+        let Some(mut l) = Live::start() else { return };
+        use phone_core::model::MessageState;
+
+        // A text arrives and starts a thread, under the contact's name.
+        phonectl(&["fake", "sms", "+61491570156", "Lunch at 12:30 tomorrow?"]);
+        l.until("the thread appears", |a| a.model.threads.iter().any(|t| t.unread > 0));
+        l.shot("01-threads");
+
+        // Open it: the conversation is fetched (the signal carries no text).
+        l.press(Key::Run);
+        l.until("the conversation loads", |a| last_body(a) == "Lunch at 12:30 tomorrow?");
+        l.shot("02-conversation");
+
+        // Answer with a quick reply, through the preview, and it is sent.
+        l.press(Key::View);
+        l.press(Key::Run);
+        for _ in 0..3 {
+            l.press(Key::Down);
+        }
+        l.press(Key::Run);
+        l.shot("03-preview");
+        l.press(Key::Run);
+        l.until("sent", |a| {
+            a.model.messages.last().is_some_and(|m| m.body == "On my way." && m.state == MessageState::Sent as u8)
+        });
+        l.shot("04-sent");
+
+        // The network refuses one: it shows as failed, and Options can resend it.
+        phonectl(&["fake", "sendfails", "on"]);
+        l.press(Key::Edit);
+        l.type_text("Running late");
+        l.press(Key::Run);
+        l.press(Key::Run);
+        l.until("it fails", |a| a.model.messages.last().is_some_and(|m| m.state == MessageState::Failed as u8));
+        l.shot("05-failed");
+        l.press(Key::Ok);
+        phonectl(&["fake", "sendfails", "off"]);
+        l.press(Key::View);
+        assert_eq!(l.app.model.options()[0], model::Opt::Resend);
+        l.shot("06-options-resend");
+        l.press(Key::Run);
+        l.until("resent", |a| {
+            a.model.messages.last().is_some_and(|m| m.body == "Running late" && m.state == MessageState::Sent as u8)
+        });
+
+        // A new conversation, written on the keyboard.
+        l.press(Key::Escape);
+        l.until("back at the list", |a| a.model.screen == model::Screen::Threads);
+        l.press(Key::Edit);
+        l.type_text("0491570199");
+        l.shot("07-new-to");
+        l.press(Key::Run);
+        l.type_text("Hi! New number, this is Sam.");
+        l.press(Key::Run);
+        l.shot("08-new-preview");
+        l.press(Key::Run);
+        l.until("the new thread is there", |a| a.model.threads.iter().any(|t| t.peer == "+61491570199"));
     }
 }

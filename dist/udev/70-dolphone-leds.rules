@@ -1,0 +1,11 @@
+# Let members of the dolphone group flash the Flipper One's LEDs while a call
+# rings (crates/phoned/src/leds.rs). LED files in sysfs are root's, so give the
+# group the trigger and brightness on "add", and on "change": the kernel sends a
+# change uevent each time an LED's trigger is set (__led_trigger_set in
+# drivers/leds/led-triggers.c), after creating the trigger's own files, which is
+# when the timer trigger's delay_on and delay_off appear. The same chgrp in a udev
+# RUN is how brightnessctl's rules open LEDs to a group.
+#
+# Another machine's LEDs: copy this file to /etc/udev/rules.d/, change KERNEL to
+# match the names in the device profile's ring_leds, and reload the rules.
+ACTION=="add|change", SUBSYSTEM=="leds", KERNEL=="flipper-one:*", RUN+="/bin/sh -c 'cd /sys%p && for f in trigger brightness delay_on delay_off; do [ -e $f ] && chgrp dolphone $f && chmod g+w $f; done; true'"

@@ -15,6 +15,7 @@
 //! A second start hands its arguments to the window already open and exits.
 
 mod state;
+mod tray;
 
 use std::cell::RefCell;
 use std::io::{Read, Write};
@@ -90,6 +91,19 @@ fn main() -> Result<(), slint::PlatformError> {
         app.render();
     });
     state::wire(&ui);
+    // The tray icon brings the window back; a middle click goes to Messages.
+    let tray = tray::Tray::start(|messages| {
+        let _ = slint::invoke_from_event_loop(move || {
+            with_app(|app| {
+                if messages {
+                    app.ui.set_page(1);
+                }
+                app.ui.window().show().ok();
+                app.render();
+            })
+        });
+    });
+    with_app(|app| app.tray = Some(tray));
 
     let tick = slint::Timer::default();
     tick.start(slint::TimerMode::Repeated, Duration::from_secs(1), || with_app(|app| app.tick()));
@@ -179,6 +193,71 @@ mod tests {
             state::sample(a, 1);
             state::sample_confirm(a);
         });
+        shot("one-time-code", |a| {
+            state::sample(a, 1);
+            a.messages.push(phone_api::MessageInfo {
+                id: 99,
+                peer: a.peer.clone(),
+                direction: 0,
+                body: "Your Example Bank code is 482913. Never share it.".into(),
+                at: phone_core::now() - 30,
+                state: 0,
+                read: true,
+                sim: String::new(),
+                parts: Vec::new(),
+            });
+        });
+        shot("alert", |a| {
+            state::sample(a, 0);
+            a.alert = Some(phone_api::AlertInfo {
+                id: 1,
+                channel: 4371,
+                level: phone_core::model::AlertLevel::Extreme as u8,
+                text: "Emergency Alert: Bushfire. Leave now if you are in Example Valley. Follow police and fire service directions. Monitor ABC radio.".into(),
+                at: phone_core::now() - 120,
+            });
+        });
+        shot("settings-grants", |a| {
+            state::sample(a, 3);
+            a.voicemail = "101".into();
+            a.ui.set_voicemail("101".into());
+            a.grants = vec![phone_api::Grant {
+                id: 1,
+                program: "wan-watch".into(),
+                numbers: "+61491570158".into(),
+                per_hour: 4,
+                until: 0,
+            }];
+            a.audit = vec![phone_api::AuditEntry {
+                at: phone_core::now() - 60,
+                program: "wan-watch".into(),
+                action: "send".into(),
+                target: "+61…158".into(),
+                result: "sent under a grant".into(),
+            }];
+        });
+    }
+
+    #[test]
+    fn one_time_codes_get_a_copy_button() {
+        let _w = window();
+        let ui = AppWindow::new().expect("window");
+        let mut app = state::App::headless(ui.clone_strong());
+        state::sample(&mut app, 1);
+        app.messages = vec![phone_api::MessageInfo {
+            id: 1,
+            peer: app.peer.clone(),
+            direction: 0,
+            body: "G-735102 is your verification code".into(),
+            at: 1,
+            state: 0,
+            read: true,
+            sim: String::new(),
+            parts: Vec::new(),
+        }];
+        app.render();
+        use slint::Model;
+        assert_eq!(ui.get_bubbles().row_data(0).unwrap().code.as_str(), "735102");
     }
 
     #[test]
@@ -194,5 +273,176 @@ mod tests {
         assert_eq!(app.ui.get_page(), 1);
         assert_eq!(app.ui.get_draft().as_str(), "hello there");
         assert_eq!(app.peer, "+61491570156");
+    }
+
+    // Live: the desktop app against a running phoned and fake-mm (scripts/ui-e2e.sh).
+    // Its buttons are Slint callbacks, invoked here as a click would.
+
+    fn phonectl(args: &[&str]) -> String {
+        let out = std::process::Command::new("phonectl").args(args).output().expect("phonectl on PATH");
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr)
+    }
+
+    fn pump(rx: &std::sync::mpsc::Receiver<phone_bus::Event>, what: &str, done: impl Fn(&state::App) -> bool) {
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let mut ok = false;
+            with_app(|a| ok = done(a));
+            if ok {
+                return;
+            }
+            let left = end.saturating_duration_since(std::time::Instant::now());
+            assert!(!left.is_zero(), "timed out waiting: {what}");
+            if let Ok(e) = rx.recv_timeout(left.min(Duration::from_millis(100))) {
+                with_app(|a| a.event(e));
+            }
+        }
+    }
+
+    fn live_shot(ui: &AppWindow, name: &str) {
+        let w = window();
+        with_app(|a| a.render());
+        ui.show().expect("show");
+        w.request_redraw();
+        let mut buf = vec![Rgb565Pixel::default(); (W * H) as usize];
+        w.draw_if_needed(|r| {
+            r.render(&mut buf, W as usize);
+        });
+        let rgb: Vec<u8> = buf
+            .iter()
+            .flat_map(|p| {
+                let v = p.0;
+                let (r, g, b) = ((v >> 11) & 0x1f, (v >> 5) & 0x3f, v & 0x1f);
+                [(r << 3 | r >> 2) as u8, (g << 2 | g >> 4) as u8, (b << 3 | b >> 2) as u8]
+            })
+            .collect();
+        let dir = std::path::Path::new("target/render/live");
+        std::fs::create_dir_all(dir).unwrap();
+        let f = std::fs::File::create(dir.join(format!("desktop-{name}.png"))).unwrap();
+        let mut e = png::Encoder::new(std::io::BufWriter::new(f), W, H);
+        e.set_color(png::ColorType::Rgb);
+        e.set_depth(png::BitDepth::Eight);
+        e.write_header().unwrap().write_image_data(&rgb).unwrap();
+    }
+
+    #[test]
+    #[ignore = "needs phoned and fake-mm: scripts/ui-e2e.sh"]
+    fn live_desktop() {
+        if std::env::var_os("DOLPHONE_LIVE").is_none() {
+            return;
+        }
+        let _w = window();
+        let ui = AppWindow::new().expect("window");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let bus = Bus::start(move |e| {
+            let _ = tx.send(e);
+        });
+        APP.with(|a| *a.borrow_mut() = Some(state::App::new(ui.clone_strong(), bus)));
+        state::wire(&ui);
+        pump(&rx, "phoned connects", |a| a.connected && a.status.is_some());
+
+        // A call rings: the call card comes up, Answer connects, End ends.
+        phonectl(&["fake", "ring", "+61491570156"]);
+        pump(&rx, "the card shows", |a| a.ui.get_call_visible() && a.ui.get_call_ringing());
+        live_shot(&ui, "01-incoming");
+        ui.invoke_answer();
+        pump(&rx, "answered", |a| {
+            a.ui.get_call_visible() && !a.ui.get_call_ringing() && !a.ui.get_call_timer().is_empty()
+        });
+        live_shot(&ui, "02-in-call");
+        ui.invoke_hangup();
+        pump(&rx, "ended", |a| !a.ui.get_call_visible());
+
+        // A one-time code arrives: the conversation offers to copy it.
+        phonectl(&["fake", "sms", "+61491570156", "Your Example Bank code is 482913. Never share it."]);
+        ui.invoke_navigate(1);
+        pump(&rx, "the thread is listed", |a| !a.threads.is_empty());
+        ui.invoke_open_thread(0);
+        pump(&rx, "the code is found", |a| {
+            use slint::Model;
+            let b = a.ui.get_bubbles();
+            (0..b.row_count()).any(|i| b.row_data(i).is_some_and(|x| x.code == "482913"))
+        });
+        live_shot(&ui, "03-one-time-code");
+
+        // Writing back.
+        ui.set_draft("Thanks, got it.".into());
+        ui.invoke_send("Thanks, got it.".into());
+        pump(&rx, "sent", |a| a.messages.last().is_some_and(|m| m.body == "Thanks, got it." && m.state == 2));
+        live_shot(&ui, "04-replied");
+
+        // A program wants to call a premium number: the desktop asks too.
+        let placed = phonectl(&["dial", "1900123456"]);
+        assert!(placed.contains("waiting for confirmation"), "{placed}");
+        pump(&rx, "the confirmation shows", |a| a.ui.get_confirm_visible());
+        live_shot(&ui, "05-confirm");
+        ui.invoke_deny();
+        pump(&rx, "denied", |a| !a.ui.get_confirm_visible());
+
+        // An emergency alert covers the window until dismissed.
+        phonectl(&["fake", "broadcast", "4371", "Extreme weather warning: shelter indoors. This is a live UI test."]);
+        pump(&rx, "the alert shows", |a| a.ui.get_alert_visible());
+        live_shot(&ui, "06-alert");
+        ui.invoke_dismiss_alert();
+        pump(&rx, "dismissed", |a| !a.ui.get_alert_visible());
+
+        // Settings, as phoned reports them.
+        ui.invoke_navigate(3);
+        pump(&rx, "settings", |a| a.ui.get_page() == 3);
+        live_shot(&ui, "07-settings");
+    }
+
+    /// A stand-in tray host: records who registered.
+    struct Watcher(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    #[zbus::interface(name = "org.kde.StatusNotifierWatcher")]
+    impl Watcher {
+        fn register_status_notifier_item(&self, service: &str) {
+            self.0.lock().unwrap().push(service.to_string());
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a session bus: scripts/ui-e2e.sh"]
+    fn live_tray() {
+        if std::env::var_os("DOLPHONE_LIVE").is_none() {
+            return;
+        }
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(async {
+            let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let _host = zbus::connection::Builder::session()
+                .name("org.kde.StatusNotifierWatcher")
+                .serve_at("/StatusNotifierWatcher", Watcher(seen.clone()))
+                .build()
+                .await
+                .expect("the stand-in watcher");
+            let tray = tray::Tray::start(|_| {});
+            let mut name = None;
+            for _ in 0..50 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                if let Some(n) = seen.lock().unwrap().first().cloned() {
+                    name = Some(n);
+                    break;
+                }
+            }
+            let name = name.expect("the tray icon registers with the watcher");
+            let conn = zbus::Connection::session().await.unwrap();
+            let item = zbus::Proxy::new(&conn, name.as_str(), "/StatusNotifierItem", "org.kde.StatusNotifierItem")
+                .await
+                .unwrap();
+            let status: String = item.get_property("Status").await.unwrap();
+            assert_eq!(status, "Active");
+            tray.set(tray::Counts { missed: 1, unread: 2 });
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            // A fresh proxy reads the properties as they are now.
+            let item = zbus::Proxy::new(&conn, name.as_str(), "/StatusNotifierItem", "org.kde.StatusNotifierItem")
+                .await
+                .unwrap();
+            let status: String = item.get_property("Status").await.unwrap();
+            assert_eq!(status, "NeedsAttention", "missed calls ask for attention");
+            let tip: tray::ToolTip = item.get_property("ToolTip").await.unwrap();
+            assert_eq!(tip.3, "1 missed call, 2 new texts");
+        });
     }
 }
