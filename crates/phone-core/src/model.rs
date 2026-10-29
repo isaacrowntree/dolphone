@@ -170,7 +170,10 @@ impl AlertLevel {
     pub fn of_channel(ch: u32) -> Option<Self> {
         let c = if (4383..=4395).contains(&ch) { ch - 13 } else { ch };
         Some(match c {
-            4370 => Self::National,
+            // 919 is the Netherlands' NL-Alert channel from before the 4370
+            // range, which the Dutch NL-Alert regulation still names as one a
+            // phone must listen on.
+            4370 | 919 => Self::National,
             4371 | 4372 => Self::Extreme,
             4373..=4378 => Self::Severe,
             4379 => Self::Amber,

@@ -16,7 +16,8 @@ pub const MAX_BODY: usize = 4096;
 pub const MAX_SENDER: usize = 32;
 
 /// Remove control characters (keeping newline and tab), directional overrides and
-/// isolates (which can make a link or a number read backwards), and cap the length.
+/// isolates (which can make a link or a number read backwards), invisible
+/// characters, and cap the length.
 pub fn clean(input: &str, max: usize) -> String {
     let chars: Vec<char> = input.chars().collect();
     let mut out = String::new();
@@ -47,10 +48,16 @@ fn is_hostile(c: char) -> bool {
         '\n' | '\t' | '\r' => false,
         // C0, DEL and C1 controls.
         '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}' => true,
-        // Bidi embedding, override and isolate controls, and the marks.
-        '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => true,
-        // Zero-width characters used to hide text inside text.
-        '\u{200b}'..='\u{200d}' | '\u{2060}' | '\u{feff}' => true,
+        // Bidi embedding, override and isolate controls, and the marks (the Arabic
+        // letter mark among them).
+        '\u{200e}' | '\u{200f}' | '\u{61c}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => true,
+        // Zero-width characters used to hide text inside text, the soft hyphen
+        // (invisible unless a line breaks at it), and the tag characters, which
+        // draw as nothing and can smuggle a whole hidden string.
+        '\u{200b}'..='\u{200d}' | '\u{2060}' | '\u{feff}' | '\u{ad}' | '\u{e0000}'..='\u{e007f}' => true,
+        // Line and paragraph separators: a line break the store and the panel
+        // would each treat differently.
+        '\u{2028}' | '\u{2029}' => true,
         _ => false,
     }
 }
@@ -71,24 +78,38 @@ const GSM7_EXTENSION: &str = "^{}\\[~]|€\u{c}";
 
 /// The segment count the network will bill, and what is left in the last one.
 pub fn segments(body: &str) -> Segments {
-    let gsm_units: Option<usize> = body.chars().try_fold(0usize, |n, c| {
-        if GSM7_BASIC.contains(c) {
-            Some(n + 1)
-        } else if GSM7_EXTENSION.contains(c) {
-            Some(n + 2)
-        } else {
-            None
-        }
-    });
+    let gsm_units: Option<Vec<usize>> = body
+        .chars()
+        .map(|c| {
+            if GSM7_BASIC.contains(c) {
+                Some(1)
+            } else if GSM7_EXTENSION.contains(c) {
+                Some(2)
+            } else {
+                None
+            }
+        })
+        .collect();
     let (units, single, multi, gsm7) = match gsm_units {
         Some(u) => (u, 160, 153, true),
-        None => (body.encode_utf16().count(), 70, 67, false),
+        None => (body.chars().map(char::len_utf16).collect(), 70, 67, false),
     };
-    if units <= single {
-        return Segments { gsm7, count: 1, remaining: single - units };
+    let total: usize = units.iter().sum();
+    if total <= single {
+        return Segments { gsm7, count: 1, remaining: single - total };
     }
-    let count = units.div_ceil(multi);
-    Segments { gsm7, count, remaining: count * multi - units }
+    // Packed part by part, because a character is never split between parts: an
+    // extension character's escape and code, or a surrogate pair, that would
+    // straddle a boundary moves whole to the next part, leaving one unit unused.
+    let (mut count, mut used) = (1, 0);
+    for u in units {
+        if used + u > multi {
+            count += 1;
+            used = 0;
+        }
+        used += u;
+    }
+    Segments { gsm7, count, remaining: multi - used }
 }
 
 /// The one-time code in a text, if it has one: a run of 4 to 8 digits (a dash or
@@ -156,6 +177,26 @@ mod tests {
         let family = "\u{1F468}\u{200d}\u{1F469}\u{200d}\u{1F467}";
         assert_eq!(clean(family, 100), family, "a joiner between emoji is kept");
         assert_eq!(clean("long", 2), "lo");
+        assert_eq!(clean("a\u{61c}b\u{2028}c\u{2029}d", 100), "abcd");
+        assert_eq!(clean("pay\u{ad}pal", 100), "paypal");
+        assert_eq!(clean("hi\u{e0041}\u{e0042}\u{e007f}", 100), "hi", "tag characters hide text");
+    }
+
+    #[test]
+    fn characters_are_not_split_across_parts() {
+        // 152 plain septets and a euro: the escape would end part one and the code
+        // start part two, so the euro moves whole and part one carries 152.
+        let s = segments(&format!("{}€{}", "a".repeat(152), "a".repeat(10)));
+        assert_eq!((s.count, s.remaining), (2, 153 - 12));
+        let s = segments(&format!("{}€{}", "a".repeat(152), "a".repeat(151)));
+        assert_eq!((s.count, s.remaining), (2, 0));
+        let s = segments(&format!("{}€{}", "a".repeat(152), "a".repeat(152)));
+        assert_eq!(s.count, 3, "without the rule this would still fit two parts");
+        // UCS-2: 66 units and an emoji, a surrogate pair, which moves to part two.
+        let s = segments(&format!("{}👍{}", "ę".repeat(66), "ę".repeat(3)));
+        assert_eq!((s.count, s.remaining), (2, 67 - 5));
+        let s = segments(&format!("{}👍{}", "ę".repeat(66), "ę".repeat(66)));
+        assert_eq!(s.count, 3);
     }
 
     #[test]
