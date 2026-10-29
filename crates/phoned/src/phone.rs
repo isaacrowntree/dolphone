@@ -2106,6 +2106,26 @@ impl Phone {
     /// SIP, who may read). For Dolphone's own apps, and for a request the owner
     /// allowed.
     pub async fn apply_setting(self: &Arc<Self>, key: &str, value: &str) -> zbus::fdo::Result<()> {
+        // read_grants is a list: "+name" adds one program and "-name" removes one,
+        // so asking for a grant cannot drop another program's.
+        let edited;
+        let value = if key == phone_api::keys::READ_GRANTS.0 && value.starts_with(['+', '-']) {
+            let mut list: Vec<String> = self
+                .setting(phone_api::keys::READ_GRANTS)
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let name = value[1..].trim().to_string();
+            list.retain(|n| *n != name);
+            if value.starts_with('+') && !name.is_empty() {
+                list.push(name);
+            }
+            edited = list.join(",");
+            edited.as_str()
+        } else {
+            value
+        };
         if key == phone_api::keys::READ_GRANTS.0 {
             crate::caller::set_grants(value);
         }

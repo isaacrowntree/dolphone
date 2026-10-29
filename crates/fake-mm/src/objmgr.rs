@@ -38,8 +38,8 @@ impl ObjectManager {
         let mut ifaces = HashMap::new();
         for name in MODEM_INTERFACES {
             let iface = zbus::names::InterfaceName::try_from(*name).expect("interface name");
-            // An interface the modem does not have right now (Voice while the SIM is
-            // locked) is simply not listed, as ModemManager does.
+            // An interface the modem does not have right now (Messaging while the
+            // SIM is locked) is simply not listed, as ModemManager does.
             if let Ok(all) = props.get_all(iface).await {
                 ifaces.insert(name.to_string(), all.into_iter().collect());
             }

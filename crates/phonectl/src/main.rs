@@ -18,9 +18,9 @@ const USAGE: &str = "usage: phonectl [--json] <command>
 phone
   status                      modem, signal, operator
   dial <number>               place a call (waits for confirmation on the device)
-  answer [id] | hangup [id]   the ringing / live call by default
-  swap | merge | mute | unmute | silence
-  dtmf <id> <tones>
+  answer [id] (apps) | hangup [id]   the ringing / live call by default
+  swap | merge | mute | unmute (apps) | silence
+  dtmf <id> <tones> (apps)
   calls | recents [n]
   ussd <code>                 e.g. *100#, or **21*number# to forward calls
                               (Dolphone's dialer only, refused here)
@@ -34,7 +34,7 @@ messages
   mms <to[,to...]> [--file <f>]... [text...]
                               a picture message or a group text (needs mmsd-tng);
                               to several numbers, send works too
-  retry <id>                  send a failed text again (Dolphone's apps only)
+  retry <id> (apps)           send a failed text again
   threads | thread <peer> | read <peer>
   otp [--from <n>] [--wait <s>]
                               wait for a text with a one-time code, print the code
@@ -58,32 +58,38 @@ device (what Dolphone takes this machine to be; see docs/DEVICES.md)
 
 KDE Connect (a laptop's KDE Connect or GSConnect sees the phone's calls and texts)
   kdeconnect on | off         listen on the local network (UDP and TCP 1716)
-  kdeconnect [devices]        laptops connected, and whether paired
+  kdeconnect [devices] (apps) laptops connected, and whether paired
   kdeconnect unpair <id>
 
 modem
   cells [n]                   the networks the modem has been on (needs a read grant)
-  unlock <pin>                the SIM's PIN (Dolphone's apps only)
+  unlock <pin> (apps)         the SIM's PIN
 
 grants (texting without asking each time, approved once on the device)
   grant <numbers> [per-hour] [days]   numbers comma separated, 0491* for a prefix
-  grants | revoke <id> | audit [n]
+  grants (apps) | revoke <id> | audit [n] (apps)
 
 confirmations
   pending | deny <id>         (allowing is done on the device or in the desktop app;
                               confirm <id> works only from Dolphone's own apps)
 
-reading messages and calls needs a grant: phonectl set read_grants phonectl
-(allowed on the device; a grant goes by program name, so it covers every script
-that uses phonectl)
+reading messages and calls needs a grant: phonectl set read_grants +phonectl
+(allowed on the device; -name removes one; a grant goes by program name, so it
+covers every script that uses phonectl)
+
+anything that waits for the device prints "waiting for confirmation (request N)"
+and exits 0; phonectl wait N then exits 0 once allowed and done, 1 if not
+  wait <request> [seconds]   (default 130: requests expire after two minutes)
+
+commands marked (apps) are refused from here: only Dolphone's own apps may
 
 audio and Bluetooth
-  routes | route <speaker|headset|bluetooth> | ringer [ring|vibrate|silent]
-  bt [devices|scan|pair <addr>|connect <addr>|disconnect <addr>|forget <addr>|on|off]
+  routes | route <speaker|headset|bluetooth> (apps) | ringer [ring|vibrate|silent] (setting it: apps)
+  bt [devices] | bt scan|pair|connect|disconnect|forget <addr>|on|off (apps)
 
 settings
   get <key> | set <key> <value>   (set waits for confirmation on the device)
-  block <n> | unblock <n> | blocked | wipe
+  block <n> | unblock <n> (apps) | blocked | wipe
 
 watch                         print every event as it happens
 
@@ -435,6 +441,11 @@ async fn run(conn: &zbus::Connection, w: &[&str], json: bool) -> Result<()> {
         }
         ["confirm", id] => placed("request", ConfirmProxy::new(conn).await?.confirm(id.parse()?).await?),
         ["deny", id] => ConfirmProxy::new(conn).await?.deny(id.parse()?).await?,
+        ["wait", id, rest @ ..] if rest.len() <= 1 => {
+            let id: u32 = id.parse().context("wait <request> [seconds]")?;
+            let secs: u64 = rest.first().map(|s| s.parse()).transpose()?.unwrap_or(130);
+            wait_request(conn, id, secs, json).await?
+        }
         ["routes"] => {
             for r in AudioProxy::new(conn).await?.routes().await? {
                 let mark = if r.active {
@@ -721,6 +732,35 @@ async fn send_and_wait(conn: &zbus::Connection, to: &str, text: &str, secs: u64,
             MessageState::Failed => bail!("sending failed (Messages can send it again)"),
             _ => {}
         }
+    }
+}
+
+/// Wait for a request's outcome: allowed and done (exit 0), or not (exit 1: denied,
+/// expired, or allowed but the action failed).
+async fn wait_request(conn: &zbus::Connection, id: u32, secs: u64, json: bool) -> Result<()> {
+    let confirm = ConfirmProxy::new(conn).await?;
+    let mut resolved = confirm.receive_resolved().await?;
+    // Subscribed first; now it must still be waiting, or its answer has gone by.
+    if !confirm.pending().await?.iter().any(|r| r.id == id) {
+        bail!("request {id} is not waiting (answered already, expired, or never made)");
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        let s = tokio::time::timeout_at(deadline, resolved.next()).await.context("timed out")?.context("bus closed")?;
+        let a = s.args()?;
+        if a.id != id {
+            continue;
+        }
+        if json {
+            out(&serde_json::json!({"request": id, "done": a.confirmed}))?;
+        }
+        if !a.confirmed {
+            bail!("request {id}: not done (denied, expired, or it failed)");
+        }
+        if !json {
+            println!("request {id} done");
+        }
+        return Ok(());
     }
 }
 

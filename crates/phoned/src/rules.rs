@@ -28,7 +28,10 @@ use std::time::{Duration, Instant};
 use phone_core::number;
 use serde::Deserialize;
 
+/// Unknown fields are an error, not ignored: a misspelled "contains" would
+/// otherwise vanish and leave a rule that fires on every text from that sender.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Rule {
     pub from: String,
     #[serde(default)]
@@ -84,7 +87,7 @@ pub fn run(rule: &Rule, from: &str, body: &str, at: i64) -> Option<String> {
         .args(&rule.run[1..])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| tracing::warn!("rule {:?}: {e}", rule.run[0]))
         .ok()?;
@@ -92,9 +95,15 @@ pub fn run(rule: &Rule, from: &str, body: &str, at: i64) -> Option<String> {
         let _ = stdin.write_all(input.as_bytes());
     }
     let mut stdout = child.stdout.take()?;
+    let mut stderr = child.stderr.take()?;
     let reader = std::thread::spawn(move || {
         let mut s = String::new();
         let _ = stdout.read_to_string(&mut s);
+        s
+    });
+    let errors = std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stderr.read_to_string(&mut s);
         s
     });
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -102,7 +111,13 @@ pub fn run(rule: &Rule, from: &str, body: &str, at: i64) -> Option<String> {
         match child.try_wait() {
             Ok(Some(status)) => {
                 let out = reader.join().ok()?;
+                let err = errors.join().unwrap_or_default();
                 tracing::info!(command = %rule.run[0], ok = status.success(), "rule ran");
+                if !status.success() && !err.trim().is_empty() {
+                    // What the owner's own command said about failing, for them.
+                    let said: String = err.trim().chars().take(300).collect();
+                    tracing::warn!(command = %rule.run[0], said, "rule failed");
+                }
                 return status.success().then(|| out.trim().chars().take(600).collect());
             }
             Ok(None) if Instant::now() >= deadline => {

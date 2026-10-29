@@ -256,6 +256,10 @@ echo "SIM PIN"
 "$P" fake lock on
 out=$(until_has "SIM locked" "$P" status)
 expect "a locked SIM is reported" "$out" "SIM locked"
+out=$("$P" dial 000)
+expect "an emergency call goes out with the SIM locked" "$out" "call "
+"$P" hangup >/dev/null 2>&1 || true
+sleep 0.5
 out=$("$P" unlock 1111 2>&1 || true)
 expect "a wrong PIN says how many tries are left" "$out" "2 tries left"
 out=$("$P" unlock 1234)

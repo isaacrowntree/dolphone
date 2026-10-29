@@ -794,10 +794,10 @@ impl Cbm {
     }
 }
 
-/// The interfaces a locked SIM hides.
+/// The interfaces a locked SIM hides. Not Voice: ModemManager keeps it while the
+/// SIM is locked or missing so that emergency calls work (since 1.12, MR 176).
 pub async fn lock_interfaces(conn: &Connection) {
     let s = conn.object_server();
-    let _ = s.remove::<Voice, _>(MODEM).await;
     let _ = s.remove::<Messaging, _>(MODEM).await;
     let _ = s.remove::<Ussd, _>(MODEM).await;
     let _ = s.remove::<CellBroadcast, _>(MODEM).await;
