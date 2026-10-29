@@ -8,7 +8,7 @@ mod model;
 mod view;
 
 use std::cell::RefCell;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use flipctl_app::{Key, StatusSource};
 use model::{Action, Buzz, Input, Model, Top};
@@ -26,12 +26,19 @@ struct App {
     ringer: String,
     #[cfg(feature = "device")]
     motor: Option<flipctl_app::Haptic>,
-    /// A vibration pattern being played: what is left of it, and when the next
-    /// step is due.
-    buzzing: Vec<u16>,
-    buzz_next: Instant,
+    /// A vibration pattern being played, and the timer that plays its next pulse.
+    /// The timer runs only while a pattern does.
+    player: phone_bus::haptics::Player,
+    haptics: slint::Timer,
     last_ring_buzz: Instant,
-    contacts_loaded: Instant,
+    /// When the contacts directory was last looked at, and how it looked.
+    contacts_checked: Instant,
+    contacts_stamp: Option<(SystemTime, usize)>,
+    /// The clock second and minute the screen was last drawn at, so the tick
+    /// draws only when what it shows has moved on.
+    drawn_at: i64,
+    /// Whether the window had the keyboard at the last tick.
+    focused: bool,
     /// The first call log and conversations have arrived (Today is chosen once
     /// both are in), or None once the first screen is chosen.
     first_load: Option<(bool, bool)>,
@@ -65,10 +72,13 @@ fn main() -> Result<(), slint::PlatformError> {
         ringer: "ring".into(),
         #[cfg(feature = "device")]
         motor: flipctl_app::Haptic::open().ok(),
-        buzzing: Vec::new(),
-        buzz_next: Instant::now(),
+        player: Default::default(),
+        haptics: slint::Timer::default(),
         last_ring_buzz: Instant::now(),
-        contacts_loaded: Instant::now(),
+        contacts_checked: Instant::now(),
+        contacts_stamp: phone_bus::files::stamp(&phone_core::store::contacts_dir()),
+        drawn_at: 0,
+        focused: true,
         first_load: Some((false, false)),
     };
     APP.with(|a| *a.borrow_mut() = Some(app));
@@ -81,21 +91,34 @@ fn main() -> Result<(), slint::PlatformError> {
     flipctl_app::apply_status!(&ui, PanelStatus, status.current());
     #[cfg(feature = "device")]
     let mut pad = Swipe::new();
-    // Vibration patterns step on their own, finer timer.
-    let haptics = slint::Timer::default();
-    haptics.start(slint::TimerMode::Repeated, Duration::from_millis(20), || with_app(App::step_buzz));
-    let tick = slint::Timer::default();
-    tick.start(slint::TimerMode::Repeated, Duration::from_millis(250), move || {
+    let tick = std::rc::Rc::new(slint::Timer::default());
+    let timer = std::rc::Rc::downgrade(&tick);
+    tick.start(slint::TimerMode::Repeated, BUSY_TICK, move || {
         with_app(|app| {
             app.frame = app.frame.wrapping_add(1);
             app.tick();
-            if let Some(now) = status.poll() {
-                flipctl_app::apply_status!(&app.ui, PanelStatus, now);
+            if app.focused {
+                if let Some(now) = status.poll() {
+                    flipctl_app::apply_status!(&app.ui, PanelStatus, now);
+                }
             }
+            // The pad is read straight from evdev, so it reports strokes meant for
+            // whichever app is in front: only the one with the keyboard acts on
+            // them, and the rest are thrown away rather than saved for later.
             #[cfg(feature = "device")]
-            for input in pad.poll(app.model.keypad_showing()) {
-                app.input(input, true);
-                app.input(input, false);
+            if app.focused {
+                for input in pad.poll(app.model.keypad_showing()) {
+                    app.input(input, true);
+                    app.input(input, false);
+                }
+            } else {
+                pad.discard();
+            }
+            // Four times a second while it is looked at or a call needs it (the
+            // ring, the pad), once a second otherwise.
+            let want = if app.focused || app.model.top() != Top::Browse { BUSY_TICK } else { IDLE_TICK };
+            if let Some(t) = timer.upgrade().filter(|t| t.interval() != want) {
+                t.set_interval(want);
             }
         });
     });
@@ -119,7 +142,10 @@ fn main() -> Result<(), slint::PlatformError> {
                         Key::Edit => Input::Edit,
                         Key::Run => Input::Run,
                         Key::Ptt => Input::Ptt,
-                        // Back leaves the app (flipctl's), Power is the system's.
+                        // Back leaves the app (flipctl keeps it). The middle soft
+                        // key (silkscreened "power", KEY_C) does reach us, but its
+                        // slot is left empty on purpose: a press meant for the
+                        // phone's power is never taken as Answer or End.
                         Key::Back | Key::Power => return,
                     }
                 }
@@ -164,10 +190,20 @@ impl App {
     }
 
     fn tick(&mut self) {
-        // The book is files anyone may drop in; look again now and then.
-        if self.contacts_loaded.elapsed() > Duration::from_secs(20) {
-            self.model.book = phone_core::contacts::Book::load(&phone_core::store::contacts_dir(), &self.model.region);
-            self.contacts_loaded = Instant::now();
+        let focused = window_focused(&self.ui);
+        let refocused = focused && !self.focused;
+        self.focused = focused;
+        // The book is files anyone may drop in; phoned says when it changes them,
+        // and for the rest a look at the directory (a stat, not a parse) now and
+        // then says whether there is anything to read again.
+        if self.contacts_checked.elapsed() > Duration::from_secs(20) {
+            self.contacts_checked = Instant::now();
+            let dir = phone_core::store::contacts_dir();
+            let stamp = phone_bus::files::stamp(&dir);
+            if stamp != self.contacts_stamp {
+                self.contacts_stamp = stamp;
+                self.model.book = phone_core::contacts::Book::load(&dir, &self.model.region);
+            }
         }
         // While a call rings, the motor rings too (unless the ringer is silent).
         if matches!(self.model.top(), Top::Incoming(_))
@@ -178,7 +214,18 @@ impl App {
             self.last_ring_buzz = Instant::now();
             self.buzz_ms(500);
         }
-        self.draw();
+        // Keys and phoned's events draw as they come; the tick only draws what
+        // moves by itself: the ring's frame, a call's timer, and the dates in the
+        // lists once a minute. Nothing at all while another app is in front.
+        let now = phone_core::now();
+        let moving = match self.model.top() {
+            Top::Incoming(_) => true,
+            Top::InCall => now != self.drawn_at,
+            _ => now / 60 != self.drawn_at / 60,
+        };
+        if refocused || (focused && moving) {
+            self.draw();
+        }
     }
 
     fn event(&mut self, e: Event) {
@@ -238,9 +285,9 @@ impl App {
             }
             Event::Alert(a) => actions = self.model.alert_received(a),
             Event::ContactsChanged | Event::ContactsImported { .. } => {
-                self.model.book =
-                    phone_core::contacts::Book::load(&phone_core::store::contacts_dir(), &self.model.region);
-                self.contacts_loaded = Instant::now();
+                let dir = phone_core::store::contacts_dir();
+                self.contacts_stamp = phone_bus::files::stamp(&dir);
+                self.model.book = phone_core::contacts::Book::load(&dir, &self.model.region);
             }
             Event::Unlock(left) => self.model.unlocked(left),
             Event::Ussd(text) => self.model.ussd_reply(text),
@@ -317,23 +364,23 @@ impl App {
     /// Play a pattern. Key ticks always play; anything announcing an event obeys
     /// a silent ringer, except an emergency alert.
     fn buzz(&mut self, b: Buzz) {
-        let quiet = self.ringer == "silent" && !matches!(b, Buzz::Tick | Buzz::Thump | Buzz::Alert);
+        let quiet = self.ringer == "silent" && !matches!(b, Buzz::Tick | Buzz::Thump | Buzz::Refused | Buzz::Alert);
         if quiet {
             return;
         }
-        self.buzzing = b.pattern().to_vec();
-        self.buzz_next = Instant::now();
+        self.player.start(b.pattern());
+        self.haptics.stop();
         self.step_buzz();
     }
 
+    /// Play the pattern's next pulse, and set the timer for the one after, if
+    /// there is one.
     fn step_buzz(&mut self) {
-        if self.buzzing.is_empty() || Instant::now() < self.buzz_next {
-            return;
-        }
-        let on = self.buzzing.remove(0);
-        let off = if self.buzzing.is_empty() { 0 } else { self.buzzing.remove(0) };
+        let Some((on, wait)) = self.player.pulse() else { return };
         self.buzz_ms(on);
-        self.buzz_next = Instant::now() + Duration::from_millis(u64::from(on) + u64::from(off));
+        if let Some(wait) = wait {
+            self.haptics.start(slint::TimerMode::SingleShot, wait, || with_app(App::step_buzz));
+        }
     }
 
     fn buzz_ms(&mut self, ms: u16) {
@@ -346,8 +393,31 @@ impl App {
     }
 
     fn draw(&mut self) {
-        apply(&self.ui, &view::view(&self.model, phone_core::now(), self.frame), self.frame);
+        let now = phone_core::now();
+        self.drawn_at = now;
+        apply(&self.ui, &view::view(&self.model, now, self.frame), self.frame);
     }
+}
+
+/// The tick while the Dialer is looked at or a call is up, and while it is not.
+const BUSY_TICK: Duration = Duration::from_millis(250);
+const IDLE_TICK: Duration = Duration::from_secs(1);
+
+/// Whether this window has the keyboard, which is how flipctl marks the app in
+/// front. Slint's public API does not say; the window's own state does, and the
+/// lock file pins the Slint it belongs to. A window never once told it is active
+/// (a compositor that does not say) counts as in front, so nothing that used to
+/// work goes quiet.
+fn window_focused(ui: &AppWindow) -> bool {
+    use slint::ComponentHandle;
+    thread_local! {
+        static EVER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    let active = slint::private_unstable_api::re_exports::WindowInner::from_pub(ui.window()).active();
+    EVER.with(|ever| {
+        ever.set(ever.get() || active);
+        active || !ever.get()
+    })
 }
 
 fn apply(ui: &AppWindow, v: &view::View, frame: u32) {
@@ -419,14 +489,12 @@ fn apply(ui: &AppWindow, v: &view::View, frame: u32) {
 
 /// Hand a number to Messages: leave it where Messages looks, and bring Messages up.
 fn open_messages(peer: &str) {
-    let dir = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("dolphone");
-    let _ = std::fs::create_dir_all(&dir);
-    let _ = std::fs::write(dir.join("compose"), peer);
+    let _ = std::fs::write(phone_bus::files::runtime_dir().join("compose"), peer);
     if let Some(bundle) = find_bundle("dolphone-messages") {
-        let _ = std::process::Command::new("flipctl").arg("open").arg(bundle).spawn();
+        if let Ok(mut child) = std::process::Command::new("flipctl").arg("open").arg(bundle).spawn() {
+            // Waited for off the UI thread, so it does not linger as a zombie.
+            std::thread::spawn(move || child.wait());
+        }
     }
 }
 
@@ -463,6 +531,16 @@ impl Swipe {
 
     fn new() -> Self {
         Self { pad: flipctl_app::TouchpadSource::open().ok(), origin: None, moved: false, map: Default::default() }
+    }
+
+    /// Throw away what the pad reported while another app was in front, and
+    /// forget any stroke half made.
+    fn discard(&mut self) {
+        if let Some(pad) = self.pad.as_mut() {
+            while pad.poll().is_some() {}
+        }
+        self.origin = None;
+        self.moved = false;
     }
 
     fn poll(&mut self, keypad: bool) -> Vec<Input> {
@@ -725,8 +803,8 @@ mod tests {
     fn incoming_keys_and_fresh_guard() {
         let mut m = model();
         m.set_calls(vec![call(7, "+61491570156", CallState::RingingIn, 0)]);
-        // A press the instant it appears is dropped.
-        assert!(m.key(Input::Run, true, Instant::now()).is_empty());
+        // A press the instant it appears is dropped, and says so with a stutter.
+        assert_eq!(m.key(Input::Run, true, Instant::now()), vec![Action::Buzz(Buzz::Refused)]);
         std::thread::sleep(model::FRESH);
         assert_eq!(m.key(Input::Run, true, Instant::now()), vec![Action::Answer(7)]);
         assert_eq!(m.key(Input::Escape, true, Instant::now()), vec![Action::Hangup(7)]);
@@ -739,7 +817,11 @@ mod tests {
         m.set_calls(vec![call(7, "+61491570156", CallState::RingingIn, 0)]);
         m.call_changed(call(7, "+61491570156", CallState::Active, 0));
         std::thread::sleep(model::FRESH);
-        assert!(m.key(Input::Run, true, Instant::now()).is_empty(), "End right after answering is ignored");
+        assert_eq!(
+            m.key(Input::Run, true, Instant::now()),
+            vec![Action::Buzz(Buzz::Refused)],
+            "End right after answering is ignored, and felt to be"
+        );
         assert_eq!(m.key(Input::Run, true, Instant::now() + model::END_LOCKOUT), vec![Action::Hangup(7)]);
     }
 
@@ -922,7 +1004,7 @@ mod tests {
         m.set_calls(vec![call(3, "+61491570156", CallState::RingingIn, 0)]);
         std::thread::sleep(model::FRESH);
         let t = Instant::now();
-        assert!(tap(&mut m, Input::Escape, t).is_empty(), "a press does not decline");
+        assert_eq!(tap(&mut m, Input::Escape, t), vec![Action::Buzz(Buzz::Refused)], "a press does not decline");
         assert_eq!(m.hint, Some("Hold Decline to decline"));
         assert_eq!(hold(&mut m, Input::Escape, t), vec![Action::Hangup(3)]);
     }
@@ -947,10 +1029,11 @@ mod tests {
         assert_eq!(m.call_removed(2), vec![Action::Buzz(Buzz::Thump)], "ending it here");
         assert_eq!(m.missed_changed(1), vec![Action::Buzz(Buzz::Missed)]);
         assert!(m.missed_changed(0).is_empty());
-        let patterns: Vec<_> = [Buzz::Text, Buzz::Missed, Buzz::Waiting, Buzz::Dropped, Buzz::Failed, Buzz::Alert]
-            .iter()
-            .map(|b| b.pattern())
-            .collect();
+        let patterns: Vec<_> =
+            [Buzz::Text, Buzz::Missed, Buzz::Waiting, Buzz::Dropped, Buzz::Failed, Buzz::Alert, Buzz::Refused]
+                .iter()
+                .map(|b| b.pattern())
+                .collect();
         for (i, a) in patterns.iter().enumerate() {
             assert!(patterns[i + 1..].iter().all(|b| a != b), "every pattern is its own");
         }
@@ -1037,6 +1120,10 @@ mod tests {
             .contains(&Action::Dial("+61491570157".into())));
         m.setting("long_press_ms", "50".into());
         assert_eq!(m.hold, Duration::from_millis(300), "kept within reason");
+        m.setting("long_press_ms", "3000".into());
+        assert_eq!(m.hold, Duration::from_millis(3000), "three seconds, for slow hands");
+        m.setting("long_press_ms", "9000".into());
+        assert_eq!(m.hold, Duration::from_millis(3000));
     }
 
     // Live: the real app against a running phoned and fake-mm (scripts/ui-e2e.sh
@@ -1066,10 +1153,13 @@ mod tests {
                 ringer: "ring".into(),
                 #[cfg(feature = "device")]
                 motor: None,
-                buzzing: Vec::new(),
-                buzz_next: Instant::now(),
+                player: Default::default(),
+                haptics: slint::Timer::default(),
                 last_ring_buzz: Instant::now(),
-                contacts_loaded: Instant::now(),
+                contacts_checked: Instant::now(),
+                contacts_stamp: None,
+                drawn_at: 0,
+                focused: true,
                 // The live test starts on the keypad.
                 first_load: None,
             };

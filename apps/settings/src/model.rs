@@ -119,8 +119,9 @@ pub const SIP: [SipRow; 6] =
     [SipRow::Enabled, SipRow::Account, SipRow::Password, SipRow::Proxy, SipRow::Use, SipRow::Status];
 
 pub const RINGER: [&str; 3] = ["ring", "vibrate", "silent"];
-/// How long a hold is, in milliseconds.
-pub const HOLD_TIMES: [&str; 5] = ["400", "600", "800", "1000", "1500"];
+/// How long a hold is, in milliseconds: up to three seconds, for hands that press
+/// slowly or shake.
+pub const HOLD_TIMES: [&str; 7] = ["400", "600", "800", "1000", "1500", "2000", "3000"];
 pub const REGIONS: [&str; 12] = ["AU", "NZ", "GB", "IE", "US", "CA", "DE", "FR", "NL", "IN", "SG", "JP"];
 
 /// A main-page row: what it is, so keys and drawing agree.

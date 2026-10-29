@@ -85,20 +85,25 @@ pub enum Buzz {
     Failed,
     /// An emergency alert: long, long, long.
     Alert,
+    /// A press ignored on purpose: a quick stutter.
+    Refused,
 }
 
 impl Buzz {
-    /// On and off times in milliseconds, on first.
+    /// On and off times in milliseconds, on first: phone-bus's, so Messages
+    /// buzzes for a text exactly as the Dialer does.
     pub fn pattern(self) -> &'static [u16] {
+        use phone_bus::haptics as h;
         match self {
-            Self::Tick => &[10],
-            Self::Thump => &[80],
-            Self::Text => &[60, 120, 60],
-            Self::Missed => &[60, 100, 60, 100, 60],
-            Self::Waiting => &[300, 200, 300],
-            Self::Dropped => &[600],
-            Self::Failed => &[60, 100, 60, 100, 400],
-            Self::Alert => &[900, 200, 900, 200, 900],
+            Self::Tick => h::TICK,
+            Self::Thump => h::THUMP,
+            Self::Text => h::TEXT,
+            Self::Missed => h::MISSED,
+            Self::Waiting => h::WAITING,
+            Self::Dropped => h::DROPPED,
+            Self::Failed => h::FAILED,
+            Self::Alert => h::ALERT,
+            Self::Refused => h::REFUSED,
         }
     }
 }
@@ -142,6 +147,9 @@ pub const KEYS: [[(char, &str); 3]; 4] = [
 
 /// A long press is at least this, unless the owner chose otherwise.
 pub const HOLD: Duration = Duration::from_millis(600);
+/// The longest hold the owner may choose: three seconds, for hands that press
+/// slowly or shake.
+pub const MAX_HOLD_MS: u64 = 3000;
 
 /// One line of the Today screen.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -489,7 +497,7 @@ impl Model {
             "steady_decline" => self.steady_decline = value == "true",
             "long_press_ms" => {
                 if let Ok(ms) = value.parse::<u64>() {
-                    self.hold = Duration::from_millis(ms.clamp(300, 1500));
+                    self.hold = Duration::from_millis(ms.clamp(300, MAX_HOLD_MS));
                 }
             }
             k if k.starts_with("speed_") => {
@@ -536,7 +544,8 @@ impl Model {
             return self.release(input, now);
         }
         if self.top_since.1.elapsed() < FRESH && !matches!(self.top(), Top::Browse) {
-            return Vec::new();
+            // Felt, so a press that did nothing is not mistaken for one that did.
+            return vec![Action::Buzz(Buzz::Refused)];
         }
         self.held = Some((input, now));
         if self.notice.take().is_some() {
@@ -572,7 +581,7 @@ impl Model {
                     return vec![Action::Hangup(c.id)];
                 }
                 self.hint = Some("Hold Decline to decline");
-                return Vec::new();
+                return vec![Action::Buzz(Buzz::Refused)];
             }
             Top::InCall if input == Input::Ok && !self.dtmf_open && self.other().is_some() => {
                 return vec![if long { Action::Merge } else { Action::Swap }];
@@ -730,7 +739,7 @@ impl Model {
             Input::Run => {
                 let locked = self.answered_at.is_some_and(|t| now.duration_since(t) < END_LOCKOUT);
                 if locked {
-                    Vec::new()
+                    vec![Action::Buzz(Buzz::Refused)]
                 } else {
                     self.ending.push(cur.id);
                     vec![Action::Hangup(cur.id)]

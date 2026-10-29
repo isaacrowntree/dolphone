@@ -3,7 +3,7 @@
 mod model;
 
 use std::cell::RefCell;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use flipctl_app::keyboard::{Exit, TextInput};
 use flipctl_app::{font, Key, StatusSource};
@@ -23,6 +23,10 @@ struct App {
     frame: u32,
     /// The keyboard, while a setting is being typed.
     kb: Option<(Field, TextInput)>,
+    /// Whether the window had the keyboard at the last tick, and when the
+    /// Bluetooth list was last asked for.
+    focused: bool,
+    bt_asked: Instant,
 }
 
 thread_local! {
@@ -42,70 +46,127 @@ fn main() -> Result<(), slint::PlatformError> {
     let bus = Bus::start(|e| {
         let _ = slint::invoke_from_event_loop(move || with_app(|app| app.event(e)));
     });
-    APP.with(|a| {
-        *a.borrow_mut() = Some(App { ui: ui.clone_strong(), model: Model::default(), bus, frame: 0, kb: None })
-    });
+    APP.with(|a| *a.borrow_mut() = Some(App::new(ui.clone_strong(), bus)));
     with_app(|app| {
         app.refresh(Page::Main);
         app.draw();
     });
     let mut status = StatusSource::new(Duration::from_secs(2));
     flipctl_app::apply_status!(&ui, PanelStatus, status.current());
-    let tick = slint::Timer::default();
-    tick.start(slint::TimerMode::Repeated, Duration::from_millis(200), move || {
+    let tick = std::rc::Rc::new(slint::Timer::default());
+    let timer = std::rc::Rc::downgrade(&tick);
+    tick.start(slint::TimerMode::Repeated, KEYBOARD_TICK, move || {
         with_app(|app| {
             app.frame = app.frame.wrapping_add(1);
+            let focused = window_focused(&app.ui);
+            let refocused = focused && !app.focused;
+            app.focused = focused;
+            if !focused {
+                // In the background: nothing to show and nobody to show it to.
+                if let Some(t) = timer.upgrade().filter(|t| t.interval() != IDLE_TICK) {
+                    t.set_interval(IDLE_TICK);
+                }
+                return;
+            }
             if let Some(now) = status.poll() {
                 flipctl_app::apply_status!(&app.ui, PanelStatus, now);
             }
             // A Bluetooth scan fills the list as it goes.
-            if app.model.page == Page::Bluetooth && app.frame % 10 == 0 {
+            if app.model.page == Page::Bluetooth && app.bt_asked.elapsed() >= Duration::from_secs(2) {
+                app.bt_asked = Instant::now();
                 app.refresh(Page::Bluetooth);
             }
-            app.draw();
+            // Keys and phoned's answers draw as they come; the tick draws only the
+            // keyboard, whose caret blinks and whose keys animate, five times a
+            // second, and otherwise wakes once a second for the status bar.
+            if app.kb.is_some() || refocused {
+                app.draw();
+            }
+            let want = if app.kb.is_some() { KEYBOARD_TICK } else { IDLE_TICK };
+            if let Some(t) = timer.upgrade().filter(|t| t.interval() != want) {
+                t.set_interval(want);
+            }
         });
     });
+    // A key can open the keyboard, which wants the quick tick straight away.
+    let pace = std::rc::Rc::downgrade(&tick);
     ui.on_keyed(move |text, down| {
+        let mut want = false;
         with_app(|app| {
-            if app.kb.is_some() {
-                app.keyboard(Key::from_slint(text.as_str()), text.as_str(), down);
-                return;
-            }
-            let Some(k) = Key::from_slint(text.as_str()) else { return };
-            app.ui.set_pressed_slot(match (down, k.soft_slot()) {
-                (true, Some(slot)) => slot as i32,
-                _ => -1,
-            });
-            app.ui.set_arrow_pressed(match (down, k) {
-                (true, Key::Left) => 1,
-                (true, Key::Right) => 2,
-                _ => 0,
-            });
-            if !down {
-                app.draw();
-                return;
-            }
-            let input = match k {
-                Key::Up => Input::Up,
-                Key::Down => Input::Down,
-                Key::Left => Input::Left,
-                Key::Right => Input::Right,
-                Key::Ok => Input::Ok,
-                Key::Escape => Input::Escape,
-                Key::View => Input::View,
-                Key::Edit => Input::Edit,
-                Key::Run => Input::Run,
-                _ => return,
-            };
-            let actions = app.model.key(input);
-            app.act(actions);
-            app.draw();
+            app.key(text.as_str(), down);
+            want = app.kb.is_some();
         });
+        if let Some(t) = pace.upgrade().filter(|t| want && t.interval() != KEYBOARD_TICK) {
+            t.set_interval(KEYBOARD_TICK);
+        }
     });
     ui.run()
 }
 
+/// The tick while the keyboard is up (its caret blinks on a 1 s cycle), and
+/// otherwise.
+const KEYBOARD_TICK: Duration = Duration::from_millis(200);
+const IDLE_TICK: Duration = Duration::from_secs(1);
+
+/// Whether this window has the keyboard, which is how flipctl marks the app in
+/// front. Slint's public API does not say; the window's own state does, and the
+/// lock file pins the Slint it belongs to. A window never once told it is active
+/// (a compositor that does not say) counts as in front, so nothing that used to
+/// work goes quiet.
+fn window_focused(ui: &AppWindow) -> bool {
+    use slint::ComponentHandle;
+    thread_local! {
+        static EVER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    let active = slint::private_unstable_api::re_exports::WindowInner::from_pub(ui.window()).active();
+    EVER.with(|ever| {
+        ever.set(ever.get() || active);
+        active || !ever.get()
+    })
+}
+
 impl App {
+    fn new(ui: AppWindow, bus: Bus) -> Self {
+        Self { ui, model: Model::default(), bus, frame: 0, kb: None, focused: true, bt_asked: Instant::now() }
+    }
+
+    /// A key from the panel (or a real keyboard, which types into the keyboard).
+    fn key(&mut self, text: &str, down: bool) {
+        if self.kb.is_some() {
+            self.keyboard(Key::from_slint(text), text, down);
+            return;
+        }
+        let Some(k) = Key::from_slint(text) else { return };
+        self.ui.set_pressed_slot(match (down, k.soft_slot()) {
+            (true, Some(slot)) => slot as i32,
+            _ => -1,
+        });
+        self.ui.set_arrow_pressed(match (down, k) {
+            (true, Key::Left) => 1,
+            (true, Key::Right) => 2,
+            _ => 0,
+        });
+        if !down {
+            self.draw();
+            return;
+        }
+        let input = match k {
+            Key::Up => Input::Up,
+            Key::Down => Input::Down,
+            Key::Left => Input::Left,
+            Key::Right => Input::Right,
+            Key::Ok => Input::Ok,
+            Key::Escape => Input::Escape,
+            Key::View => Input::View,
+            Key::Edit => Input::Edit,
+            Key::Run => Input::Run,
+            _ => return,
+        };
+        let actions = self.model.key(input);
+        self.act(actions);
+        self.draw();
+    }
+
     fn keyboard(&mut self, key: Option<Key>, text: &str, down: bool) {
         let Some((what, field)) = self.kb.as_mut() else { return };
         let what = *what;
@@ -938,7 +999,7 @@ mod tests {
             let bus = Bus::start(move |e| {
                 let _ = tx.send(e);
             });
-            let app = App { ui: AppWindow::new().expect("window"), model: Model::default(), bus, frame: 0, kb: None };
+            let app = App::new(AppWindow::new().expect("window"), bus);
             let mut l = Self { app, rx };
             // Connecting loads the settings; let all of it land before any key,
             // as a person would see the screen fill before pressing.
