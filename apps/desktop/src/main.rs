@@ -453,7 +453,11 @@ mod tests {
         // A one-time code arrives: the conversation offers to copy it.
         phonectl(&["fake", "sms", "+61491570156", "Your Example Bank code is 482913. Never share it."]);
         ui.invoke_navigate(1);
-        pump(&rx, "the thread is listed", |a| !a.threads.is_empty());
+        // This text's thread, on top: earlier live tests left threads of their own,
+        // and the first one may still be one of those until this text arrives.
+        pump(&rx, "the thread is listed", |a| {
+            a.threads.first().is_some_and(|t| t.peer == "+61491570156" && t.last_body.contains("482913"))
+        });
         ui.invoke_open_thread(0);
         pump(&rx, "the code is found", |a| {
             use slint::Model;

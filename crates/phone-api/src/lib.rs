@@ -14,8 +14,21 @@
 //! | `Confirm` | actions waiting for a press on the device |
 //! | `Audio` | where call audio goes, the ringer |
 //! | `Bluetooth` | pairing and connecting headsets and speakers |
-//! | `Modem` | network status and USSD |
-//! | `Settings` | blocked numbers, preferences, wiping |
+//! | `Modem` | network status, USSD and service codes, the modem's setup |
+//! | `Settings` | blocked numbers, preferences, grants, the audit log, wiping |
+//! | `Contacts` | reading and changing contacts, copying a phone's phonebook |
+//!
+//! What a caller may do depends on who it is: Dolphone's own apps may do
+//! everything; another program may ask to dial, text, change a setting or a
+//! contact (each waits for a press on the device; see [`Request`]), may hang up and
+//! read the modem's status, and may read messages and the call log only with a read
+//! grant (`read_grants`). Refusals come back as the standard
+//! `org.freedesktop.DBus.Error.AccessDenied`; bad arguments as `InvalidArgs`; rate
+//! limits as `LimitsExceeded`; what the modem or network refused as `Failed` or
+//! `NotSupported`, with the reason in the message.
+//!
+//! Signals carry no message text, ever: [`MessageInfo::body`] is empty in
+//! `MessageAdded`, and a reader fetches the conversation to read it.
 //!
 //! Enums travel as `u8` and convert to and from [`phone_core::model`]'s types on
 //! either side (this crate keeps no dependency on phone-core so a script author can
@@ -37,13 +50,19 @@ pub mod iface {
     pub const SETTINGS: &str = "io.github.isaacrowntree.Dolphone1.Settings";
 }
 
-/// Error names, as `phoned` raises them.
+/// The error names `phoned` replies with: the standard D-Bus ones, with the reason
+/// in the message.
 pub mod error {
-    pub const RATE_LIMITED: &str = "io.github.isaacrowntree.Dolphone1.Error.RateLimited";
-    pub const NO_MODEM: &str = "io.github.isaacrowntree.Dolphone1.Error.NoModem";
-    pub const NO_SUCH_CALL: &str = "io.github.isaacrowntree.Dolphone1.Error.NoSuchCall";
-    pub const INVALID: &str = "io.github.isaacrowntree.Dolphone1.Error.Invalid";
-    pub const DENIED: &str = "io.github.isaacrowntree.Dolphone1.Error.Denied";
+    /// Not allowed for this caller (only Dolphone's own apps, or a read grant).
+    pub const DENIED: &str = "org.freedesktop.DBus.Error.AccessDenied";
+    /// A bad number, an unknown setting, no such call or request.
+    pub const INVALID: &str = "org.freedesktop.DBus.Error.InvalidArgs";
+    /// Too many texts or calls this hour, or over a grant's limit.
+    pub const RATE_LIMITED: &str = "org.freedesktop.DBus.Error.LimitsExceeded";
+    /// Something this modem, network or setup cannot do.
+    pub const NOT_SUPPORTED: &str = "org.freedesktop.DBus.Error.NotSupported";
+    /// It was tried and failed (no modem, the network refused).
+    pub const FAILED: &str = "org.freedesktop.DBus.Error.Failed";
 }
 
 /// A live call.
@@ -199,15 +218,20 @@ pub struct Placed {
 #[zbus(crate = "zbus::wire")]
 pub struct Request {
     pub id: u32,
-    /// "call", "sms" or "ussd".
+    /// What it would do: "call", "sms" (a text or an MMS), "contact", "grant",
+    /// "setting", "modem" (the modem's setup), "kdeconnect" (pairing a laptop) or
+    /// "wipe".
     pub kind: String,
+    /// What it is done to: the number (comma separated for a group), the setting's
+    /// key, the contact change in words, the laptop.
     pub target: String,
-    /// The text, for an SMS.
+    /// The text for a call or text ("" to programs other than Dolphone's apps);
+    /// the new value for a setting; "N/h|days" for a grant (see [`grant_terms`]).
     pub body: String,
     /// Who asked: the program's name as the daemon saw it.
     pub requester: String,
-    /// Why it needs confirming: "external", "premium", "short", "international",
-    /// "emergency".
+    /// Why it needs confirming: "external" (another program asked), "premium",
+    /// "short", "international", "emergency", or the kind itself for the rest.
     pub reason: String,
 }
 
@@ -470,12 +494,13 @@ pub trait Settings {
     /// Delete every message, call and setting. Asks for confirmation on the device
     /// unless it came from Dolphone's own Settings app.
     fn wipe(&self) -> zbus::Result<Placed>;
+    /// Change a setting from another program: it waits for a press on the device
+    /// (Dolphone's own apps get it at once). Not the SIP password. For
+    /// `read_grants`, "+name" adds one program and "-name" removes one.
+    fn request_setting(&self, key: &str, value: &str) -> zbus::Result<Placed>;
     /// Ask for a standing grant to text `numbers` (comma separated, `*` suffix for a
     /// prefix) up to `per_hour` times for `days` days (0 for no end). Waits for the
     /// owner's confirmation on the device, like any outside request.
-    /// Change a setting from another program: it waits for a press on the device
-    /// (Dolphone's own apps get it at once). Not the SIP password.
-    fn request_setting(&self, key: &str, value: &str) -> zbus::Result<Placed>;
     fn request_grant(&self, numbers: &str, per_hour: u32, days: u32) -> zbus::Result<Placed>;
     fn grants(&self) -> zbus::Result<Vec<Grant>>;
     fn revoke_grant(&self, id: i64) -> zbus::Result<()>;

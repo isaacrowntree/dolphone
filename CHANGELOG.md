@@ -62,9 +62,48 @@ The roadmap from the reviews, done:
   off. A program asking to change a setting (`phonectl set`, `phonectl device use`)
   waits for a press on the device, as texts and calls do; Delete phone data removes
   contacts too. The panel apps no longer link the database at all.
-- Tests: the end-to-end suite grew to 212 checks, with 11 more against the real KDE
+- Tests: the end-to-end suite grew to 224 checks, with 10 more against the real KDE
   Connect daemon; the four apps are driven live against phoned
-  (`scripts/ui-e2e.sh`); CI runs in Debian 13 containers.
+  (`scripts/ui-e2e.sh`); CI runs in Debian 13 containers; the suite also passes
+  with every CPU core busy.
+
+Fixed after twenty more reviews (security from a program and from the network,
+robustness, concurrency, data, packaging, the modem, audio, emergency calling,
+telephony standards, numbers abroad, accessibility, the scripting API, the tests,
+onboarding, FlipCTL's conventions, licensing, battery, failure recovery, privacy):
+
+- Security: an AppImage front end must be a real FUSE mount; a SIP peer is a
+  contact's number only from the account's provider, and SIP texts run no rules;
+  Bluetooth pairing accepts only the device picked; KDE Connect binds approval to
+  the asking certificate, caps lines, connections and requests, and times out
+  handshakes; the gateway refuses non-loopback addresses without
+  `--insecure-listen`, caps connections and has deadlines; mmsd-tng must be a
+  system program; notifications escape markup; grant prompts say which numbers,
+  how often and for how long; live calls' numbers and others' requests are masked
+  for programs that may not read; the SIM's PIN and PUK codes are handled on the
+  device instead of sent as USSD.
+- Emergency: national numbers for NZ, India, Singapore, France, Russia, Brazil,
+  China, South Africa; `+61 000` and the like; an emergency call with the SIM
+  locked; Australia's Emergency Alert texts (0444 444 444) never blocked and
+  sounded through silent; alerts shown even when they cannot be stored; channel 919.
+- Calls and texts: a call adopted after a restart gets its audio; a call that can
+  no longer be followed ends instead of making later calls "waiting"; a
+  ModemManager restart or a pulled SIM ends the old calls; audio starts and stops in
+  order; SIP crashes are noticed; Bluetooth calls switch the headset to its
+  hands-free profile; the speaker route and the ringer play where they should;
+  caller-ID hiding survives a modem restart; delivery reports wait out temporary
+  errors; segment counts match how parts are packed; alphanumeric senders keep
+  their names; two different international numbers are never one contact.
+- Data: a store is moved aside only when damaged, with its WAL; contact edits keep
+  every other line of a card and write atomically; MMS pictures cannot overwrite
+  each other and are kept by mmsd-tng until all are saved; texts left sending
+  become failed and can be sent again.
+- Packaging and licences: the LED udev rule works (it never ran its commands);
+  upgrades keep ModemManager running and the owner's debug-mode answer;
+  SQLCipher's notice, the desktop app's GPL, the AppImage runtime's notices; the
+  source tarball builds offline.
+- Battery: the apps redraw and poll only when something changed; contacts are read
+  once; phoned wakes less when idle.
 
 - phoned: calls (dial, answer, decline, hold/swap, waiting, DTMF, mute), texts
   (multipart, cleaning, deletion from the modem once stored), confirmations for

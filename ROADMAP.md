@@ -49,6 +49,19 @@ audio. What only a board can confirm:
 - **MMS pictures encrypted with the store.** The store's messages are encrypted when
   the owner asks (`phoned --encrypt-store`); the picture files beside it are not, and
   rely on full-disk encryption.
+- **From the second round of reviews, still to do:**
+  - Signals carry who is calling or texting (no text), which every program on the
+    bus sees; sending them only to Dolphone's own apps needs a change to how front
+    ends subscribe.
+  - A pending request exits phonectl with 0; distinct exit codes, and `--json`
+    everywhere, would make scripts simpler (`phonectl wait` covers the waiting).
+  - A newer emergency alert replaces one not yet dismissed; they should queue, the
+    most severe on top. The alert tone is 4 s (the US asks for about 10.5 s).
+  - Text-to-911 where carriers support it (texts to emergency numbers are refused).
+  - Serial call audio has no buffer for the two clocks drifting apart over a long
+    call; a ring buffer that drops or pads would.
+  - Some idle polling remains (the jack every 5 s, the uplink every 10 s, KDE
+    Connect's discovery); events would be cheaper.
 - **A Messages PIN.** The store's key is sealed by systemd to this user on this
   machine, which keeps a copy of the home directory unreadable; a PIN would also
   keep out someone holding the unlocked device. Same-user code can still read the

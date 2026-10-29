@@ -67,18 +67,27 @@ disagree about a call. More in [docs/ARCHITECTURE.md](ARCHITECTURE.md).
 Everything above works against **fake-mm**, a stand-in ModemManager that `mmcli`
 itself accepts, and a second baresip playing the far end of SIP calls. The tests:
 
-- **212 end-to-end checks** (`scripts/e2e.sh`): phoned, the fake modem, a fake
-  mmsd-tng and phonectl playing through calls, texts, MMS, alerts, SIM PIN, SIP,
-  service codes, the modem's setup, grants, rules, contacts, the encrypted store,
-  serial call audio through real PipeWire, and what an untrusted script is and is
-  not allowed to do;
-- **4 live UI tests** (`scripts/ui-e2e.sh`): the Dialer, Messages, Settings and the
-  desktop app, driven through their real input against a live phoned, with a
-  screenshot of each step;
-- **11 KDE Connect checks** (`scripts/kdeconnect-e2e.sh`) against the real
+- **224 end-to-end checks** (`scripts/e2e.sh`): phoned, the fake modem, a fake
+  mmsd-tng and phonectl playing through calls, texts, MMS, alerts, SIM PIN and SIM
+  codes, an emergency call with the SIM locked, SIP, service codes, the modem's
+  setup, grants, rules, contacts, the encrypted store, serial call audio through
+  real PipeWire, and what an untrusted script is and is not allowed to do; they
+  also pass with every CPU core busy, as a stand-in for a slow device;
+- **5 live UI tests** (`scripts/ui-e2e.sh`): the Dialer, Messages, Settings and the
+  desktop app (and its tray icon), driven through their real input against a live
+  phoned, with a screenshot of each step;
+- **10 KDE Connect checks** (`scripts/kdeconnect-e2e.sh`) against the real
   kdeconnectd: pairing, texts both ways, a ringing call;
-- **137 unit tests**, including every panel screen rendered and checked against the
+- **184 unit tests**, including every panel screen rendered and checked against the
   panel's fonts.
+
+Before release it had thirty reviews: ten for features and fit, then twenty more
+on security from a same-user program and from the network, Rust robustness,
+concurrency, data integrity, packaging, the modem, audio, emergency calling,
+telephony standards, numbers abroad, accessibility, the scripting API, the tests
+themselves, onboarding, FlipCTL's conventions, licensing, battery use, failure
+recovery and privacy. What they found is fixed or written down in
+[ROADMAP.md](roadmap.md).
 
 The panel apps also run in the real FlipCTL (its browser view, in a VM).
 **Dolphone has not yet carried a real call**: that needs the hardware test in
@@ -131,9 +140,9 @@ On an Apple Silicon Mac with [OrbStack](https://orbstack.dev):
 ```sh
 scripts/dev-setup.sh                 # a Debian 13 arm64 machine, FlipCTL built, fake modem in
 orb -m f1 scripts/run-dev.sh         # build, install, start; open http://f1.orb.local:8899/
-orb -m f1 phonectl fake ring 0491570156          # and watch the panel
-orb -m f1 phonectl fake sms 0491570156 "hello"
-orb -m f1 phonectl fake broadcast 4370 "Test alert"
+orb -m f1 ~/.local/bin/phonectl fake ring 0491570156     # and watch the panel
+orb -m f1 ~/.local/bin/phonectl fake sms 0491570156 "hello"
+orb -m f1 ~/.local/bin/phonectl fake broadcast 4370 "Test alert"
 ```
 
 More in [docs/DEVELOPING.md](DEVELOPING.md).
@@ -175,6 +184,7 @@ phonectl device                                     # which device profile, and 
 
 - [Install](install.md)
 - [Buttons](BUTTONS.md): every key on every screen
+- [Rules on incoming texts](RULES.md): run a command when a matching text arrives
 - [Architecture](ARCHITECTURE.md): the pieces and why they are split that way
 - [Audio](AUDIO.md): routes, echo cancellation, Bluetooth, the jack
 - [Devices](DEVICES.md): device profiles, and adding one
@@ -185,7 +195,11 @@ phonectl device                                     # which device profile, and 
 
 ## License
 
-Source: MIT. The panel apps link Slint through flipctl-app under GPL-3.0-only, so
-their **binaries are GPL-3.0-only**; each release carries the full corresponding
-source. The panel fonts are CC BY-SA 3.0, Unlicense and MIT; see each bundle's
-`NOTICE.md` and `THIRD-PARTY-LICENSES.md`.
+Source: MIT. The panel apps and the desktop app link Slint (the panel apps through
+flipctl-app) under GPL-3.0-only, so **those binaries are GPL-3.0-only**; each
+release carries the full corresponding source, and the Debian package says where
+it is in `/usr/share/doc/dolphone/copyright`. phoned, phonectl and the gateway are
+MIT, with their dependencies' notices in `THIRD-PARTY-LICENSES.md` (SQLCipher's
+among them). The panel fonts are CC BY-SA 3.0, Unlicense and MIT, and the AppImage
+runtime at the head of each bundle has its own notices; see each bundle's
+`NOTICE.md`.

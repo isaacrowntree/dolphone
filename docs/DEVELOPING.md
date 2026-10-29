@@ -68,9 +68,9 @@ build first, since they run what is in `$CARGO_TARGET_DIR/debug`:
 ```sh
 cargo build --workspace                      # what the scripts run
 cargo test --workspace                       # core, daemon, CLI, desktop
-scripts/e2e.sh                               # 212 checks: fake-mm, fake-mmsd, phoned, a SIP far end, phonectl, on real buses
+scripts/e2e.sh                               # 224 checks: fake-mm, fake-mmsd, phoned, a SIP far end, phonectl, on real buses
 scripts/ui-e2e.sh                            # the four apps driven live against phoned; screenshots in */target/render/live/
-scripts/kdeconnect-e2e.sh                    # 11 checks against the real kdeconnectd (apt install kdeconnect)
+scripts/kdeconnect-e2e.sh                    # 10 checks against the real kdeconnectd (apt install kdeconnect)
 cd apps/dialer && DOLPHONE_RENDER=1 cargo test  # behaviour, and every screen to target/render/
 python3 tools/showcase.py                    # README pictures from the renders
 ```

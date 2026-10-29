@@ -67,18 +67,27 @@ disagree about a call. More in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 Everything above works against **fake-mm**, a stand-in ModemManager that `mmcli`
 itself accepts, and a second baresip playing the far end of SIP calls. The tests:
 
-- **212 end-to-end checks** (`scripts/e2e.sh`): phoned, the fake modem, a fake
-  mmsd-tng and phonectl playing through calls, texts, MMS, alerts, SIM PIN, SIP,
-  service codes, the modem's setup, grants, rules, contacts, the encrypted store,
-  serial call audio through real PipeWire, and what an untrusted script is and is
-  not allowed to do;
-- **4 live UI tests** (`scripts/ui-e2e.sh`): the Dialer, Messages, Settings and the
-  desktop app, driven through their real input against a live phoned, with a
-  screenshot of each step;
-- **11 KDE Connect checks** (`scripts/kdeconnect-e2e.sh`) against the real
+- **224 end-to-end checks** (`scripts/e2e.sh`): phoned, the fake modem, a fake
+  mmsd-tng and phonectl playing through calls, texts, MMS, alerts, SIM PIN and SIM
+  codes, an emergency call with the SIM locked, SIP, service codes, the modem's
+  setup, grants, rules, contacts, the encrypted store, serial call audio through
+  real PipeWire, and what an untrusted script is and is not allowed to do; they
+  also pass with every CPU core busy, as a stand-in for a slow device;
+- **5 live UI tests** (`scripts/ui-e2e.sh`): the Dialer, Messages, Settings and the
+  desktop app (and its tray icon), driven through their real input against a live
+  phoned, with a screenshot of each step;
+- **10 KDE Connect checks** (`scripts/kdeconnect-e2e.sh`) against the real
   kdeconnectd: pairing, texts both ways, a ringing call;
-- **137 unit tests**, including every panel screen rendered and checked against the
+- **184 unit tests**, including every panel screen rendered and checked against the
   panel's fonts.
+
+Before release it had thirty reviews: ten for features and fit, then twenty more
+on security from a same-user program and from the network, Rust robustness,
+concurrency, data integrity, packaging, the modem, audio, emergency calling,
+telephony standards, numbers abroad, accessibility, the scripting API, the tests
+themselves, onboarding, FlipCTL's conventions, licensing, battery use, failure
+recovery and privacy. What they found is fixed or written down in
+[ROADMAP.md](ROADMAP.md).
 
 The panel apps also run in the real FlipCTL (its browser view, in a VM).
 **Dolphone has not yet carried a real call**: that needs the hardware test in
@@ -175,6 +184,7 @@ phonectl device                                     # which device profile, and 
 
 - [Install](docs/install.md)
 - [Buttons](docs/BUTTONS.md): every key on every screen
+- [Rules on incoming texts](docs/RULES.md): run a command when a matching text arrives
 - [Architecture](docs/ARCHITECTURE.md): the pieces and why they are split that way
 - [Audio](docs/AUDIO.md): routes, echo cancellation, Bluetooth, the jack
 - [Devices](docs/DEVICES.md): device profiles, and adding one
