@@ -1,16 +1,16 @@
 # Contributing
 
 Thanks for wanting to help. The most valuable thing right now is **hardware**: if you
-have an RK3576 board and an M.2 modem, run [docs/HARDWARE.md](docs/HARDWARE.md) and
+have an RK3576 board and an M.2 modem, run [docs/HARDWARE.md](https://isaacrowntree.com/dolphone/HARDWARE.html) and
 report what happened, GO or NO-GO. On another machine with a modem (a Raspberry
 Pi, a uConsole, a PinePhone, a Librem 5, a laptop), running the same checks moves its
 device profile from "untested" to "tested", and a new machine is one TOML file:
-[docs/DEVICES.md](docs/DEVICES.md).
+[docs/DEVICES.md](https://isaacrowntree.com/dolphone/DEVICES.html).
 
 ## Ground rules
 
 - **Add to FlipCTL, never replace it.** Screens use FlipCTL's widgets, fonts and
-  soft-key roles ([docs/BUTTONS.md](docs/BUTTONS.md)). If something should change in
+  soft-key roles ([docs/BUTTONS.md](https://isaacrowntree.com/dolphone/BUTTONS.html)). If something should change in
   FlipCTL itself, that is a contribution to flipctl-slint, not a workaround here.
 - **The Flipper One comes first.** A feature is designed for its panel and its
   buttons; other machines get it through their device profile and the desktop app.
@@ -39,4 +39,4 @@ self-contained pull requests.
 
 ## Conduct
 
-Be kind and assume good faith; see [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+Be kind and assume good faith; see [CODE_OF_CONDUCT.md](https://github.com/isaacrowntree/dolphone/blob/main/CODE_OF_CONDUCT.md).

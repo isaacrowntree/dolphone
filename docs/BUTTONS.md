@@ -7,7 +7,7 @@ the main thing. **Power** is never ours: it is the MCU's, and opens the power me
 call, the call carries on; come back to it with the switcher), and the switcher lists
 running apps, a live call among them.
 
-A **hold** is 0.6 s or more.
+A **hold** is 0.6 s or more by default (the `long_press_ms` setting, 300–1500 ms).
 
 ## Dialer
 
@@ -68,7 +68,7 @@ conversation is one thread, named after everyone on it; a reply goes to all of t
 |---|---|---|---|---|---|
 | ON/OFF rows | toggle | toggle | | | up a page |
 | `< value >` rows | step | step | | | up a page |
-| Pages (Call audio, Bluetooth, Calls, Calls over the internet, Texts, Emergency alerts, Privacy, Modem, About) | Right opens | open | | | up a page |
+| Pages (Call audio, Bluetooth, Laptops, Calls, Calls over the internet, Texts, Emergency alerts, Privacy, Modem, About) | Right opens | open | | | up a page |
 | Typed rows (voicemail number, SIP account, password, proxy) | | open the keyboard | open the keyboard | | up a page |
 | Bluetooth device | | pair / connect / disconnect | forget | copy contacts (a paired phone) | |
 | Blocked number | | unblock | unblock | | |

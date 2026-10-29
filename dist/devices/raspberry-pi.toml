@@ -4,7 +4,7 @@ id = "raspberry-pi"
 name = "Raspberry Pi with a modem"
 status = "untested"
 source = "The model string Linux reports on a Pi (\"Raspberry Pi 5 Model B Rev 1.0\" and the like)"
-notes = "Texts and SIP calls work with any modem ModemManager supports. Mobile call audio works when the modem offers a USB sound card (UAC); a SIM7600 HAT sends serial PCM instead, which phoned does not bridge yet, and some HATs wire audio to their own jack. Use a USB headset or sound card for the speaker and microphone."
+notes = "Texts and SIP calls work with any modem ModemManager supports. Mobile call audio works when the modem offers a USB sound card (UAC); a SIM7600 HAT sends serial PCM instead, which phoned bridges when the profile names the port (serial_pcm, with call_at_start AT+CPCMREG=1 and call_at_end AT+CPCMREG=0, as in the uConsole profile), and some HATs wire audio to their own jack. Use a USB headset or sound card for the speaker and microphone."
 front_ends = ["desktop"]
 
 [match]

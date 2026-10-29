@@ -717,6 +717,17 @@ expect "a script may check the modem's setup" "$out" "Quectel"
 out=$("$P" modem setup apply)
 expect "but changing it waits for the device" "$out" "modem setup waiting for confirmation"
 "$P" deny "$(awk '{print $NF}' <<<"$out" | tr -d ')')"
+out=$("$P" set read_grants phonectl)
+expect "a script asking to read messages waits for the device" "$out" "setting waiting for confirmation"
+"$P" deny "$(awk '{print $NF}' <<<"$out" | tr -d ')')"
+out=$("$P" device use generic)
+expect "so does choosing a device profile" "$out" "setting waiting for confirmation"
+req=$(awk '{print $NF}' <<<"$out" | tr -d ')')
+out=$("$P" pending)
+expect "and the request names the setting" "$out" "setting device_profile by phonectl"
+"$P" deny "$req"
+out=$("$P" set sip_password hunter2 2>&1 || true)
+expect "the SIP password is never set from a script" "$out" "only set in Phone Settings"
 out=$("$P" dial 000)
 expect "an emergency call from a script is held, not placed" "$out" "waiting for confirmation"
 out=$("$P" contacts add "Your Bank" 0491570180)

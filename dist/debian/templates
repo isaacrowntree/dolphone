@@ -8,8 +8,8 @@ Description: Let Dolphone send setup commands to the modem?
  those on only in its debug mode, which this turns on.
  .
  Debug mode also makes ModemManager's log more detailed, and with this modem
- that log can include phone numbers and texts. On the Flipper One, call audio
- needs it.
+ that log can include phone numbers and texts; and it lets any program running
+ as you send the modem AT commands. On the Flipper One, call audio needs it.
  .
  You can change this later: sudo dolphone-modem-access on (or off), or
  sudo dpkg-reconfigure dolphone.

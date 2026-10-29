@@ -45,7 +45,7 @@ The roadmap from the reviews, done:
 - Call audio: a SIM7600's serial PCM bridged to PipeWire at 8 kHz (the uConsole's
   4G extension); an earpiece route for the PinePhone and Librem 5; holding and
   swapping between a SIP call and a mobile call.
-- Texts: search (FTS5) and export as SMS Backup & Restore XML; texts over SIP; the
+- Texts: search (FTS5) and export as SMS Backup & Restore XML; receiving texts over SIP; the
   SIM each text and call went through.
 - The panel: a Today screen of missed calls, unread threads and favourites; an
   adjustable long-press time; the LEDs flash for a ringing call (a udev rule gives
@@ -59,7 +59,9 @@ The roadmap from the reviews, done:
 - Privacy: the message store can be encrypted with SQLCipher (`phoned
   --encrypt-store`), its key sealed by `systemd-creds --user`; without the key it
   stays locked and texts stay on the SIM. Trusting AppImage front ends can be turned
-  off. The panel apps no longer link the database at all.
+  off. A program asking to change a setting (`phonectl set`, `phonectl device use`)
+  waits for a press on the device, as texts and calls do; Delete phone data removes
+  contacts too. The panel apps no longer link the database at all.
 - Tests: the end-to-end suite grew to 212 checks, with 11 more against the real KDE
   Connect daemon; the four apps are driven live against phoned
   (`scripts/ui-e2e.sh`); CI runs in Debian 13 containers.

@@ -160,14 +160,17 @@ proxy and APN, and `journalctl --user -u mmsd-tng`. Record what you changed.
 
 ## Then: Dolphone on real hardware
 
+Install the package (see [install](install.md); `scripts/package-deb.sh` builds it on
+the board), which brings the polkit rule that lets phoned use Voice and Messaging
+from your session, and log in again:
+
 ```sh
-scripts/dev-setup.sh --here              # without the fake modem: FORCE_FAKE_MODEM is not set
-REAL_MODEM=1 scripts/run-dev.sh
 phonectl status                          # your operator, signal, number
+journalctl --user -u phoned -f           # what phoned makes of the modem
 ```
 
-Install the polkit rule (`dist/polkit/50-dolphone.rules`, the .deb does) so phoned
-may use Voice and Messaging from your session.
+`scripts/dev-setup.sh` is for a machine without a modem: it refuses to mask
+ModemManager where it finds one.
 
 On the Flipper One, `ls /sys/class/leds` shows the LEDs' real names: if they are
 not the `flipper-one:*` names in the profile's `ring_leds`, note them (and the udev

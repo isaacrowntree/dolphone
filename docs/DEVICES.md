@@ -27,8 +27,8 @@ Phone Settings > About shows it on the panel too.
 | `flipper-one` | device tree model "Flipper One" | expected | The reference. NAU8822 codec switched with amixer (`Speaker`, `Headphone`, from the kernel driver's controls); the modem's USB audio bridged by phoned. The board's device-tree strings are not published yet, so detection is assumed: choose it by hand if it misses. |
 | `clockworkpi-uconsole` | `dtoverlay=clockworkpi-uconsole` in config.txt | untested | The 4G extension is a SIMCom SIM7600G-H, which sends call audio as serial PCM: phoned turns it on with `AT+CPCMREG=1` when a call connects and bridges `/dev/ttyUSB4` to PipeWire at 8 kHz (SIMCom USB AUDIO Application Note V1.03). Needs ModemManager in debug mode for the AT command, and you in the `dialout` group for the port. |
 | `raspberry-pi` | device tree model "Raspberry Pi" | untested | Any modem ModemManager supports. Mobile call audio needs a modem with a USB sound card; use a USB headset for the speaker and microphone. |
-| `pinephone` | `pine64,pinephone` | untested | The EG25-G is wired to the codec; ALSA UCM's Voice Call verb connects it (`call_start_commands`). No earpiece route yet. |
-| `librem5` | `purism,librem5` | untested | The BM818 is its own ALSA card ("Modem"), bridged to the codec by phoned, as on the Flipper One. No earpiece route yet. |
+| `pinephone` | `pine64,pinephone` | untested | The EG25-G is wired to the codec; ALSA UCM's Voice Call verb connects it (`call_start_commands`); calls start on the earpiece. |
+| `librem5` | `purism,librem5` | untested | The BM818 is its own ALSA card ("Modem"), bridged to the codec by phoned, as on the Flipper One; calls start on the earpiece. |
 | `laptop` | SMBIOS chassis type (laptop, notebook, convertible), or ThinkPad | untested | The desktop app. Whether the WWAN modem can call and text depends on it: `mmcli -m 0` lists Voice and Messaging when it can. SIP works regardless. |
 | `generic` | nothing else matched | expected | Default devices, no mixer controls touched. |
 
@@ -53,6 +53,10 @@ status = "untested"              # tested once docs/HARDWARE.md passes on it
 source = "where the values came from"
 notes = "what works, what does not"
 front_ends = ["desktop"]         # "flipctl" too, if it runs FlipCTL
+ring_leds = []                   # names under /sys/class/leds to flash while ringing
+modem_at = []                    # AT commands each time the modem appears
+call_at_start = []               # AT commands when a mobile call connects
+call_at_end = []                 # and when it ends (these four go above [match])
 
 [match]                          # any one of these picks the profile
 dt_compatible = ["vendor,board"]      # exact strings from /proc/device-tree/compatible
@@ -73,6 +77,8 @@ wired_commands = [["amixer", "-q", "sset", "Headphone", "unmute"]]
 modem_match = ["Quectel"]             # how to spot the modem's USB audio nodes
 call_start_commands = []              # a UCM verb, an AT command, an amplifier
 call_stop_commands = []
+earpiece_commands = []                # a phone's earpiece: calls start there when set
+serial_pcm = ""                       # a modem's serial audio port, as on a SIM7600
 assume_wired = false
 ```
 

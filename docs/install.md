@@ -3,7 +3,8 @@
 ## On the Flipper One
 
 Dolphone installs on Flipper OS (Debian 13, arm64) from the Debian package attached
-to each [release](https://github.com/isaacrowntree/dolphone/releases):
+to each [release](https://github.com/isaacrowntree/dolphone/releases) (until the first one,
+build it with `scripts/package-deb.sh` on the device or any arm64 Debian 13 machine):
 
 ```sh
 sudo apt install ./dolphone_0.1.0_arm64.deb
@@ -23,7 +24,7 @@ The package brings:
 | PipeWire and WirePlumber config | an echo canceller for speakerphone; Bluetooth hands-free |
 | udev rules | let the modem wake the board for a call or a text, and the `dolphone` group flash the Flipper One's LEDs |
 | `dolphone-modem-access` | turns ModemManager's debug mode on or off (see below) |
-| a polkit rule | lets your active local session use the modem's calls and texts |
+| a polkit rule | lets your active local session use the modem's calls, texts, USSD and device control (which, in debug mode, includes AT commands) |
 
 It needs ModemManager, PipeWire and WirePlumber (pulled in by apt), and conflicts
 with GNOME Calls and Chatty, which would race it for every call and text. It
@@ -45,8 +46,10 @@ The install asks: **Let Dolphone send setup commands to the modem?** Dolphone se
 the modem up for calls, tells it where call audio goes each time it starts, and runs
 call forwarding and caller-ID codes, all as AT commands, which ModemManager passes on
 only in its debug mode. Debug mode also makes ModemManager's log more detailed, and
-with an AT modem that log can hold numbers and texts. On a Flipper One call audio
-needs it, so yes is the default there; elsewhere it is no. Change it any time:
+with an AT modem that log can hold numbers and texts. It also lets any program
+running as you send the modem AT commands through ModemManager (`mmcli --command`),
+around Dolphone's confirmations. On a Flipper One call audio needs it, so yes is the
+default there; elsewhere it is no. Change it any time:
 
 ```sh
 sudo dolphone-modem-access on        # or off, or status
@@ -79,9 +82,10 @@ Phone Settings > Modem shows **Turn on** when it is off, with a password prompt.
 - **An encrypted message store**: `systemctl --user stop phoned`, then
   `phoned --encrypt-store`, then `systemctl --user start phoned`. The key is sealed
   by systemd to you on this machine; `phoned --decrypt-store` undoes it. See
-  [Security](../SECURITY.md) for what it does and does not protect.
-- **Scripts that read messages** (an OTP reader, say) need a read grant: set
-  `read_grants` to the program's name. **Scripts that text** without asking each
+  [Security](https://isaacrowntree.com/dolphone/security.html) for what it does and does not protect.
+- **Scripts that read messages** (an OTP reader, say) need a read grant:
+  `phonectl set read_grants phonectl`, allowed on the device. Grants go by program
+  name, so a grant to `phonectl` is a grant to every script that uses it. **Scripts that text** without asking each
   time need a standing grant: `phonectl grant <numbers> <per-hour> <days>`, allowed
   once on the device.
 

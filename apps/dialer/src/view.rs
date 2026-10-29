@@ -123,6 +123,7 @@ pub fn view(m: &Model, now: i64, frame: u32) -> View {
             "modem" => "set up the modem".into(),
             "grant" => "text without asking".into(),
             "contact" => fit(&r.target, 230),
+            "setting" => fit(&format!("set {}", r.target), 230),
             other => other.to_string(),
         };
         let why = match r.reason.as_str() {
@@ -134,14 +135,17 @@ pub fn view(m: &Model, now: i64, frame: u32) -> View {
             "modem" => "Saved in the modem; it restarts",
             "grant" => "Revoke it in Phone Settings",
             "contact" => "Contacts decide caller names",
+            "setting" => "",
             _ => "Asked by another program",
         };
+        // A setting shows the value asked for, which is the decision.
+        let why = if r.reason == "setting" { fit(&format!("to {}", r.body), 230) } else { why.to_string() };
         let first = match r.kind.as_str() {
             "wipe" => "Delete everything?".to_string(),
             "contact" => format!("{who} wants to change contacts:"),
             _ => format!("{who} wants to"),
         };
-        v.modal = Some(Modal { lines: vec![first, line2, why.into()], left: "Deny".into(), right: "Allow".into() });
+        v.modal = Some(Modal { lines: vec![first, line2, why], left: "Deny".into(), right: "Allow".into() });
     } else if let Some(n) = &m.notice {
         v.modal = Some(Modal { lines: n.clone(), left: String::new(), right: "Ok".into() });
     }

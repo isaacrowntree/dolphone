@@ -1148,6 +1148,16 @@ impl Phone {
                 self.audit(&as_requester, "grant", &pending.request.target, "granted");
                 Ok(Placed { id: gid, pending: 0 })
             }
+            "setting" => {
+                let r = self.apply_setting(&pending.request.target, &pending.request.body).await;
+                self.audit(
+                    &as_requester,
+                    "setting",
+                    &pending.request.target,
+                    if r.is_ok() { "allowed" } else { "failed" },
+                );
+                r.map(|_| Placed { id: 1, pending: 0 })
+            }
             "modem" => {
                 let me = self.clone();
                 tokio::spawn(async move {
@@ -1161,6 +1171,11 @@ impl Phone {
             "wipe" => {
                 self.with_store(|s| s.wipe());
                 let _ = std::fs::remove_dir_all(parts_dir());
+                // Contacts are phone data too; and the settings just deleted from
+                // the store stop counting now, not at the next start.
+                let _ = std::fs::remove_dir_all(phone_core::store::contacts_dir());
+                crate::caller::set_grants("");
+                crate::caller::set_trust_appimages(true);
                 api::emit_unread_changed(self).await;
                 api::emit_missed_changed(self).await;
                 Ok(Placed { id: 1, pending: 0 })
@@ -1805,6 +1820,88 @@ impl Phone {
 
     /// A text that came as a SIP MESSAGE: kept with the rest, as from the sender's
     /// number (or SIP address), and announced like any text.
+    /// Change a setting, checked, and follow it where it acts at once (the modem,
+    /// SIP, who may read). For Dolphone's own apps, and for a request the owner
+    /// allowed.
+    pub async fn apply_setting(self: &Arc<Self>, key: &str, value: &str) -> zbus::fdo::Result<()> {
+        if key == phone_api::keys::READ_GRANTS.0 {
+            crate::caller::set_grants(value);
+        }
+        if key == phone_api::keys::TRUST_APPIMAGES.0 {
+            crate::caller::set_trust_appimages(value == "true");
+        }
+        if !phone_api::keys::ALL.iter().any(|(k, _)| *k == key) {
+            return Err(zbus::fdo::Error::InvalidArgs(format!("unknown setting {key}")));
+        }
+        use phone_api::keys;
+        if key == keys::SIP_PASSWORD.0 {
+            // Kept in a file only the owner can read, not in the settings table
+            // that Get reads back.
+            crate::sip::set_password(value).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+            self.sip_changed.notify_one();
+            return Ok(());
+        }
+        if key == keys::SIP_ACCOUNT.0 && !value.is_empty() && !crate::sip::valid_account(value) {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "a SIP account looks like sip:user@provider.example (optionally ;transport=tls)".into(),
+            ));
+        }
+        if key == keys::SIP_PROXY.0 && !value.is_empty() && !crate::sip::valid_proxy(value) {
+            return Err(zbus::fdo::Error::InvalidArgs(
+                "a proxy looks like sip:proxy.example (optionally :port and ;transport=tls)".into(),
+            ));
+        }
+        if key == keys::DEVICE_PROFILE.0 && value != "auto" && !crate::devices::all().iter().any(|p| p.id == value) {
+            return Err(zbus::fdo::Error::InvalidArgs(format!("no device profile {value}; see phonectl device list")));
+        }
+        if key == keys::SIP_USE.0 && !matches!(value, "fallback" | "always") {
+            return Err(zbus::fdo::Error::InvalidArgs("fallback or always".into()));
+        }
+        self.store_read(|s| s.set_setting(key, value))?;
+        if key == keys::DEVICE_PROFILE.0 {
+            self.choose_device(value);
+        }
+        // The modem follows these at once; a new profile may have start-up commands.
+        if key == keys::DISABLE_2G.0 || key == keys::DEVICE_PROFILE.0 {
+            if let Some(m) = self.state.lock().await.modem.clone() {
+                self.apply_modem_settings(&m).await;
+            }
+        }
+        if key == keys::SIP_ENABLED.0 || key == keys::SIP_ACCOUNT.0 || key == keys::SIP_PROXY.0 {
+            self.sip_changed.notify_one();
+        }
+        if key == phone_api::keys::CALL_WAITING.0 {
+            if let Some(m) = self.state.lock().await.modem.clone() {
+                self.apply_modem_settings(&m).await;
+            }
+        }
+        Ok(())
+    }
+
+    /// A setting another program asked for: unknown keys and the SIP password are
+    /// refused, the rest wait for the device.
+    pub async fn request_setting(
+        self: &Arc<Self>,
+        key: &str,
+        value: &str,
+        caller: &Caller,
+    ) -> zbus::fdo::Result<Placed> {
+        if !phone_api::keys::ALL.iter().any(|(k, _)| *k == key) {
+            return Err(zbus::fdo::Error::InvalidArgs(format!("unknown setting {key}")));
+        }
+        if caller.trusted {
+            self.apply_setting(key, value).await?;
+            return Ok(Placed { id: 1, pending: 0 });
+        }
+        if key == phone_api::keys::SIP_PASSWORD.0 {
+            return Err(zbus::fdo::Error::AccessDenied("the SIP password is only set in Phone Settings".into()));
+        }
+        let value = text::clean(value, 500);
+        let id = self.park("setting", key, &value, caller, "setting").await;
+        self.audit(caller, "setting", key, "waiting for confirmation");
+        Ok(Placed { id: 0, pending: id })
+    }
+
     /// An MMS mmsd-tng has fetched: copy it into the store, with its parts as files
     /// beside it, then delete mmsd-tng's copy.
     pub async fn mms_received(

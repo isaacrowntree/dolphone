@@ -10,7 +10,7 @@ CHANGELOG.md. This is what is left, and why.
 
 Everything has been tested against stand-ins: fake-mm for ModemManager, fake-mmsd
 for mmsd-tng, a second baresip for SIP, a pty for a SIM7600's serial audio.
-[docs/HARDWARE.md](docs/HARDWARE.md) is the go/no-go test on the hardware; its
+[docs/HARDWARE.md](https://isaacrowntree.com/dolphone/HARDWARE.html) is the go/no-go test on the hardware; its
 deciding question is whether the RM520N-GL's USB audio gives Linux two-way call
 audio. What only a board can confirm:
 

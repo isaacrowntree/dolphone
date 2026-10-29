@@ -180,11 +180,13 @@ impl Notifier {
             "modem" => format!("{} wants to set up the modem", r.requester),
             "grant" => format!("{} wants to text {} without asking", r.requester, r.target),
             "contact" => format!("{} wants to {} in your contacts", r.requester, r.target),
+            "setting" => format!("{} wants to set {}", r.requester, r.target),
             _ => format!("{} wants to use the phone", r.requester),
         };
         let body = match r.kind.as_str() {
             "sms" => r.body.clone(),
             "contact" => "A contact decides who a caller shows as".into(),
+            "setting" => format!("to {}", r.body),
             _ => r.reason.clone(),
         };
         // No Allow button: a notification is a weaker channel than the device (any

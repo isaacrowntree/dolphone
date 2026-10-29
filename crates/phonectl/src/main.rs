@@ -73,14 +73,17 @@ confirmations
   pending | deny <id>         (allowing is done on the device or in the desktop app;
                               confirm <id> works only from Dolphone's own apps)
 
-reading messages and calls needs a grant: Phone Settings, read_grants = phonectl
+reading messages and calls needs a grant: phonectl set read_grants phonectl
+(allowed on the device; a grant goes by program name, so it covers every script
+that uses phonectl)
 
 audio and Bluetooth
   routes | route <speaker|headset|bluetooth> | ringer [ring|vibrate|silent]
   bt [devices|scan|pair <addr>|connect <addr>|disconnect <addr>|forget <addr>|on|off]
 
 settings
-  get <key> | set <key> <value> | block <n> | unblock <n> | blocked | wipe
+  get <key> | set <key> <value>   (set waits for confirmation on the device)
+  block <n> | unblock <n> | blocked | wipe
 
 watch                         print every event as it happens
 
@@ -308,8 +311,8 @@ async fn run(conn: &zbus::Connection, w: &[&str], json: bool) -> Result<()> {
                 println!("{}  {tech:<4} {op}{state}", phone_core::when::short(at, phone_core::now()));
             }
         }
-        ["kdeconnect", "on"] => SettingsProxy::new(conn).await?.set("kdeconnect", "true").await?,
-        ["kdeconnect", "off"] => SettingsProxy::new(conn).await?.set("kdeconnect", "false").await?,
+        ["kdeconnect", "on"] => set_setting(conn, "kdeconnect", "true", json).await?,
+        ["kdeconnect", "off"] => set_setting(conn, "kdeconnect", "false", json).await?,
         ["kdeconnect"] | ["kdeconnect", "devices"] => {
             let list = SettingsProxy::new(conn).await?.kdeconnect_devices().await?;
             if json {
@@ -342,7 +345,7 @@ async fn run(conn: &zbus::Connection, w: &[&str], json: bool) -> Result<()> {
                 println!("{:<22} {:<10} {}", d.id, d.status, d.name);
             }
         }
-        ["device", "use", id] => SettingsProxy::new(conn).await?.set("device_profile", id).await?,
+        ["device", "use", id] => set_setting(conn, "device_profile", id, json).await?,
         ["unlock", pin] => match ModemProxy::new(conn).await?.unlock(pin).await? {
             0 => println!("SIM unlocked"),
             n => bail!("wrong PIN; {n} {} left", if n == 1 { "try" } else { "tries" }),
@@ -453,7 +456,7 @@ async fn run(conn: &zbus::Connection, w: &[&str], json: bool) -> Result<()> {
         ["ringer", mode] => AudioProxy::new(conn).await?.set_ringer(mode).await?,
         ["bt", rest @ ..] => bluetooth(conn, rest).await?,
         ["get", key] => println!("{}", SettingsProxy::new(conn).await?.get(key).await?),
-        ["set", key, value] => SettingsProxy::new(conn).await?.set(key, value).await?,
+        ["set", key, value] => set_setting(conn, key, value, json).await?,
         ["block", n] => SettingsProxy::new(conn).await?.block(n).await?,
         ["unblock", n] => SettingsProxy::new(conn).await?.unblock(n).await?,
         ["blocked"] => {
@@ -716,6 +719,20 @@ async fn send_and_wait(conn: &zbus::Connection, to: &str, text: &str, secs: u64,
 
 /// Wait for a one-time code. Reading the code needs a read grant, as reading any
 /// text does.
+/// A setting: at once for Dolphone's own apps, otherwise waiting for a press on
+/// the device.
+async fn set_setting(conn: &zbus::Connection, key: &str, value: &str, json: bool) -> Result<()> {
+    let p = SettingsProxy::new(conn).await?.request_setting(key, value).await?;
+    if json {
+        out(&p)
+    } else {
+        if p.pending != 0 {
+            placed("setting", p);
+        }
+        Ok(())
+    }
+}
+
 /// When phonectl started, for `otp --wait`: a code that arrives while it is still
 /// connecting is the one asked for.
 static STARTED: std::sync::OnceLock<i64> = std::sync::OnceLock::new();

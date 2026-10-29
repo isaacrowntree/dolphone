@@ -462,6 +462,9 @@ pub trait Settings {
     /// Ask for a standing grant to text `numbers` (comma separated, `*` suffix for a
     /// prefix) up to `per_hour` times for `days` days (0 for no end). Waits for the
     /// owner's confirmation on the device, like any outside request.
+    /// Change a setting from another program: it waits for a press on the device
+    /// (Dolphone's own apps get it at once). Not the SIP password.
+    fn request_setting(&self, key: &str, value: &str) -> zbus::Result<Placed>;
     fn request_grant(&self, numbers: &str, per_hour: u32, days: u32) -> zbus::Result<Placed>;
     fn grants(&self) -> zbus::Result<Vec<Grant>>;
     fn revoke_grant(&self, id: i64) -> zbus::Result<()>;

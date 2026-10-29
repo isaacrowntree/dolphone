@@ -67,7 +67,7 @@ event handler, keys go in through its own input path, and each step is rendered 
 its window. It waits as a person would, including the 400 ms after a call appears
 unasked, during which the Dialer ignores keys.
 
-CI runs all of it in Debian 13 containers on GitHub's arm64 runners (the release
+CI runs the unit tests, `scripts/e2e.sh` and `scripts/ui-e2e.sh` in Debian 13 containers on GitHub's arm64 runners (the release
 Flipper OS is built on, so baresip and PipeWire's tools are a board's versions), with
 a system bus of the container's own for fake-mm. A nightly job rebuilds the panel
 apps against flipctl-slint's newest commit.

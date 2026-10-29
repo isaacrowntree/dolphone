@@ -643,58 +643,20 @@ impl Settings {
         #[zbus(connection)] conn: &Connection,
     ) -> zbus::fdo::Result<()> {
         front_end(conn, &hdr, "change settings").await?;
-        if key == phone_api::keys::READ_GRANTS.0 {
-            caller::set_grants(value);
-        }
-        if key == phone_api::keys::TRUST_APPIMAGES.0 {
-            caller::set_trust_appimages(value == "true");
-        }
-        if !phone_api::keys::ALL.iter().any(|(k, _)| *k == key) {
-            return Err(zbus::fdo::Error::InvalidArgs(format!("unknown setting {key}")));
-        }
-        use phone_api::keys;
-        if key == keys::SIP_PASSWORD.0 {
-            // Kept in a file only the owner can read, not in the settings table
-            // that Get reads back.
-            crate::sip::set_password(value).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
-            self.0.sip_changed.notify_one();
-            return Ok(());
-        }
-        if key == keys::SIP_ACCOUNT.0 && !value.is_empty() && !crate::sip::valid_account(value) {
-            return Err(zbus::fdo::Error::InvalidArgs(
-                "a SIP account looks like sip:user@provider.example (optionally ;transport=tls)".into(),
-            ));
-        }
-        if key == keys::SIP_PROXY.0 && !value.is_empty() && !crate::sip::valid_proxy(value) {
-            return Err(zbus::fdo::Error::InvalidArgs(
-                "a proxy looks like sip:proxy.example (optionally :port and ;transport=tls)".into(),
-            ));
-        }
-        if key == keys::DEVICE_PROFILE.0 && value != "auto" && !crate::devices::all().iter().any(|p| p.id == value) {
-            return Err(zbus::fdo::Error::InvalidArgs(format!("no device profile {value}; see phonectl device list")));
-        }
-        if key == keys::SIP_USE.0 && !matches!(value, "fallback" | "always") {
-            return Err(zbus::fdo::Error::InvalidArgs("fallback or always".into()));
-        }
-        self.0.store_read(|s| s.set_setting(key, value))?;
-        if key == keys::DEVICE_PROFILE.0 {
-            self.0.choose_device(value);
-        }
-        // The modem follows these at once; a new profile may have start-up commands.
-        if key == keys::DISABLE_2G.0 || key == keys::DEVICE_PROFILE.0 {
-            if let Some(m) = self.0.state.lock().await.modem.clone() {
-                self.0.apply_modem_settings(&m).await;
-            }
-        }
-        if key == keys::SIP_ENABLED.0 || key == keys::SIP_ACCOUNT.0 || key == keys::SIP_PROXY.0 {
-            self.0.sip_changed.notify_one();
-        }
-        if key == phone_api::keys::CALL_WAITING.0 {
-            if let Some(m) = self.0.state.lock().await.modem.clone() {
-                self.0.apply_modem_settings(&m).await;
-            }
-        }
-        Ok(())
+        self.0.apply_setting(key, value).await
+    }
+
+    /// A setting changed for another program: it waits for the owner, as a text
+    /// or a call does. Dolphone's own apps get it at once. Never the SIP password.
+    async fn request_setting(
+        &self,
+        key: &str,
+        value: &str,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> zbus::fdo::Result<Placed> {
+        let who = caller::identify(conn, &hdr).await;
+        self.0.request_setting(key, value, &who).await
     }
 
     /// What the machine is taken to be. Anyone may ask: it is about the hardware.

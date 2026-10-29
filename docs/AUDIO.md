@@ -10,6 +10,7 @@ keeps it away from the sound card, so no app could route a call even if it wante
 | Speaker | the codec, speaker side (`dolphone_ec_sink`) | the device mic (`dolphone_ec_source`) | yes, WebRTC in PipeWire |
 | Headset (3.5 mm) | the codec, headphone side | the headset's mic (TRRS) | no |
 | Bluetooth | the headset's sink, in its hands-free profile | the headset's mic | the headset's own |
+| Earpiece (phones that have one) | the codec's earpiece, switched by the profile's `earpiece_commands` | the device mic | no |
 
 A mobile call is two `pw-loopback`s phoned starts when the call connects:
 
@@ -28,8 +29,9 @@ the call connects and whenever the route changes. Mute is baresip's mute.
 
 ## What switches routes
 
-- **Edit** in a call cycles Speaker → Headset → Bluetooth, skipping what is not
-  connected (and the desktop app's route menu sets one).
+- **Edit** in a call cycles Earpiece → Speaker → Headset → Bluetooth, skipping what
+  is not there; a call starts on the earpiece where the profile has one, otherwise
+  on the speaker (and the desktop app's route menu sets one).
 - A headset plugged into the jack takes the call; unplugging it falls back to the
   speaker. phoned reads `SW_HEADPHONE_INSERT` from whichever input device reports it,
   and notices a device that goes away and comes back.
@@ -55,7 +57,8 @@ key of the profile, for the machine in front of you.
 Some modems send call audio over a serial port instead of a sound card: the
 SIMCom SIM7600 in the uConsole's 4G extension sends 8 kHz mono 16-bit PCM on its
 audio port once `AT+CPCMREG=1` is sent (SIMCom's USB AUDIO Application Note V1.03,
-§2). A profile's `serial_pcm` names the port (or ModemManager's AudioPort is used),
+§2). phoned uses the port ModemManager reports as the modem's AudioPort, or else the
+profile's `serial_pcm`;
 its `call_at_start` and `call_at_end` turn the stream on and off, and phoned bridges
 it with two `pw-cat` processes, one each way, as nodes `dolphone-downlink` and
 `dolphone-uplink`. The port needs the `dialout` group.

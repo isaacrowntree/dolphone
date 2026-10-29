@@ -16,13 +16,15 @@
 
 ## Rules the design keeps
 
-1. **Add to FlipCTL, never replace it.** No launcher, status bar, keyboard or modem
-   settings of our own. The apps use FlipCTL's widgets, fonts and soft-key roles;
-   phoned raises them with `flipctl open`; SIM and network settings stay in
-   Flipper's own 5G Modem app.
+1. **Add to FlipCTL, never replace it.** No launcher, status bar or keyboard of our
+   own. The apps use FlipCTL's widgets, fonts and soft-key roles; phoned raises them
+   with `flipctl open`; SIM, APN and data settings stay in Flipper's own 5G Modem
+   app. What Dolphone sets on the modem is only what calls need: VoLTE, the carrier
+   profile, USB call audio, and refusing 2G when asked.
 2. **One owner per thing.** phoned is ModemManager's only client for Voice and
    Messaging (NetworkManager and Flipper's 5G Modem app read the same modem for data
-   and signal, untouched), with one deliberate exception: PipeWire's Bluetooth
+   and signal, untouched; mmsd-tng takes the MMS notices from Messaging and fetches
+   the messages for phoned), with one deliberate exception: PipeWire's Bluetooth
    hands-free support follows ModemManager's calls so a headset rings and its button
    answers, which is the only way to get that without reimplementing HFP. phoned is
    the only thing that routes call audio. Front ends never talk to either. The
@@ -114,7 +116,11 @@ written to the **audit log** (numbers masked), shown in Phone Settings.
 | What | Where |
 |---|---|
 | Messages, call log, alerts, grants, audit, blocks, settings | `~/.local/share/dolphone/dolphone.db` (0600) |
+| MMS pictures and other parts | `~/.local/share/dolphone/mms/` (0700) |
+| KDE Connect: this device's certificate, paired laptops | `~/.local/share/dolphone/kdeconnect/` |
 | Contacts | `~/.local/share/dolphone/contacts/*.vcf` |
+| The store's sealed key (when encrypted) | `~/.config/dolphone/store-key.cred` |
+| The SMS gateway's token | `~/.config/dolphone/gateway.token` (0600) |
 | Device profiles | built in; `/usr/share/dolphone/devices/`; `~/.config/dolphone/devices/` |
 | The owner's audio overrides | `~/.config/dolphone/audio.json` |
 | Rules on incoming texts | `~/.config/dolphone/rules.json` |

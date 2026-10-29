@@ -873,6 +873,7 @@ impl App {
                         "modem" => format!("{} wants to set up the modem (USB audio, VoLTE)", r.requester),
                         "grant" => format!("{} wants to text {target} without asking each time", r.requester),
                         "contact" => format!("{} wants to {} in your contacts", r.requester, r.target),
+                        "setting" => format!("{} wants to set {} to {}", r.requester, r.target, r.body),
                         _ => format!("{} wants to use the phone", r.requester),
                     }
                     .into(),
@@ -888,6 +889,7 @@ impl App {
                         "modem" => "Saved in the modem, which restarts",
                         "grant" => "You can revoke it in Settings",
                         "contact" => "A contact decides who a caller shows as",
+                        "setting" => "Change it back in Settings",
                         _ => "Asked by another program",
                     }
                     .into(),

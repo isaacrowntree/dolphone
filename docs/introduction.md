@@ -18,7 +18,7 @@ Flipper's own buttons; in desktop mode it is a proper desktop app; from a shell 
 </p>
 
 > **Unofficial.** Dolphone is not made or endorsed by Flipper Devices.
-> **Not for emergencies.** It passes 000/112/911 to the modem as emergency calls and
+> **Not for emergencies.** It passes 000/112/911 to the modem, which the network treats as emergency calls, and
 > never blocks them, but it is hobby software on a pre-release device: carry a real
 > phone.
 
@@ -27,7 +27,7 @@ Flipper's own buttons; in desktop mode it is a proper desktop app; from a shell 
 | | |
 |---|---|
 | **Calls** | Dial, answer, decline, hold, swap and merge (conference), call waiting, keypad tones, mute; speed dial (hold 2–9) and voicemail (hold 1); T9 name matching; the country's own busy and ringback tones; a call log with missed calls |
-| **Calls over the internet** | A SIP account (through baresip) for when there is no signal, or always, with texts over SIP; same screens, buttons and headsets; a SIP call and a mobile call can be held and swapped. Emergency calls always go over the mobile network |
+| **Calls over the internet** | A SIP account (through baresip) for when there is no signal, or always, receiving texts over SIP too; same screens, buttons and headsets; a SIP call and a mobile call can be held and swapped. Emergency calls always go over the mobile network |
 | **Texts** | Conversations, multipart texts with a live segment counter, quick replies, delivery reports, resend for a failed text, search, export to Android (SMS Backup & Restore) |
 | **Picture messages and group texts** | MMS through mmsd-tng: pictures shown in the desktop app, group conversations as one thread, replies to everyone |
 | **Carrier services** | Call forwarding (`**21*n#`, `*#21#`, `##002#`), caller ID (`#31#`), call waiting, and USSD balance codes from the keypad; a check of the modem's own setup for calls (USB audio, VoLTE, the carrier profile) that sets it right with one press |
@@ -90,7 +90,7 @@ RM520N-GL's USB audio gives Linux two-way call audio.
 Flipper OS is Debian 13 (arm64):
 
 ```sh
-sudo apt install ./dolphone_0.1.0_arm64.deb   # from the releases page
+sudo apt install ./dolphone_0.1.0_arm64.deb   # built with scripts/package-deb.sh until the first release
 dolphone-install-apps                          # as yourself: Apps > Phone on the panel
 ```
 
@@ -98,8 +98,8 @@ The install asks one question: whether Dolphone may send setup commands to the m
 which turns on ModemManager's debug mode (yes by default on a Flipper One, where call
 audio needs it; `sudo dolphone-modem-access on|off` changes it later). The package
 recommends what the optional parts use: mmsd-tng for picture messages and group texts,
-baresip for SIP, bluez-obexd for copying contacts from a phone, espeak-ng for spoken
-caller ID, wl-clipboard or xclip for Copy. More in [docs/install.md](install.md).
+baresip for SIP, bluez-obexd for copying contacts from a phone, wl-clipboard or xclip
+for Copy, and suggests espeak-ng for spoken caller ID. More in [docs/install.md](install.md).
 
 ## Other devices
 
@@ -165,6 +165,8 @@ phonectl device                                     # which device profile, and 
   FlipCTL's fonts; names it cannot draw fall back to the number.
 - **News outside Dolphone's apps on the panel** (a status-bar badge, a toast): that
   is FlipCTL's to offer.
+- **Sending texts to a SIP address**: baresip 1.1.0 cannot; texts over SIP are
+  received, and replies go over the mobile network.
 - **RCS**: there is no route to it from Linux.
 
 [ROADMAP.md](roadmap.md) has the details.
