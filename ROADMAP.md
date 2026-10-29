@@ -26,12 +26,13 @@ audio. What only a board can confirm:
 - **MMS on a carrier**: mmsd-tng fetches over mobile data with the carrier's MMSC
   and APN, which it mostly finds by itself; nothing here has met a real MMSC.
 
-## 1. Needs someone else first
+## 1. Optional, later
 
-- **FlipCTL**: a status-bar badge for missed calls and texts, a toast, and a home
-  tile, so the news reaches the panel outside Dolphone's apps; a large-text mode and
-  a fallback font beyond Latin and Cyrillic (Dolphone draws with FlipCTL's fonts, and
-  shows the number where a name cannot be drawn). Worth raising with Flipper.
+- **The panel outside Dolphone's apps**: a status-bar badge for missed calls and
+  texts, a toast, a home tile; a large-text mode and a font beyond Latin and
+  Cyrillic (Dolphone draws with FlipCTL's fonts, and shows the number where a name
+  cannot be drawn). FlipCTL has none of these today; Dolphone can add them as
+  options of its own later, without waiting for FlipCTL.
 - **AT commands without ModemManager's debug mode.** ModemManager passes a client's
   AT commands only with `--debug` (or when built with `at_command_via_dbus`), which
   also raises its log level. Dolphone asks at install and makes it one command to
@@ -42,5 +43,5 @@ audio. What only a board can confirm:
 
 ## 2. Not built yet
 
-Nothing that can be built without the hardware or an upstream change.
+Nothing else that can be built without the hardware.
 

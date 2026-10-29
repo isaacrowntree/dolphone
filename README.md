@@ -171,10 +171,10 @@ and `gdbus` reach as well.
 - **A real call.** Everything is tested against stand-ins; the hardware test in
   [docs/HARDWARE.md](docs/HARDWARE.md) comes first, and with it the Quectel commands
   that only real firmware can confirm.
-- **A large-text mode and fonts beyond Latin and Cyrillic** on the panel: both are
-  FlipCTL's fonts; names it cannot draw fall back to the number.
-- **News outside Dolphone's apps on the panel** (a status-bar badge, a toast): that
-  is FlipCTL's to offer.
+- **A large-text mode, fonts beyond Latin and Cyrillic, and news outside Dolphone's
+  apps on the panel** (a status-bar badge, a toast): FlipCTL has none of these, and
+  Dolphone may add them later as options. Until then, names the font cannot draw
+  fall back to the number.
 - **Sending texts to a SIP address**: baresip 1.1.0 cannot; texts over SIP are
   received, and replies go over the mobile network.
 - **RCS**: there is no route to it from Linux.
