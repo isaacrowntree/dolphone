@@ -32,6 +32,10 @@ impl Progress {
 pub struct Cadence {
     pub freqs: &'static [f32],
     pub steps: &'static [u32],
+    /// The level of each burst in turn, as a factor of full level, repeating; empty
+    /// is every burst at full level. Australia's congestion tone is its busy tone
+    /// with every second burst quieter, so this is all that tells the two apart.
+    pub levels: &'static [f32],
 }
 
 impl Cadence {
@@ -43,11 +47,23 @@ impl Cadence {
             self.steps.iter().sum()
         }
     }
+
+    /// The level of the `n`th burst (counting from 0), as a factor of full level.
+    pub fn level(&self, n: usize) -> f32 {
+        if self.levels.is_empty() {
+            1.0
+        } else {
+            self.levels[n % self.levels.len()]
+        }
+    }
 }
 
 const fn c(freqs: &'static [f32], steps: &'static [u32]) -> Cadence {
-    Cadence { freqs, steps }
+    Cadence { freqs, steps, levels: &[] }
 }
+
+/// 10 dB down, as an amplitude factor.
+const MINUS_10_DB: f32 = 0.316;
 
 /// The tone for `region` (ISO 3166 alpha-2), falling back to the CEPT tones most
 /// of Europe and much of the world use.
@@ -64,16 +80,23 @@ pub fn cadence(region: &str, p: Progress) -> Cadence {
     const CEPT_BUSY: Cadence = c(&[425.0], &[500, 500]);
     const CEPT_CONGESTION: Cadence = c(&[425.0], &[250, 250]);
     match (region.to_ascii_uppercase().as_str(), p) {
-        // Australia (Communications Alliance S002).
+        // Australia (Communications Alliance S002). Congestion has the busy
+        // cadence with every second burst 10 to 15 dB down; -10 dB is what
+        // DAHDI settled on (Asterisk issue DAHTOOL-66, 2014), and Asterisk's
+        // indications.conf "au" writes it as 425/375,0/375,420/375,0/375.
         ("AU", Ringback) => AU_RING,
         ("AU", Busy) => c(&[425.0], &[375, 375]),
-        ("AU", Congestion) => c(&[425.0], &[375, 375, 375, 375]),
+        ("AU", Congestion) => Cadence { freqs: &[425.0], steps: &[375, 375, 375, 375], levels: &[1.0, MINUS_10_DB] },
         ("NZ", Ringback) => UK_RING,
         ("NZ", Busy) => c(&[400.0], &[500, 500]),
         ("NZ", Congestion) => c(&[400.0], &[250, 250]),
+        // Ireland rings like the UK but is busy like the rest of Europe: "Ireland
+        // follows the ETSI recommendation for the busy tone, but the ringback tone
+        // is the same as that used in the UK" (Wikipedia, "Busy signal"). Its busy
+        // and congestion are the CEPT ones below.
         ("GB" | "IE", Ringback) => UK_RING,
-        ("GB" | "IE", Busy) => c(&[400.0], &[375, 375]),
-        ("GB" | "IE", Congestion) => c(&[400.0], &[400, 350, 225, 525]),
+        ("GB", Busy) => c(&[400.0], &[375, 375]),
+        ("GB", Congestion) => c(&[400.0], &[400, 350, 225, 525]),
         // North America (the NANP countries share them).
         ("US" | "CA" | "PR" | "JM" | "BS" | "BB" | "TT", Ringback) => NA_RING,
         ("US" | "CA" | "PR" | "JM" | "BS" | "BB" | "TT", Busy) => NA_BUSY,
@@ -130,8 +153,21 @@ mod tests {
     }
 
     #[test]
+    fn busy_and_congestion_differ() {
+        for r in ["AU", "NZ", "GB", "IE", "US", "FR", "DE", "IT", "IN", "CN", "HK", "SG", "KR", "BR", "ZA", "XX"] {
+            assert_ne!(cadence(r, Progress::Busy), cadence(r, Progress::Congestion), "{r}");
+        }
+        let au = cadence("AU", Progress::Congestion);
+        assert_eq!((au.level(0), au.level(1), au.level(2)), (1.0, MINUS_10_DB, 1.0));
+        assert_eq!(cadence("AU", Progress::Busy).level(1), 1.0);
+        assert_eq!(cadence("IE", Progress::Ringback), cadence("GB", Progress::Ringback));
+        assert_eq!(cadence("IE", Progress::Busy), cadence("XX", Progress::Busy));
+    }
+
+    #[test]
     fn cadences_are_well_formed() {
-        for r in ["AU", "NZ", "GB", "US", "FR", "DE", "IT", "JP", "IN", "CN", "HK", "SG", "KR", "BR", "ZA", "XX"] {
+        for r in ["AU", "NZ", "GB", "IE", "US", "FR", "DE", "IT", "JP", "IN", "CN", "HK", "SG", "KR", "BR", "ZA", "XX"]
+        {
             for p in [Progress::Ringback, Progress::Busy, Progress::Congestion] {
                 let t = cadence(r, p);
                 assert!(!t.freqs.is_empty(), "{r} {p:?}");

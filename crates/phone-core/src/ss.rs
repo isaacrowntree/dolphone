@@ -7,6 +7,11 @@
 //! (21 forward everything, 67 when busy, 61 when unanswered, 62 when unreachable,
 //! 002 all, 004 all conditional, 43 call waiting, 31 caller ID); SIA the number to
 //! forward to; SIB a basic service group; SIC, for 61, the seconds to ring first.
+//!
+//! A few codes are not network services at all: the SIM's PIN and PUK changes
+//! (`**04*`, `**042*`, `**05*`, `**052*`) and the IMEI (`*#06#`). They come out of
+//! [`parse_code`] as their own variants so the daemon can handle them on the device;
+//! sent to the network as USSD they would carry a PIN in clear.
 
 /// What a code asks for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,6 +28,43 @@ pub enum Ss {
     Unsupported(&'static str),
 }
 
+/// Any keypad code: a network service, or one of the codes the device answers
+/// itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Code {
+    Service(Ss),
+    /// Change a PIN: `**04*old*new*new#` for PIN1 (`which` 1), `**042*…#` for PIN2
+    /// (`which` 2). The repeated new PIN has already been checked.
+    Pin {
+        which: u8,
+        old: String,
+        new: String,
+    },
+    /// Unblock a PIN with its PUK: `**05*puk*new*new#` (`which` 1) or `**052*…#`
+    /// (`which` 2).
+    Puk {
+        which: u8,
+        puk: String,
+        new: String,
+    },
+    /// `*#06#`: show the IMEI.
+    Imei,
+}
+
+/// Why a code that is recognisably a service code cannot be carried out, in words
+/// for the keypad's reply screen.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum Invalid {
+    #[error("the ring time before forwarding is 5 to 30 seconds, in steps of 5")]
+    NoReplyTime,
+    #[error("the two new PINs are not the same")]
+    PinMismatch,
+    #[error("a PIN is 4 to 8 digits")]
+    PinLength,
+    #[error("a PUK is 8 digits")]
+    PukLength,
+}
+
 /// `+CCFC` modes (27.007 §7.11).
 pub mod mode {
     pub const DISABLE: u8 = 0;
@@ -34,6 +76,15 @@ pub mod mode {
 
 /// Service codes for forwarding and their `+CCFC` reason (22.030 Annex B).
 const FORWARDS: &[(&str, u8)] = &[("21", 0), ("67", 1), ("61", 2), ("62", 3), ("002", 4), ("004", 5)];
+
+/// The `+CCFC` reasons that take a no-reply time (27.007 §7.11: "when <reason>=2
+/// (no reply), 4 (all call forwarding) or 5 (all conditional call forwarding)").
+fn takes_time(reason: u8) -> bool {
+    matches!(reason, 2 | 4 | 5)
+}
+
+/// Barring service codes (22.030 Annex B), and 03 for changing the barring password.
+const BARRING: &[&str] = &["33", "330", "331", "332", "333", "35", "351", "353", "03"];
 
 fn reason_name(reason: u8) -> &'static str {
     match reason {
@@ -47,18 +98,51 @@ fn reason_name(reason: u8) -> &'static str {
 }
 
 /// Parse a keypad code, or None when it is not a supplementary-service code.
+///
+/// The codes the device handles itself (PIN, PUK, IMEI) come back as
+/// [`Ss::Unsupported`] here, and a code with a bad value (a ring time of 7 s) as
+/// None, so a caller of this older form never sends either to the network; use
+/// [`parse_code`] to handle them.
 pub fn parse(code: &str) -> Option<Ss> {
+    match parse_code(code)? {
+        Ok(Code::Service(s)) => Some(s),
+        Ok(Code::Pin { .. }) => Some(Ss::Unsupported("PIN change")),
+        Ok(Code::Puk { .. }) => Some(Ss::Unsupported("PIN unblocking")),
+        Ok(Code::Imei) => Some(Ss::Unsupported("IMEI")),
+        Err(_) => None,
+    }
+}
+
+/// Parse a keypad code: None when it is not a service code at all (so USSD, or a
+/// number), an error when it is one with a value that cannot be right.
+pub fn parse_code(code: &str) -> Option<Result<Code, Invalid>> {
     let c = code.trim();
+    if c == "*#06#" {
+        return Some(Ok(Code::Imei));
+    }
     let (procedure, rest) = ["**", "##", "*#", "*", "#"].iter().find_map(|p| c.strip_prefix(p).map(|r| (*p, r)))?;
     let body = rest.strip_suffix('#')?;
-    let mut parts = body.split('*');
-    let sc = parts.next()?;
-    let sia = parts.next().filter(|s| !s.is_empty());
-    let _sib = parts.next();
-    let sic = parts.next().filter(|s| !s.is_empty());
-    if parts.next().is_some() || sc.is_empty() || !sc.chars().all(|ch| ch.is_ascii_digit()) {
+    let parts: Vec<&str> = body.split('*').collect();
+    let sc = parts[0];
+    if sc.is_empty() || !sc.chars().all(|ch| ch.is_ascii_digit()) {
         return None;
     }
+    if let Some(which) = match sc {
+        "04" | "05" => Some(1),
+        "042" | "052" => Some(2),
+        _ => None,
+    } {
+        return sim_code(procedure, sc.starts_with("04"), which, &parts[1..]);
+    }
+    if BARRING.contains(&sc) {
+        // Barring takes the network password as SIA, so any number of parts.
+        return Some(Ok(Code::Service(Ss::Unsupported("call barring"))));
+    }
+    if parts.len() > 4 {
+        return None;
+    }
+    let sia = parts.get(1).copied().filter(|s| !s.is_empty());
+    let sic = parts.get(3).copied().filter(|s| !s.is_empty());
     if let Some((_, reason)) = FORWARDS.iter().find(|(s, _)| *s == sc) {
         let number = sia.map(str::to_string);
         if number.as_deref().is_some_and(|n| !n.chars().all(|ch| ch.is_ascii_digit() || ch == '+')) {
@@ -77,14 +161,23 @@ pub fn parse(code: &str) -> Option<Ss> {
         if mode == mode::REGISTER && number.is_none() {
             return None;
         }
-        let time = sic.and_then(|t| t.parse().ok()).filter(|t| (5..=30).contains(t));
-        return Some(Ss::Forward { reason: *reason, mode, number, time });
+        // The ring time means something only for the no-reply reasons; given to
+        // another it is ignored, as the network would. A bad one is an error
+        // rather than quietly forwarding on the network's default.
+        let time = match sic {
+            Some(t) if takes_time(*reason) => match t.parse::<u8>() {
+                Ok(t) if (5..=30).contains(&t) && t % 5 == 0 => Some(t),
+                _ => return Some(Err(Invalid::NoReplyTime)),
+            },
+            _ => None,
+        };
+        return Some(Ok(Code::Service(Ss::Forward { reason: *reason, mode, number, time })));
     }
     if sia.is_some() {
         // `#31#number` hides the caller ID for one call; that is a call, not this.
         return None;
     }
-    Some(match (sc, procedure) {
+    Some(Ok(Code::Service(match (sc, procedure) {
         ("43", "*") => Ss::Waiting(Some(true)),
         ("43", "#") => Ss::Waiting(Some(false)),
         ("43", "*#") => Ss::Waiting(None),
@@ -93,15 +186,56 @@ pub fn parse(code: &str) -> Option<Ss> {
         ("31", "*") => Ss::CallerId(Some(false)),
         ("31", "#") => Ss::CallerId(Some(true)),
         ("31", "*#") => Ss::CallerId(None),
-        ("33" | "330" | "331" | "332" | "333" | "35" | "351", _) => Ss::Unsupported("call barring"),
         ("30" | "76" | "77", _) => Ss::Unsupported("caller and connected-line presentation"),
         _ => return None,
+    })))
+}
+
+/// `**04*old*new*new#` and its PIN2 and PUK siblings (22.030 §6.6). Only the
+/// register procedure is defined; any other is not a code.
+fn sim_code(procedure: &str, change: bool, which: u8, args: &[&str]) -> Option<Result<Code, Invalid>> {
+    let [first, new, again] = args else { return None };
+    if procedure != "**" || ![first, new, again].iter().all(|a| a.chars().all(|ch| ch.is_ascii_digit())) {
+        return None;
+    }
+    let pin_ok = |p: &str| (4..=8).contains(&p.len());
+    Some(if new != again {
+        Err(Invalid::PinMismatch)
+    } else if !pin_ok(new) || (change && !pin_ok(first)) {
+        Err(Invalid::PinLength)
+    } else if !change && first.len() != 8 {
+        Err(Invalid::PukLength)
+    } else if change {
+        Ok(Code::Pin { which, old: first.to_string(), new: new.to_string() })
+    } else {
+        Ok(Code::Puk { which, puk: first.to_string(), new: new.to_string() })
     })
 }
 
+/// A number dialled with a one-call caller-ID prefix (22.030 Annex B): `#31#number`
+/// hides the caller ID for this call, `*31#number` shows it. The answer is whether
+/// to hide it (Some(true) for `#31#`, Some(false) for `*31#`, None without a
+/// prefix) and the number to dial. Note the per-call meaning is the reverse of the
+/// standing setting in [`parse`]: Android's GsmMmiCode maps a temporary
+/// activation (`*31#number`) to CLIR suppression and a deactivation (`#31#number`)
+/// to CLIR invocation.
+pub fn strip_clir_prefix(s: &str) -> (Option<bool>, &str) {
+    let t = s.trim_start();
+    for (prefix, hide) in [("#31#", true), ("*31#", false)] {
+        if let Some(rest) = t.strip_prefix(prefix) {
+            if rest.trim_start().starts_with(|c: char| c.is_ascii_digit() || c == '+') {
+                return (Some(hide), rest.trim_start());
+            }
+        }
+    }
+    (None, s)
+}
+
 /// The `+CCFC` command for a forwarding code. Class 1 is voice, so data and fax
-/// forwarding are left as they are; `<type>` is 145 for a number with `+`.
+/// forwarding are left as they are; `<type>` is 145 for a number with `+`. The
+/// time goes out only for the reasons that take one.
 pub fn forward_command(reason: u8, mode: u8, number: Option<&str>, time: Option<u8>) -> String {
+    let time = time.filter(|_| takes_time(reason));
     match number {
         Some(n) => {
             let ty = if n.starts_with('+') { 145 } else { 129 };
@@ -160,7 +294,7 @@ pub fn describe_forwarding(reason: u8, response: &str) -> String {
         let time = f.get(6).and_then(|t| t.parse::<u32>().ok());
         out.push(match (active, number) {
             (true, Some(n)) => match time {
-                Some(t) if reason == 2 => format!("Forwarding {what}: on, to {n} after {t} s"),
+                Some(t) if takes_time(reason) => format!("Forwarding {what}: on, to {n} after {t} s"),
                 _ => format!("Forwarding {what}: on, to {n}"),
             },
             (true, None) => format!("Forwarding {what}: on"),
@@ -225,8 +359,62 @@ mod tests {
         assert_eq!(parse("#31#"), Some(Ss::CallerId(Some(true))));
         assert_eq!(parse("*31#"), Some(Ss::CallerId(Some(false))));
         assert_eq!(parse("*#31#"), Some(Ss::CallerId(None)));
-        assert_eq!(parse("*33*1234#"), None);
+        assert_eq!(parse("*33*1234#"), Some(Ss::Unsupported("call barring")), "with the password");
         assert_eq!(parse("*#33#"), Some(Ss::Unsupported("call barring")));
+        assert_eq!(parse("*#353#"), Some(Ss::Unsupported("call barring")));
+        assert_eq!(parse("**03*330*1234*5678*5678#"), Some(Ss::Unsupported("call barring")));
+    }
+
+    #[test]
+    fn sim_codes_stay_on_the_device() {
+        let pin = |which, old: &str, new: &str| Some(Ok(Code::Pin { which, old: old.into(), new: new.into() }));
+        assert_eq!(parse_code("**04*1234*5678*5678#"), pin(1, "1234", "5678"));
+        assert_eq!(parse_code("**042*1234*87654321*87654321#"), pin(2, "1234", "87654321"));
+        assert_eq!(
+            parse_code("**05*12345678*1234*1234#"),
+            Some(Ok(Code::Puk { which: 1, puk: "12345678".into(), new: "1234".into() }))
+        );
+        assert_eq!(
+            parse_code("**052*12345678*1234*1234#"),
+            Some(Ok(Code::Puk { which: 2, puk: "12345678".into(), new: "1234".into() }))
+        );
+        assert_eq!(parse_code("*#06#"), Some(Ok(Code::Imei)));
+        assert_eq!(parse_code("**04*1234*5678*5679#"), Some(Err(Invalid::PinMismatch)));
+        assert_eq!(parse_code("**04*1234*567*567#"), Some(Err(Invalid::PinLength)));
+        assert_eq!(parse_code("**05*1234*5678*5678#"), Some(Err(Invalid::PukLength)));
+        assert_eq!(parse_code("**04*1234#"), None);
+        // The older entry point never lets one through as something to send.
+        assert_eq!(parse("**04*1234*5678*5678#"), Some(Ss::Unsupported("PIN change")));
+        assert_eq!(parse("**05*12345678*1234*1234#"), Some(Ss::Unsupported("PIN unblocking")));
+        assert_eq!(parse("*#06#"), Some(Ss::Unsupported("IMEI")));
+    }
+
+    #[test]
+    fn no_reply_time() {
+        assert_eq!(parse_code("**61*0412345678**7#"), Some(Err(Invalid::NoReplyTime)));
+        assert_eq!(parse_code("**61*0412345678**35#"), Some(Err(Invalid::NoReplyTime)));
+        assert_eq!(parse_code("**61*0412345678**x#"), Some(Err(Invalid::NoReplyTime)));
+        assert_eq!(parse("**61*0412345678**7#"), None);
+        assert_eq!(
+            parse("**004*0412345678**30#"),
+            Some(Ss::Forward { reason: 5, mode: mode::REGISTER, number: Some("0412345678".into()), time: Some(30) })
+        );
+        // Forwarding everything has no ring time to give.
+        assert_eq!(
+            parse("**21*0412345678**20#"),
+            Some(Ss::Forward { reason: 0, mode: mode::REGISTER, number: Some("0412345678".into()), time: None })
+        );
+        assert_eq!(forward_command(0, 3, Some("0412"), Some(20)), "AT+CCFC=0,3,\"0412\",129,1");
+        assert_eq!(forward_command(4, 3, Some("0412"), Some(20)), "AT+CCFC=4,3,\"0412\",129,1,,,20");
+    }
+
+    #[test]
+    fn one_call_caller_id() {
+        assert_eq!(strip_clir_prefix("#31#0412345678"), (Some(true), "0412345678"));
+        assert_eq!(strip_clir_prefix("*31#+61412345678"), (Some(false), "+61412345678"));
+        assert_eq!(strip_clir_prefix("0412345678"), (None, "0412345678"));
+        assert_eq!(strip_clir_prefix("#31#"), (None, "#31#"), "the standing setting, not a call");
+        assert_eq!(strip_clir_prefix("*31#*100#"), (None, "*31#*100#"));
     }
 
     #[test]

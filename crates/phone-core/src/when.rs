@@ -56,7 +56,9 @@ pub fn format_short(t: Local, now: Local) -> String {
 }
 
 /// An ISO 8601 timestamp as ModemManager reports a text's (the network's own time:
-/// "2026-10-29T10:02:00+11:00", "+11", or "Z"), as Unix seconds.
+/// "2026-10-29T10:02:00+11:00", "+11", or "Z"), as Unix seconds. A time with no
+/// zone at all is local time, which is what ISO 8601 says it means and what a
+/// network that leaves the zone out has sent.
 pub fn parse_iso(s: &str) -> Option<i64> {
     let s = s.trim();
     let (date, rest) = s.split_once('T')?;
@@ -66,6 +68,9 @@ pub fn parse_iso(s: &str) -> Option<i64> {
     let (time, zone) = rest.split_at(split);
     let mut t = time.split(':').map(|p| p.split('.').next().unwrap_or("0").parse::<i64>());
     let (hh, mm, ss) = (t.next()?.ok()?, t.next().unwrap_or(Ok(0)).ok()?, t.next().unwrap_or(Ok(0)).ok()?);
+    if !(0..=23).contains(&hh) || !(0..=59).contains(&mm) || !(0..=59).contains(&ss) {
+        return None;
+    }
     let offset = match zone.chars().next() {
         Some(sign @ ('+' | '-')) => {
             let z = &zone[1..];
@@ -77,7 +82,13 @@ pub fn parse_iso(s: &str) -> Option<i64> {
                 secs
             }
         }
-        _ => 0,
+        Some(_) => 0,
+        None => {
+            if !(1..=12).contains(&m) || !(1..=31).contains(&day) {
+                return None;
+            }
+            return local_to_unix(y, m, day, hh, mm, ss);
+        }
     };
     if !(1..=12).contains(&m) || !(1..=31).contains(&day) {
         return None;
@@ -91,6 +102,23 @@ pub fn parse_iso(s: &str) -> Option<i64> {
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = era * 146_097 + doe - 719_468;
     Some(days * 86_400 + hh * 3600 + mm * 60 + ss - offset)
+}
+
+/// A wall-clock time in the device's zone as Unix seconds, through mktime, which
+/// knows the zone's daylight-saving rules.
+fn local_to_unix(y: i64, m: i64, day: i64, hh: i64, mm: i64, ss: i64) -> Option<i64> {
+    // SAFETY: mktime reads and normalises only the tm it is given.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    tm.tm_year = i32::try_from(y - 1900).ok()?;
+    tm.tm_mon = (m - 1) as i32;
+    tm.tm_mday = day as i32;
+    tm.tm_hour = hh as i32;
+    tm.tm_min = mm as i32;
+    tm.tm_sec = ss as i32;
+    // Let the C library decide whether daylight saving applies at that time.
+    tm.tm_isdst = -1;
+    let t = unsafe { libc::mktime(&mut tm) };
+    (t != -1).then_some(t as i64)
 }
 
 /// A call's length: "0:42", "12:05", "1:02:03".
@@ -129,6 +157,18 @@ mod tests {
         assert_eq!(parse_iso("2026-10-28T18:02:00-05"), Some(1_793_228_520));
         assert_eq!(parse_iso(""), None);
         assert_eq!(parse_iso("not a time"), None);
+        assert_eq!(parse_iso("2026-10-29T24:00:00Z"), None);
+        assert_eq!(parse_iso("2026-10-29T10:60:00Z"), None);
+        assert_eq!(parse_iso("2026-10-29T10:02:61+11:00"), None);
+        assert_eq!(parse_iso("2026-13-01T10:02:00"), None);
+    }
+
+    #[test]
+    fn no_zone_is_local_time() {
+        let t = parse_iso("2026-10-29T10:02:00").unwrap();
+        let l = local(t);
+        assert_eq!((l.year, l.month, l.day, l.hour, l.minute), (2026, 9, 29, 10, 2));
+        assert_eq!(parse_iso("2026-10-29T25:02:00"), None);
     }
 
     #[test]
