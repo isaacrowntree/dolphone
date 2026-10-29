@@ -1,6 +1,7 @@
 //! Dolphone's Messages, a FlipCTL app.
 
 mod model;
+mod pictures;
 mod view;
 
 use std::cell::RefCell;
@@ -341,7 +342,7 @@ impl App {
                 self.model.book = phone_core::contacts::Book::load(&dir, &self.model.region);
             }
             Event::Setting(k, v) if k == "region" => self.model.region = v,
-            Event::Placed { kind: "sms", placed } if placed.pending != 0 => {
+            Event::Placed { kind: "sms" | "mms", placed } if placed.pending != 0 => {
                 self.model.notice = Some(vec!["Waiting for you to confirm".into(), "on the Phone screen.".into()]);
             }
             Event::Locked(locked) => {
@@ -369,6 +370,9 @@ impl App {
                     self.bus.run(move |c| async move { c.messages.mark_read(&peer).await.map(|_| vec![]) })
                 }
                 Action::Send(to, body) => self.bus.send(to, body),
+                Action::SendMms(to, body, files) => self.bus.send_mms(to, body, files),
+                // Two folders' listings and a stat each: quick enough to wait for.
+                Action::Pictures => self.model.set_pictures(pictures::list(&pictures::folders())),
                 Action::Write(what, text) => {
                     let title = match what {
                         Writing::To => "To (number or name)".to_string(),
@@ -703,6 +707,38 @@ mod tests {
         shot("conversation-delivered-failed", &m, None);
         m.screen = model::Screen::Options;
         shot("options-resend", &m, None);
+        // A picture to attach, and attached above the text.
+        m.open("+61491570156");
+        m.set_conversation("+61491570156", Vec::new());
+        let day = 1_793_000_000;
+        let pic = |name: &str, size: u64, at: i64| pictures::Picture {
+            path: format!("/home/me/Pictures/{name}.jpg"),
+            name: name.into(),
+            size,
+            at,
+        };
+        m.key(model::Input::View, 0, view::VISIBLE);
+        m.key(model::Input::Down, 0, view::VISIBLE);
+        m.key(model::Input::Run, 0, view::VISIBLE);
+        m.set_pictures(vec![
+            pic("Beach day", 2_400_000, day - 600),
+            pic("Screenshot from 2026-10-29 09-14-02", 310_000, day - 7_200),
+            pic("IMG 20261027 181502", 3_900_000, day - 200_000),
+            pic("Sunset", 1_100_000, day - 900_000),
+            pic("Receipt", 95_000, day - 2_000_000),
+            pic("Old", 80_000, day - 9_000_000),
+        ]);
+        m.key(model::Input::Down, 0, view::VISIBLE);
+        m.key(model::Input::Run, 0, view::VISIBLE);
+        m.key(model::Input::View, 0, view::VISIBLE);
+        shot("attach", &m, None);
+        m.key(model::Input::Run, 0, view::VISIBLE);
+        m.written(Writing::Body, Some("Here's the beach, and the booking.".into()));
+        assert_eq!(m.attached.len(), 2);
+        shot("attached", &m, None);
+        m.set_pictures(Vec::new());
+        m.screen = model::Screen::Attach;
+        shot("attach-empty", &m, None);
         m.screen = model::Screen::Threads;
         m.missed = 1;
         shot("threads-missed", &m, None);

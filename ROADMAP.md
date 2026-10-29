@@ -42,9 +42,6 @@ audio. What only a board can confirm:
 
 ## 2. Not built yet
 
-- **Attaching a picture on the panel.** The desktop app attaches pictures through
-  the file-chooser portal; the panel has nowhere to pick from, so there it is
-  `phonectl mms` or the D-Bus API.
 - **Alert tones outside the US.** The US pattern is the one in 47 CFR 10.520;
   EU-Alert (ETSI TS 102 900) leaves the pattern to each country, and elsewhere a
   short tone plays until a country's published pattern is added.
