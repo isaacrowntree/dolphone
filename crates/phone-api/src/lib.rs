@@ -40,6 +40,12 @@ use zbus::{proxy, Type};
 pub const SERVICE: &str = "io.github.isaacrowntree.Dolphone";
 pub const PATH: &str = "/io/github/isaacrowntree/Dolphone";
 
+/// The most one picture message may carry, in all: carriers cap an MMS at about
+/// 1 MB (mmsd-tng's TotalMaxAttachmentSize), so this is only a guard.
+pub const MMS_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// And in how many files.
+pub const MMS_MAX_FILES: usize = 10;
+
 pub mod iface {
     pub const CALLS: &str = "io.github.isaacrowntree.Dolphone1.Calls";
     pub const MESSAGES: &str = "io.github.isaacrowntree.Dolphone1.Messages";

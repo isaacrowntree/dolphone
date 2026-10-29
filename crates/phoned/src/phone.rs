@@ -2458,8 +2458,8 @@ impl Phone {
         if members.is_empty() || members.len() > 20 || (body.trim().is_empty() && files.is_empty()) {
             return Err(zbus::fdo::Error::InvalidArgs("an MMS needs 1 to 20 numbers, and a text or a file".into()));
         }
-        if files.len() > 10 {
-            return Err(zbus::fdo::Error::InvalidArgs("at most 10 files".into()));
+        if files.len() > phone_api::MMS_MAX_FILES {
+            return Err(zbus::fdo::Error::InvalidArgs(format!("at most {} files", phone_api::MMS_MAX_FILES)));
         }
         let classes: Vec<Class> = members.iter().map(|m| number::classify(m, &region)).collect();
         if classes.contains(&Class::Emergency) {

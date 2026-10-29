@@ -69,10 +69,11 @@ emergency alert stays still when the ringer is on Silent.
 |---|---|---|---|---|---|
 | Threads | move, Ok opens | exit | | new message | open |
 | Conversation | Up/Down scroll, Left/Right page, Ok writes | back | options | write | call |
-| Options (Resend failed text, Quick reply, Call, Block, Delete) | move | back | back | | select |
+| Options (Resend failed text, Quick reply, Attach a picture, Call, Block, Delete) | move | back | back | | select |
 | Quick reply | choose | back | | edit it first | use (to the preview) |
+| Attach a picture | choose, Ok as Run | back | | | **Add** (to the preview), or **Remove** one already added |
 | Keyboard (FlipCTL's) | type | cancel | 123 | backspace | done |
-| Preview | | edit again | | edit again | **Send** |
+| Preview | | edit again | **Attach** (**Pictures** once one is added) | edit again | **Send** |
 | Locked (a Messages PIN is set) | Ok types the PIN | exit | | type the PIN | **Unlock**: type the PIN |
 | PIN keyboard (opens on 123, the PIN shown as \*) | type | exit Messages | ABC | backspace | **Unlock** (4 to 12 digits) |
 
@@ -80,6 +81,15 @@ With a Messages PIN set (Settings > Privacy), Messages opens on the PIN and show
 nothing of the texts until it is right; it stays open for the time set there, then
 asks again. A wrong PIN says so; after five, phoned makes you wait. A number the
 Dialer hands over while locked opens once the PIN is in.
+
+**Attach a picture** lists the newest 50 pictures (JPEG, PNG, GIF, WebP) in the
+Pictures and Downloads folders (XDG's, from `user-dirs.dirs`, else `~/Pictures` and
+`~/Downloads`) and the folders directly in them, with each one's size and date. Links
+are not followed, and a file phoned would not send (empty, unreadable, over 8 MB) is
+left out. What is added is named above the text on the preview, which is then a
+picture message (a text is optional); to take one off, open the pictures again and
+**Remove** it. Up to 10, 8 MB in all, go in one message; a group's goes to everyone.
+Without pictures the preview sends a text, as before.
 
 A picture message shows its text with `[Picture]` (or `[Audio]`, `[Contact]`) below:
 the panel is too small for the picture, which the desktop app shows. A group

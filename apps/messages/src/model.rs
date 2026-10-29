@@ -8,6 +8,8 @@ use phone_core::contacts::Book;
 use phone_core::model::MessageState;
 use phone_core::{number, text};
 
+use crate::pictures::{self, Picture};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Input {
     Up,
@@ -32,6 +34,8 @@ pub enum Screen {
     Found,
     /// The text, ready to go, with its cost shown.
     Preview,
+    /// Pictures to attach, from the Pictures and Downloads folders.
+    Attach,
     /// Messages wants its PIN: nothing of the texts is shown.
     Locked,
 }
@@ -55,6 +59,10 @@ pub enum Action {
     Load(String),
     MarkRead(String),
     Send(String, String),
+    /// A picture message: to everyone on the thread, the text, the files.
+    SendMms(Vec<String>, String, Vec<String>),
+    /// Look for pictures to attach.
+    Pictures,
     /// Open the keyboard for this, starting from this text.
     Write(Writing, String),
     Call(String),
@@ -74,6 +82,7 @@ pub enum Action {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Opt {
     QuickReply,
+    Attach,
     Resend,
     Call,
     Block,
@@ -121,6 +130,10 @@ pub struct Model {
     /// A number the Dialer asked to text while Messages was locked, to open once
     /// the PIN is in.
     pub waiting_peer: Option<String>,
+    /// Pictures that could be attached, newest first, and the ones that are.
+    pub pictures: Vec<Picture>,
+    pub picture_sel: usize,
+    pub attached: Vec<Picture>,
 }
 
 impl Model {
@@ -147,6 +160,9 @@ impl Model {
             found_sel: 0,
             locked: false,
             waiting_peer: None,
+            pictures: Vec::new(),
+            picture_sel: 0,
+            attached: Vec::new(),
         }
     }
 
@@ -168,7 +184,7 @@ impl Model {
     }
 
     pub fn options(&self) -> Vec<Opt> {
-        let mut o = vec![Opt::QuickReply];
+        let mut o = vec![Opt::QuickReply, Opt::Attach];
         if self.failed().is_some() {
             o.insert(0, Opt::Resend);
         }
@@ -182,8 +198,10 @@ impl Model {
 
     /// Open a conversation, from the list or from a handoff.
     pub fn open(&mut self, peer: &str) -> Vec<Action> {
-        self.peer = number::canonical(peer, &self.region);
+        // A group stays a group: canonical() alone would keep only its first number.
+        self.peer = number::canonical_peer(peer, &self.region);
         self.messages.clear();
+        self.attached.clear();
         self.scroll = None;
         self.screen = Screen::Conversation;
         vec![Action::Load(self.peer.clone()), Action::MarkRead(self.peer.clone())]
@@ -218,6 +236,8 @@ impl Model {
             self.found.clear();
             self.draft.clear();
             self.peer.clear();
+            self.pictures.clear();
+            self.attached.clear();
             return vec![Action::Write(Writing::Pin, String::new())];
         }
         self.screen = Screen::Threads;
@@ -240,6 +260,11 @@ impl Model {
 
     // Events.
 
+    pub fn set_pictures(&mut self, p: Vec<Picture>) {
+        self.pictures = p;
+        self.picture_sel = self.picture_sel.min(self.pictures.len().saturating_sub(1));
+    }
+
     pub fn set_threads(&mut self, t: Vec<ThreadInfo>) {
         self.threads = t;
         self.thread_sel = self.thread_sel.min(self.threads.len().saturating_sub(1));
@@ -259,7 +284,7 @@ impl Model {
         }
         let mut a = vec![Action::LoadThreads];
         if number::same_party(&m.peer, &self.peer)
-            && matches!(self.screen, Screen::Conversation | Screen::Preview | Screen::Options)
+            && matches!(self.screen, Screen::Conversation | Screen::Preview | Screen::Options | Screen::Attach)
         {
             // The signal carries no text (it goes to everything on the bus), so the
             // conversation is fetched again, which only readers may.
@@ -330,6 +355,11 @@ impl Model {
             Writing::Body => {
                 let body = text::clean(&text, text::MAX_BODY);
                 if body.trim().is_empty() {
+                    // A picture can go without a text.
+                    if !self.attached.is_empty() {
+                        self.draft.clear();
+                        self.screen = Screen::Preview;
+                    }
                     return Vec::new();
                 }
                 self.draft = body;
@@ -411,12 +441,66 @@ impl Model {
                     let body = std::mem::take(&mut self.draft);
                     self.screen = Screen::Conversation;
                     self.scroll = None;
-                    vec![Action::Send(self.peer.clone(), body)]
+                    if self.attached.is_empty() {
+                        return vec![Action::Send(self.peer.clone(), body)];
+                    }
+                    // A group's peer is its numbers with commas, as the desktop splits it.
+                    let to = self.peer.split(',').map(str::trim).filter(|p| !p.is_empty()).map(String::from).collect();
+                    let files = std::mem::take(&mut self.attached).into_iter().map(|p| p.path).collect();
+                    vec![Action::SendMms(to, body, files)]
                 }
                 Input::Escape | Input::Edit => vec![Action::Write(Writing::Body, self.draft.clone())],
+                Input::View => self.show_pictures(),
                 _ => Vec::new(),
             },
+            Screen::Attach => self.key_attach(input),
         }
+    }
+
+    fn show_pictures(&mut self) -> Vec<Action> {
+        self.screen = Screen::Attach;
+        self.picture_sel = 0;
+        vec![Action::Pictures]
+    }
+
+    /// Where the pictures go back to: the preview while there is something to
+    /// send, else the conversation.
+    fn after_pictures(&mut self) {
+        self.screen = if self.attached.is_empty() && self.draft.trim().is_empty() {
+            Screen::Conversation
+        } else {
+            Screen::Preview
+        };
+    }
+
+    /// Run adds the picture, or takes it off if it is on already, and goes back.
+    fn key_attach(&mut self, input: Input) -> Vec<Action> {
+        match input {
+            Input::Up => self.picture_sel = self.picture_sel.saturating_sub(1),
+            Input::Down => self.picture_sel = (self.picture_sel + 1).min(self.pictures.len().saturating_sub(1)),
+            Input::Run | Input::Ok => {
+                let Some(p) = self.pictures.get(self.picture_sel).cloned() else { return Vec::new() };
+                if let Some(i) = self.attached.iter().position(|a| a.path == p.path) {
+                    self.attached.remove(i);
+                } else if self.attached.len() >= pictures::MAX_FILES {
+                    self.notice =
+                        Some(vec![format!("{} pictures at most", pictures::MAX_FILES), "in one message.".into()]);
+                    return Vec::new();
+                } else if self.attached.iter().map(|a| a.size).sum::<u64>() + p.size > pictures::MAX_BYTES {
+                    self.notice = Some(vec![
+                        "Too large to send together:".into(),
+                        format!("{} MB in all at most.", pictures::MAX_BYTES >> 20),
+                    ]);
+                    return Vec::new();
+                } else {
+                    self.attached.push(p);
+                }
+                self.after_pictures();
+            }
+            Input::Escape => self.after_pictures(),
+            _ => {}
+        }
+        Vec::new()
     }
 
     fn key_threads(&mut self, input: Input) -> Vec<Action> {
@@ -481,6 +565,7 @@ impl Model {
                         self.quick_sel = 0;
                         Vec::new()
                     }
+                    Opt::Attach => self.show_pictures(),
                     Opt::Resend => self.failed().map(|m| vec![Action::Retry(m.id)]).unwrap_or_default(),
                     Opt::Call => vec![Action::Call(self.peer.clone())],
                     Opt::Block if self.is_blocked() => vec![Action::Unblock(self.peer.clone())],
@@ -605,14 +690,104 @@ mod tests {
         assert_eq!(m.key(Input::Run, 0, 8), vec![Action::Retry(9)]);
     }
 
+    fn pic(name: &str, size: u64) -> Picture {
+        Picture { path: format!("/home/me/Pictures/{name}.jpg"), name: name.into(), size, at: 1 }
+    }
+
+    #[test]
+    fn a_picture_from_options_goes_as_mms() {
+        let mut m = Model::new("AU", Book::default());
+        m.open("0491570156");
+        m.key(Input::View, 0, 8);
+        m.key(Input::Down, 0, 8);
+        assert_eq!(m.key(Input::Run, 0, 8), vec![Action::Pictures], "Options > Attach looks for pictures");
+        assert_eq!(m.screen, Screen::Attach);
+        m.set_pictures(vec![pic("Beach", 1000), pic("Sunset", 2000)]);
+        m.key(Input::Down, 0, 8);
+        m.key(Input::Run, 0, 8);
+        assert_eq!(m.screen, Screen::Preview, "picked, it is shown ready to go");
+        assert_eq!(m.attached, vec![pic("Sunset", 2000)]);
+        // With no text it still goes; a text written to go with it goes too.
+        m.key(Input::Edit, 0, 8);
+        m.written(Writing::Body, Some("  ".into()));
+        assert_eq!(m.screen, Screen::Preview);
+        m.written(Writing::Body, Some("Look".into()));
+        let a = m.key(Input::Run, 0, 8);
+        assert_eq!(
+            a,
+            vec![Action::SendMms(
+                vec!["+61491570156".into()],
+                "Look".into(),
+                vec!["/home/me/Pictures/Sunset.jpg".into()]
+            )]
+        );
+        assert!(m.attached.is_empty());
+        // The next text is a text again.
+        m.written(Writing::Body, Some("And that".into()));
+        assert_eq!(m.key(Input::Run, 0, 8), vec![Action::Send("+61491570156".into(), "And that".into())]);
+    }
+
+    #[test]
+    fn pictures_come_off_again_and_have_limits() {
+        let mut m = Model::new("AU", Book::default());
+        m.open("+61491570156,+61491570157");
+        m.written(Writing::Body, Some("Both of you".into()));
+        // From the preview, as when writing a new message.
+        assert_eq!(m.key(Input::View, 0, 8), vec![Action::Pictures]);
+        m.set_pictures(vec![pic("Beach", 5 << 20), pic("Sunset", 4 << 20)]);
+        m.key(Input::Run, 0, 8);
+        m.key(Input::View, 0, 8);
+        m.key(Input::Down, 0, 8);
+        m.key(Input::Run, 0, 8);
+        assert!(m.notice.is_some(), "over phoned's 8 MB together");
+        assert_eq!(m.attached.len(), 1);
+        m.key(Input::Ok, 0, 8);
+        m.key(Input::Up, 0, 8);
+        m.key(Input::Run, 0, 8);
+        assert!(m.attached.is_empty(), "Run on one already on takes it off");
+        assert_eq!(m.screen, Screen::Preview, "the text is still there to send");
+        m.key(Input::View, 0, 8);
+        m.key(Input::Run, 0, 8);
+        match m.key(Input::Run, 0, 8).as_slice() {
+            [Action::SendMms(to, _, files)] => {
+                assert_eq!(to, &["+61491570156".to_string(), "+61491570157".into()], "a group goes to everyone");
+                assert_eq!(files.len(), 1);
+            }
+            a => panic!("{a:?}"),
+        }
+        // Nothing to send: the pictures go back to the conversation.
+        m.key(Input::View, 0, 8);
+        m.key(Input::Down, 0, 8);
+        m.key(Input::Run, 0, 8);
+        assert_eq!(m.screen, Screen::Attach);
+        m.key(Input::Escape, 0, 8);
+        assert_eq!(m.screen, Screen::Conversation);
+        m.key(Input::View, 0, 8);
+        m.key(Input::Down, 0, 8);
+        m.key(Input::Run, 0, 8);
+        m.key(Input::Run, 0, 8);
+        assert_eq!(m.attached.len(), 1);
+        m.key(Input::View, 0, 8);
+        m.key(Input::Run, 0, 8);
+        assert_eq!(m.screen, Screen::Conversation);
+        // Another conversation starts with nothing on.
+        m.key(Input::View, 0, 8);
+        m.key(Input::Down, 0, 8);
+        m.key(Input::Run, 0, 8);
+        m.key(Input::Run, 0, 8);
+        m.open("0491570158");
+        assert!(m.attached.is_empty());
+    }
+
     #[test]
     fn delete_asks_first() {
         let mut m = Model::new("AU", Book::default());
         m.open("0491570156");
         m.key(Input::View, 0, 8);
-        m.key(Input::Down, 0, 8);
-        m.key(Input::Down, 0, 8);
-        m.key(Input::Down, 0, 8);
+        for _ in 0..4 {
+            m.key(Input::Down, 0, 8);
+        }
+        assert_eq!(m.options()[m.option_sel], Opt::Delete);
         assert!(m.key(Input::Run, 0, 8).is_empty());
         assert!(m.notice.is_some());
         let a = m.key(Input::Run, 0, 8);

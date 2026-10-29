@@ -5,6 +5,7 @@ use phone_core::model::MessageState;
 use phone_core::{number, text, when};
 
 use crate::model::{Model, Opt, Screen, QUICK};
+use crate::pictures;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Item {
@@ -168,6 +169,7 @@ pub fn view(m: &Model, now: i64) -> View {
                 .map(|o| Item {
                     label: match o {
                         Opt::QuickReply => "Quick reply",
+                        Opt::Attach => "Attach a picture",
                         Opt::Resend => "Resend failed text",
                         Opt::Call => "Call",
                         Opt::Block if m.is_blocked() => "Unblock number",
@@ -223,6 +225,41 @@ pub fn view(m: &Model, now: i64) -> View {
                 b(["Back", "", "", "Edit", "Use"]),
             )
         }
+        Screen::Attach => {
+            let mut items: Vec<Item> = m
+                .pictures
+                .iter()
+                .map(|p| {
+                    let on = m.attached.iter().any(|a| a.path == p.path);
+                    Item {
+                        label: fit(&p.name, 120),
+                        tag: if on { "Added".into() } else { pictures::size(p.size) },
+                        status: when::short(p.at, now),
+                        dim: !on,
+                    }
+                })
+                .collect();
+            let empty = items.is_empty();
+            if empty {
+                items.push(Item {
+                    label: "No pictures to attach".into(),
+                    tag: String::new(),
+                    status: String::new(),
+                    dim: true,
+                });
+            }
+            let run = match m.pictures.get(m.picture_sel) {
+                Some(p) if m.attached.iter().any(|a| a.path == p.path) => "Remove",
+                Some(_) => "Add",
+                None => "",
+            };
+            let (selected, scroll) = window(m.picture_sel, items.len());
+            let crumb = match m.attached.len() {
+                0 => "> Attach a picture".to_string(),
+                n => format!("> Attach a picture ({n} added)"),
+            };
+            (Body::Menu { items, selected, scroll, breadcrumb: crumb }, b(["Back", "", "", "", run]))
+        }
         Screen::Locked => {
             let rows = vec![
                 Row { kind: 5, label: "Messages is locked".into(), value: String::new(), dim: false },
@@ -244,18 +281,37 @@ pub fn view(m: &Model, now: i64) -> View {
                 });
             }
             rows.push(Row { kind: 1, label: String::new(), value: String::new(), dim: false });
-            for line in wrap(&m.draft, TEXT_W) {
-                rows.push(Row { kind: 3, label: line, value: String::new(), dim: false });
+            // What goes with the text, above it, as the desktop shows it. No rule
+            // between them, so the cost stays on the screen.
+            // Two by name, and the rest counted, so the text stays on the screen.
+            let named = if m.attached.len() > 3 { 2 } else { m.attached.len() };
+            for (i, p) in m.attached.iter().take(named).enumerate() {
+                let label = if i == 0 { "Attached" } else { "" };
+                rows.push(Row { kind: 0, label: label.into(), value: fit(&p.name, 150), dim: false });
+            }
+            if m.attached.len() > named {
+                let more = format!("and {} more", m.attached.len() - named);
+                rows.push(Row { kind: 0, label: String::new(), value: more, dim: true });
+            }
+            if !m.draft.trim().is_empty() {
+                for line in wrap(&m.draft, TEXT_W) {
+                    rows.push(Row { kind: 3, label: line, value: String::new(), dim: false });
+                }
             }
             rows.push(Row { kind: 1, label: String::new(), value: String::new(), dim: false });
-            let cost = if seg.count == 1 { "1 text".to_string() } else { format!("{} texts", seg.count) };
-            let note = if seg.gsm7 {
-                format!("{cost}, {} left", seg.remaining)
+            let note = if !m.attached.is_empty() {
+                "1 picture message (MMS)".to_string()
             } else {
-                format!("{cost} (emoji or accents: 70 per text)")
+                let cost = if seg.count == 1 { "1 text".to_string() } else { format!("{} texts", seg.count) };
+                if seg.gsm7 {
+                    format!("{cost}, {} left", seg.remaining)
+                } else {
+                    format!("{cost} (emoji or accents: 70 per text)")
+                }
             };
             rows.push(Row { kind: 0, label: "Cost".into(), value: note, dim: true });
-            (Body::Detail { rows, offset: 0, breadcrumb: "> Send?".into() }, b(["Edit", "", "", "", "Send"]))
+            let view = if m.attached.is_empty() { "Attach" } else { "Pictures" };
+            (Body::Detail { rows, offset: 0, breadcrumb: "> Send?".into() }, b(["Edit", view, "", "", "Send"]))
         }
     };
     View { body, buttons, modal }
@@ -297,10 +353,40 @@ pub fn wrap(text: &str, budget: i32) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::pictures::Picture;
+
+    #[test]
+    fn attached_pictures_leave_the_cost_on_screen() {
+        let mut m = Model::new("AU", phone_core::contacts::Book::default());
+        m.open("0491570156");
+        let pic = |n: &str| Picture { path: format!("/p/{n}.jpg"), name: n.into(), size: 1, at: 1 };
+        m.pictures = vec![pic("Screenshot from 2026-10-29 09-14-02 at the very long name"), pic("Beach")];
+        m.screen = Screen::Attach;
+        let Body::Menu { items, .. } = view(&m, 100).body else { panic!() };
+        assert!(
+            items.iter().all(|i| i32::from(font::ROW_ACTIVE.text_width(&i.label)) <= 120),
+            "names fit beside the size"
+        );
+        m.attached = m.pictures.clone();
+        m.draft = "Here's the beach.".into();
+        m.screen = Screen::Preview;
+        let v = view(&m, 100);
+        let Body::Detail { rows, .. } = v.body else { panic!() };
+        assert!(rows.len() <= VISIBLE, "{rows:?}");
+        assert!(rows.iter().any(|r| r.label == "Attached"));
+        assert_eq!(rows.last().unwrap().value, "1 picture message (MMS)");
+        assert_eq!(v.buttons[1], "Pictures");
+        m.attached = (0..6).map(|i| pic(&format!("p{i}"))).collect();
+        let Body::Detail { rows, .. } = view(&m, 100).body else { panic!() };
+        assert!(rows.iter().any(|r| r.value == "and 4 more"));
+        assert!(rows.len() <= VISIBLE);
+    }
+
     #[test]
     fn wrap_breaks_long_words() {
-        let lines = super::wrap("see https://example.com/a/really/long/path/that/does/not/fit/on/one/line ok", 100);
+        let lines = wrap("see https://example.com/a/really/long/path/that/does/not/fit/on/one/line ok", 100);
         assert!(lines.len() >= 3);
-        assert!(lines.iter().all(|l| super::row_w(l) <= 100));
+        assert!(lines.iter().all(|l| row_w(l) <= 100));
     }
 }

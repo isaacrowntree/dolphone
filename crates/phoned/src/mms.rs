@@ -59,9 +59,8 @@ pub trait Message {
     fn property_changed(&self, name: String, value: OwnedVariant) -> zbus::Result<()>;
 }
 
-/// The most phoned keeps of one message's attachments: carriers cap an MMS at
-/// about 1 MB (mmsd-tng's TotalMaxAttachmentSize), so this is only a guard.
-pub const MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// The most phoned keeps of one message's attachments.
+pub const MAX_BYTES: u64 = phone_api::MMS_MAX_BYTES;
 
 /// Whether mmsd-tng is on the session bus, and is mmsd-tng: any program can claim
 /// its name, and would then be handed every outgoing MMS (recipients, text and

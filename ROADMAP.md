@@ -42,6 +42,5 @@ audio. What only a board can confirm:
 
 ## 2. Not built yet
 
-- **Attaching a picture on the panel.** The desktop app attaches pictures through
-  the file-chooser portal; the panel has nowhere to pick from, so there it is
-  `phonectl mms` or the D-Bus API.
+Nothing that can be built without the hardware or an upstream change.
+
