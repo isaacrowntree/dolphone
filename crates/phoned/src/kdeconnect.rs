@@ -23,11 +23,12 @@
 //! always confirmed on the device, like any outside request; a paired laptop then
 //! texts as the owner (premium numbers and short codes still ask).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
@@ -36,7 +37,7 @@ use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
@@ -49,6 +50,27 @@ pub const MAX_TCP_PORT: u16 = 1764;
 pub const PROTOCOL_VERSION: u64 = 8;
 /// Unpaired devices allowed connected at once (they can only ask to pair).
 const MAX_UNPAIRED: usize = 8;
+/// Connections at once, in any state (handshaking, unpaired, paired), and from
+/// any one address: anyone on the network can open them, before any pairing.
+const MAX_CONNECTIONS: usize = 32;
+const MAX_PER_IP: usize = 4;
+/// How long a TLS handshake may take.
+const HANDSHAKE: Duration = Duration::from_secs(10);
+/// How long an unpaired link may sit silent. Longer than a pairing request waits
+/// for the owner, so a laptop asking is not dropped while they decide.
+const UNPAIRED_IDLE: Duration = Duration::from_secs(180);
+/// The longest line read: an identity (before TLS, or just after), any packet
+/// from an unpaired device (it can only ask to pair), and any from a paired one.
+const MAX_IDENTITY: usize = 16 * 1024;
+const MAX_UNPAIRED_LINE: usize = 64 * 1024;
+const MAX_PAIRED_LINE: usize = 1024 * 1024;
+/// A pairing request is good for as long as phoned's own requests are.
+const PAIR_TTL: Duration = Duration::from_secs(120);
+/// After a pairing request, the same device or address waits this long before
+/// asking again, doubling with each ask up to the cap; an hour quiet forgives.
+const PAIR_BACKOFF: Duration = Duration::from_secs(30);
+const PAIR_BACKOFF_MAX: Duration = Duration::from_secs(30 * 60);
+const PAIR_FORGIVE: Duration = Duration::from_secs(60 * 60);
 
 const INCOMING: &[&str] = &[
     "kdeconnect.sms.request",
@@ -268,19 +290,145 @@ impl Me {
 struct Link {
     /// The laptop's name, as it gave it.
     name: String,
+    /// The certificate it linked with, DER, hex: a pairing answer goes to the link
+    /// that asked, not to whatever link holds the same device id by then.
+    cert: String,
     paired: bool,
     tx: mpsc::UnboundedSender<String>,
+}
+
+/// A pairing request waiting for the owner.
+#[derive(Clone, Debug)]
+struct Ask {
+    name: String,
+    cert: String,
+    ip: IpAddr,
+    at: Instant,
+}
+
+/// Pairing requests waiting, one per device id and one per address, and when
+/// each device id and address may ask again.
+#[derive(Default)]
+struct Asking {
+    pending: HashMap<String, Ask>,
+    /// "id:<device>" or "ip:<address>": (may ask again at, asks so far).
+    backoff: HashMap<String, (Instant, u32)>,
+}
+
+impl Asking {
+    fn expire(&mut self, now: Instant) {
+        self.pending.retain(|_, a| now.duration_since(a.at) < PAIR_TTL);
+        self.backoff.retain(|_, (next, _)| now.saturating_duration_since(*next) < PAIR_FORGIVE);
+    }
+
+    /// Note a request, if this device and this address may ask now.
+    fn request(&mut self, device: &str, name: &str, cert: &str, ip: IpAddr, now: Instant) -> bool {
+        self.expire(now);
+        if self.pending.contains_key(device) || self.pending.values().any(|a| a.ip == ip) {
+            return false;
+        }
+        let keys = [format!("id:{device}"), format!("ip:{ip}")];
+        if keys.iter().any(|k| self.backoff.get(k).is_some_and(|(next, _)| *next > now)) {
+            return false;
+        }
+        for k in keys {
+            let e = self.backoff.entry(k).or_insert((now, 0));
+            e.1 += 1;
+            let wait = PAIR_BACKOFF.saturating_mul(1u32 << (e.1 - 1).min(16)).min(PAIR_BACKOFF_MAX);
+            e.0 = now + wait;
+        }
+        self.pending.insert(device.to_string(), Ask { name: name.to_string(), cert: cert.to_string(), ip, at: now });
+        true
+    }
+
+    /// The request a device has waiting, if it has not expired.
+    fn take(&mut self, device: &str, now: Instant) -> Option<Ask> {
+        self.expire(now);
+        self.pending.remove(device)
+    }
+}
+
+/// Connections open now, in all and by address.
+#[derive(Default)]
+struct Conns {
+    total: usize,
+    by_ip: HashMap<IpAddr, usize>,
+}
+
+impl Conns {
+    fn admit(&mut self, ip: IpAddr) -> bool {
+        let here = self.by_ip.get(&ip).copied().unwrap_or(0);
+        if self.total >= MAX_CONNECTIONS || here >= MAX_PER_IP {
+            return false;
+        }
+        self.total += 1;
+        self.by_ip.insert(ip, here + 1);
+        true
+    }
+    fn release(&mut self, ip: IpAddr) {
+        self.total = self.total.saturating_sub(1);
+        if let Some(n) = self.by_ip.get_mut(&ip) {
+            *n -= 1;
+            if *n == 0 {
+                self.by_ip.remove(&ip);
+            }
+        }
+    }
+}
+
+/// One connection's place in [`Conns`], given back when it ends.
+struct Slot {
+    conns: Arc<Mutex<Conns>>,
+    ip: IpAddr,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if let Ok(mut c) = self.conns.lock() {
+            c.release(self.ip);
+        }
+    }
+}
+
+/// A device being connected to, so one heard again (it announces every few
+/// seconds, and anyone can send identity packets) does not start another.
+struct Connecting {
+    set: Arc<Mutex<HashSet<String>>>,
+    peer: String,
+}
+
+impl Drop for Connecting {
+    fn drop(&mut self) {
+        if let Ok(mut s) = self.set.lock() {
+            s.remove(&self.peer);
+        }
+    }
 }
 
 /// The KDE Connect side of phoned.
 #[derive(Default)]
 pub struct KdeConnect {
     links: Mutex<HashMap<String, Link>>,
-    /// Device ids waiting for the owner's answer to a pairing request.
-    asking: Mutex<HashMap<String, (String, String)>>,
+    /// Pairing requests waiting for the owner's answer.
+    asking: Mutex<Asking>,
+    conns: Arc<Mutex<Conns>>,
+    connecting: Arc<Mutex<HashSet<String>>>,
+    /// The owner's "show message text in notifications" (private notifications
+    /// off), kept here from the settings; off until read, which is the private side.
+    show_bodies: AtomicBool,
 }
 
 impl KdeConnect {
+    fn slot(&self, ip: IpAddr) -> Option<Slot> {
+        let ok = self.conns.lock().map(|mut c| c.admit(ip)).unwrap_or(false);
+        ok.then(|| Slot { conns: self.conns.clone(), ip })
+    }
+
+    fn start_connecting(&self, peer: &str) -> Option<Connecting> {
+        let fresh = self.connecting.lock().map(|mut s| s.insert(peer.to_string())).unwrap_or(false);
+        fresh.then(|| Connecting { set: self.connecting.clone(), peer: peer.to_string() })
+    }
+
     fn send_paired(&self, line: &str) {
         if let Ok(links) = self.links.lock() {
             for l in links.values().filter(|l| l.paired) {
@@ -316,22 +464,40 @@ impl KdeConnect {
     }
 
     /// A text arrived or was sent: push it, as a phone does.
+    ///
+    /// With private notifications on, a text that arrived is not pushed: a laptop
+    /// shows a pushed text as it comes, on a screen anyone nearby may see, and
+    /// one-time codes arrive by text. Pushing it without its body is no better,
+    /// as KDE Connect keeps a message by its id and would show it empty from then
+    /// on. The laptop is paired, so the conversation (text and all) is still
+    /// there when it asks for it, as it does when its messages window opens.
     pub fn message(&self, m: &phone_core::model::Message) {
+        if !pushes(m, self.show_bodies.load(Ordering::Relaxed)) {
+            return;
+        }
         self.send_paired(&packet("kdeconnect.sms.messages", json!({"messages": [message_json(m)], "version": 2})));
     }
 
     /// The owner said yes or no to a pairing request.
+    ///
+    /// The answer is for the certificate that asked: only a link with that one is
+    /// told, or paired, and it is the one remembered. A request older than
+    /// [`PAIR_TTL`] has lapsed and is not answered.
     pub fn answer_pair(&self, device: &str, yes: bool) {
-        let Some((name, cert)) = self.asking.lock().ok().and_then(|mut a| a.remove(device)) else { return };
+        let Some(ask) = self.asking.lock().ok().and_then(|mut a| a.take(device, Instant::now())) else { return };
         if let Ok(mut links) = self.links.lock() {
-            if let Some(l) = links.get_mut(device) {
+            if let Some(l) = links.get_mut(device).filter(|l| l.cert == ask.cert) {
                 let _ = l.tx.send(packet("kdeconnect.pair", json!({"pair": yes})));
                 l.paired = yes;
             }
         }
         if yes {
+            if let Ok(mut a) = self.asking.lock() {
+                a.backoff.remove(&format!("id:{device}"));
+                a.backoff.remove(&format!("ip:{}", ask.ip));
+            }
             let mut t = Trusted::load();
-            t.devices.insert(device.to_string(), TrustedDevice { name, certificate: cert });
+            t.devices.insert(device.to_string(), TrustedDevice { name: ask.name, certificate: ask.cert });
             t.save();
             tracing::info!("KDE Connect: paired");
         }
@@ -347,6 +513,9 @@ impl KdeConnect {
 
     /// Forget a paired device.
     pub fn unpair(&self, device: &str) {
+        if let Ok(mut a) = self.asking.lock() {
+            a.pending.remove(device);
+        }
         let mut t = Trusted::load();
         t.devices.remove(device);
         t.save();
@@ -355,6 +524,36 @@ impl KdeConnect {
                 let _ = l.tx.send(packet("kdeconnect.pair", json!({"pair": false})));
                 l.paired = false;
             }
+        }
+    }
+}
+
+/// Whether a text is pushed live (see [`KdeConnect::message`]).
+fn pushes(m: &phone_core::model::Message, show_bodies: bool) -> bool {
+    show_bodies || m.direction == phone_core::model::Direction::Outgoing
+}
+
+/// Read one line, up to and including its newline, into `buf`, failing once it
+/// passes `max` bytes rather than after the whole line is held: the peer decides
+/// how long a line is, and before pairing the peer is anyone.
+async fn read_line_capped<R: AsyncBufRead + Unpin>(r: &mut R, buf: &mut Vec<u8>, max: usize) -> std::io::Result<usize> {
+    let start = buf.len();
+    loop {
+        let available = r.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(buf.len() - start);
+        }
+        let (take, done) = match available.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (available.len(), false),
+        };
+        if buf.len() - start + take > max {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "line too long"));
+        }
+        buf.extend_from_slice(&available[..take]);
+        r.consume(take);
+        if done {
+            return Ok(buf.len() - start);
         }
     }
 }
@@ -399,11 +598,16 @@ pub async fn run(phone: Arc<Phone>) {
             tokio::time::sleep(Duration::from_secs(3)).await;
             continue;
         }
+        note_privacy(&phone);
         if let Err(e) = serve(&phone).await {
             tracing::warn!("KDE Connect: {e}");
             tokio::time::sleep(Duration::from_secs(10)).await;
         }
     }
+}
+
+fn note_privacy(phone: &Phone) {
+    phone.kdeconnect.show_bodies.store(!phone.flag(phone_api::keys::PRIVATE_NOTIFY), Ordering::Relaxed);
 }
 
 async fn serve(phone: &Arc<Phone>) -> anyhow::Result<()> {
@@ -441,6 +645,7 @@ async fn serve(phone: &Arc<Phone>) -> anyhow::Result<()> {
     let mut announce = tokio::time::interval(Duration::from_secs(60));
     let mut buf = vec![0u8; 8192];
     loop {
+        note_privacy(phone);
         if !phone.flag(phone_api::keys::KDECONNECT) {
             tracing::info!("KDE Connect off");
             if let Ok(mut links) = phone.kdeconnect.links.lock() {
@@ -455,23 +660,32 @@ async fn serve(phone: &Arc<Phone>) -> anyhow::Result<()> {
             Ok((n, from)) = udp.recv_from(&mut buf) => {
                 if let Some((peer, port)) = discovered(&buf[..n], &me.id) {
                     let linked = phone.kdeconnect.links.lock().map(|l| l.contains_key(&peer)).unwrap_or(true);
-                    if !linked {
-                        let (phone, me) = (phone.clone(), me.clone());
-                        tokio::spawn(async move {
-                            if let Err(e) = connect(&phone, &me, SocketAddr::new(from.ip(), port), &peer).await {
-                                tracing::debug!("KDE Connect: {e}");
-                            }
-                        });
+                    let started = if linked { None } else { phone.kdeconnect.start_connecting(&peer) };
+                    if let Some(started) = started {
+                        if let Some(slot) = phone.kdeconnect.slot(from.ip()) {
+                            let (phone, me) = (phone.clone(), me.clone());
+                            tokio::spawn(async move {
+                                let addr = SocketAddr::new(from.ip(), port);
+                                if let Err(e) = connect(&phone, &me, addr, &peer, started).await {
+                                    tracing::debug!("KDE Connect: {e}");
+                                }
+                                drop(slot);
+                            });
+                        }
                     }
                 }
             }
             Ok((s, from)) = listener.accept() => {
-                let (phone, me) = (phone.clone(), me.clone());
-                tokio::spawn(async move {
-                    if let Err(e) = accepted(&phone, &me, s, from.ip()).await {
-                        tracing::debug!("KDE Connect: {e}");
-                    }
-                });
+                // Over the limits, the connection is closed at once.
+                if let Some(slot) = phone.kdeconnect.slot(from.ip()) {
+                    let (phone, me) = (phone.clone(), me.clone());
+                    tokio::spawn(async move {
+                        if let Err(e) = accepted(&phone, &me, s, from.ip()).await {
+                            tracing::debug!("KDE Connect: {e}");
+                        }
+                        drop(slot);
+                    });
+                }
             }
             _ = tokio::time::sleep(Duration::from_secs(3)) => {}
         }
@@ -509,44 +723,62 @@ pub fn discovered(datagram: &[u8], me: &str) -> Option<(String, u16)> {
 }
 
 /// We heard a device: open TCP, say who we are, then be the TLS server.
-async fn connect(phone: &Arc<Phone>, me: &Arc<Me>, addr: SocketAddr, peer: &str) -> anyhow::Result<()> {
+/// `started` marks the device as being connected to until it is linked (or not).
+async fn connect(
+    phone: &Arc<Phone>,
+    me: &Arc<Me>,
+    addr: SocketAddr,
+    peer: &str,
+    started: Connecting,
+) -> anyhow::Result<()> {
     let mut s = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr)).await??;
-    s.write_all(me.identity(false).as_bytes()).await?;
-    let tls = tokio_rustls::TlsAcceptor::from(me.server.clone()).accept(s).await?;
+    tokio::time::timeout(Duration::from_secs(5), s.write_all(me.identity(false).as_bytes())).await??;
+    let tls = tokio::time::timeout(HANDSHAKE, tokio_rustls::TlsAcceptor::from(me.server.clone()).accept(s)).await??;
     let cert = tls.get_ref().1.peer_certificates().and_then(|c| c.first()).map(|c| c.to_vec());
-    link(phone, me, tls, peer, cert).await
+    link(phone, me, tls, peer, addr.ip(), cert, Some(started)).await
 }
 
 /// A device connected to us: read its identity, then be the TLS client.
 async fn accepted(phone: &Arc<Phone>, me: &Arc<Me>, s: TcpStream, ip: IpAddr) -> anyhow::Result<()> {
     let mut r = BufReader::new(s);
-    let mut line = String::new();
-    tokio::time::timeout(Duration::from_secs(5), r.read_line(&mut line)).await??;
-    anyhow::ensure!(line.len() < 16 * 1024, "identity too long");
-    let v: Value = serde_json::from_str(&line)?;
+    let mut line = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), read_line_capped(&mut r, &mut line, MAX_IDENTITY)).await??;
+    let v: Value = serde_json::from_slice(&line)?;
     anyhow::ensure!(v["type"] == "kdeconnect.identity", "not an identity");
     let peer = v["body"]["deviceId"].as_str().unwrap_or("").to_string();
     anyhow::ensure!(valid_device_id(&peer) && peer != me.id, "bad device id");
     anyhow::ensure!(v["body"]["protocolVersion"].as_u64().unwrap_or(0) >= PROTOCOL_VERSION, "protocol too old");
     let s = r.into_inner();
-    let tls = tokio_rustls::TlsConnector::from(me.client.clone()).connect(ServerName::IpAddress(ip.into()), s).await?;
+    let tls = tokio::time::timeout(
+        HANDSHAKE,
+        tokio_rustls::TlsConnector::from(me.client.clone()).connect(ServerName::IpAddress(ip.into()), s),
+    )
+    .await??;
     let cert = tls.get_ref().1.peer_certificates().and_then(|c| c.first()).map(|c| c.to_vec());
-    link(phone, me, tls, &peer, cert).await
+    link(phone, me, tls, &peer, ip, cert, None).await
 }
 
 /// After TLS: exchange identities again, check who it is, and serve packets.
-async fn link<S>(phone: &Arc<Phone>, me: &Arc<Me>, tls: S, peer: &str, cert: Option<Vec<u8>>) -> anyhow::Result<()>
+async fn link<S>(
+    phone: &Arc<Phone>,
+    me: &Arc<Me>,
+    tls: S,
+    peer: &str,
+    ip: IpAddr,
+    cert: Option<Vec<u8>>,
+    started: Option<Connecting>,
+) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let cert = cert.ok_or_else(|| anyhow::anyhow!("no certificate"))?;
     anyhow::ensure!(common_name(&cert).as_deref() == Some(peer), "certificate is not the device's");
     let (r, mut w) = tokio::io::split(tls);
-    w.write_all(me.identity(false).as_bytes()).await?;
+    tokio::time::timeout(Duration::from_secs(5), w.write_all(me.identity(false).as_bytes())).await??;
     let mut r = BufReader::new(r);
-    let mut line = String::new();
-    tokio::time::timeout(Duration::from_secs(5), r.read_line(&mut line)).await??;
-    let v: Value = serde_json::from_str(&line)?;
+    let mut line = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), read_line_capped(&mut r, &mut line, MAX_IDENTITY)).await??;
+    let v: Value = serde_json::from_slice(&line)?;
     anyhow::ensure!(
         v["type"] == "kdeconnect.identity" && v["body"]["deviceId"] == peer,
         "identity changed mid-handshake"
@@ -563,8 +795,11 @@ where
         let mut links = phone.kdeconnect.links.lock().map_err(|_| anyhow::anyhow!("poisoned"))?;
         anyhow::ensure!(!links.contains_key(peer), "already linked");
         anyhow::ensure!(paired || links.values().filter(|l| !l.paired).count() < MAX_UNPAIRED, "too many unpaired");
-        links.insert(peer.to_string(), Link { name: name.clone(), paired, tx: tx.clone() });
+        links.insert(peer.to_string(), Link { name: name.clone(), cert: hex(&cert), paired, tx: tx.clone() });
     }
+    // Linked: the device is no longer being connected to (and a second link to it
+    // is refused while this one lasts).
+    drop(started);
     tracing::info!(device = %name, paired, "KDE Connect: linked");
     let writer = tokio::spawn(async move {
         while let Some(line) = rx.recv().await {
@@ -573,16 +808,30 @@ where
             }
         }
     });
-    let mut line = String::new();
+    let mut line = Vec::new();
     loop {
         line.clear();
-        match r.read_line(&mut line).await {
+        let paired = phone.kdeconnect.links.lock().map(|l| l.get(peer).is_some_and(|l| l.paired)).unwrap_or(false);
+        // Unpaired, a device can only ask to pair: it gets short lines, and is
+        // dropped when it goes quiet.
+        let read = if paired {
+            read_line_capped(&mut r, &mut line, MAX_PAIRED_LINE).await
+        } else {
+            match tokio::time::timeout(UNPAIRED_IDLE, read_line_capped(&mut r, &mut line, MAX_UNPAIRED_LINE)).await {
+                Ok(read) => read,
+                // Paired while it waited (the owner said yes): it stays.
+                Err(_) if phone.kdeconnect.links.lock().is_ok_and(|l| l.get(peer).is_some_and(|l| l.paired)) => {
+                    continue
+                }
+                Err(_) => break,
+            }
+        };
+        match read {
             Ok(0) | Err(_) => break,
-            Ok(n) if n > 1024 * 1024 => break,
             Ok(_) => {}
         }
-        let Ok(p) = serde_json::from_str::<Value>(&line) else { continue };
-        handle(phone, peer, &name, &cert, &p, &tx).await;
+        let Ok(p) = serde_json::from_slice::<Value>(&line) else { continue };
+        handle(phone, peer, &name, &cert, ip, &p, &tx).await;
     }
     writer.abort();
     if let Ok(mut links) = phone.kdeconnect.links.lock() {
@@ -597,6 +846,7 @@ async fn handle(
     peer: &str,
     name: &str,
     cert: &[u8],
+    ip: IpAddr,
     p: &Value,
     tx: &mpsc::UnboundedSender<String>,
 ) {
@@ -609,10 +859,19 @@ async fn handle(
                 let _ = tx.send(packet("kdeconnect.pair", json!({"pair": true})));
             }
             (Some(true), false) => {
-                if let Ok(mut a) = phone.kdeconnect.asking.lock() {
-                    a.insert(peer.to_string(), (name.to_string(), hex(cert)));
+                // One request at a time from a device or an address, and fewer
+                // as they repeat: each one puts a question in front of the owner.
+                let ask = phone
+                    .kdeconnect
+                    .asking
+                    .lock()
+                    .map(|mut a| a.request(peer, name, &hex(cert), ip, Instant::now()))
+                    .unwrap_or(false);
+                if ask {
+                    phone.park_kdeconnect_pair(peer, name).await;
+                } else {
+                    tracing::debug!(device = %name, "KDE Connect: a pairing request was not passed on");
                 }
-                phone.park_kdeconnect_pair(peer, name).await;
             }
             (Some(false), _) => {
                 phone.kdeconnect.unpair(peer);
@@ -675,6 +934,10 @@ async fn handle(
 mod tests {
     use super::*;
 
+    /// The tests that point XDG_DATA_HOME somewhere take turns: it is one for the
+    /// whole process.
+    static DATA_HOME: Mutex<()> = Mutex::new(());
+
     #[test]
     fn ids_names_and_discovery() {
         assert!(valid_device_id("740bd4b9_b418_4ee4_97d6_caf1da8151be"));
@@ -719,8 +982,108 @@ mod tests {
         assert!(thread_id("+61491570156") > 0);
     }
 
+    #[tokio::test]
+    async fn lines_are_capped_as_they_are_read() {
+        let mut line = Vec::new();
+        let mut r: &[u8] = b"{\"a\":1}\nrest";
+        assert_eq!(read_line_capped(&mut r, &mut line, 16).await.unwrap(), 8);
+        assert_eq!(line, b"{\"a\":1}\n");
+        // A line with no end, longer than the cap, fails without being held whole.
+        let endless = vec![b'x'; 100_000];
+        let mut r = BufReader::with_capacity(1024, &endless[..]);
+        let mut line = Vec::new();
+        assert!(read_line_capped(&mut r, &mut line, 4096).await.is_err());
+        assert!(line.len() <= 4096);
+        // The end of the stream ends the line.
+        let mut r: &[u8] = b"";
+        assert_eq!(read_line_capped(&mut r, &mut Vec::new(), 16).await.unwrap(), 0);
+    }
+
+    #[test]
+    fn connections_are_capped_overall_and_per_address() {
+        let mut c = Conns::default();
+        let a: IpAddr = "192.0.2.1".parse().unwrap();
+        for _ in 0..MAX_PER_IP {
+            assert!(c.admit(a));
+        }
+        assert!(!c.admit(a), "one address is capped");
+        c.release(a);
+        assert!(c.admit(a));
+        let mut c = Conns::default();
+        for i in 0..MAX_CONNECTIONS {
+            assert!(c.admit(IpAddr::from([10, 0, (i / 200) as u8, (i % 200) as u8])));
+        }
+        assert!(!c.admit("192.0.2.9".parse().unwrap()), "and so are all of them");
+    }
+
+    #[test]
+    fn outbound_connects_are_not_doubled() {
+        let k = KdeConnect::default();
+        let first = k.start_connecting("dev").expect("first");
+        assert!(k.start_connecting("dev").is_none(), "one in flight per device");
+        drop(first);
+        assert!(k.start_connecting("dev").is_some());
+    }
+
+    #[test]
+    fn pairing_requests_are_one_at_a_time_and_back_off() {
+        let now = Instant::now();
+        let (ip, other_ip): (IpAddr, IpAddr) = ("192.0.2.1".parse().unwrap(), "192.0.2.2".parse().unwrap());
+        let mut a = Asking::default();
+        assert!(a.request("dev1", "laptop", "c1", ip, now));
+        assert!(!a.request("dev1", "laptop", "c1", other_ip, now), "one per device");
+        assert!(!a.request("dev2", "laptop", "c2", ip, now), "one per address");
+        assert!(a.request("dev3", "other", "c3", other_ip, now));
+        // Expired after the TTL, and then the same device waits out its backoff.
+        assert!(a.take("dev1", now + PAIR_TTL).is_none(), "expired");
+        assert!(a.request("dev1", "laptop", "c1", ip, now + PAIR_TTL), "30 s passed");
+        assert!(a.take("dev1", now + PAIR_TTL).is_some());
+        assert!(!a.request("dev1", "laptop", "c1", ip, now + PAIR_TTL + Duration::from_secs(30)), "now 60 s");
+        assert!(a.request("dev1", "laptop", "c1", ip, now + PAIR_TTL + Duration::from_secs(61)));
+    }
+
+    #[test]
+    fn a_pairing_answer_goes_to_the_certificate_that_asked() {
+        let _env = DATA_HOME.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_DATA_HOME", dir.path());
+        let k = KdeConnect::default();
+        let ip: IpAddr = "192.0.2.1".parse().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        k.links
+            .lock()
+            .unwrap()
+            .insert("dev".into(), Link { name: "laptop".into(), cert: "other".into(), paired: false, tx });
+        assert!(k.asking.lock().unwrap().request("dev", "laptop", "asker", ip, Instant::now()));
+        k.answer_pair("dev", true);
+        assert!(!k.links.lock().unwrap()["dev"].paired, "a link with another certificate is not paired");
+        assert!(rx.try_recv().is_err());
+        assert_eq!(Trusted::load().devices["dev"].certificate, "asker", "the asker's certificate is trusted");
+    }
+
+    #[test]
+    fn private_notifications_keep_incoming_texts_off_the_laptop() {
+        use phone_core::model::{Direction, Message, MessageState};
+        let mut m = Message {
+            id: 1,
+            peer: "+61491570156".into(),
+            direction: Direction::Incoming,
+            body: "Your code is 123456".into(),
+            at: 1,
+            state: MessageState::Received,
+            read: false,
+            sim: String::new(),
+            parts: Vec::new(),
+        };
+        assert!(!pushes(&m, false));
+        assert!(pushes(&m, true));
+        m.direction = Direction::Outgoing;
+        assert!(pushes(&m, false), "the owner's own texts still show as sent");
+    }
+
     #[test]
     fn certificates_name_the_device() {
+        let _env = DATA_HOME.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_DATA_HOME", dir.path());
         let id = device_id().unwrap();
