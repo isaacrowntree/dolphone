@@ -1,10 +1,7 @@
 # Roadmap
 
-Ten reviews of Dolphone (as an everyday phone, for Flipper power users, by Linux
-phone veterans, for accessibility, messaging, telephony, desktop integration,
-reliability, privacy, and "does it feel like a phone on this machine") produced a
-long list. All of it that can be built without the hardware is built: see
-CHANGELOG.md. This is what is left, and why.
+Everything that can be built without the hardware is built: see CHANGELOG.md.
+This is what is left, and why.
 
 ## 0. A real call on a Flipper One
 

@@ -81,14 +81,6 @@ itself accepts, and a second baresip playing the far end of SIP calls. The tests
 - **214 unit tests**, including every panel screen rendered and checked against the
   panel's fonts.
 
-Before release it had thirty reviews: ten for features and fit, then twenty more
-on security from a same-user program and from the network, Rust robustness,
-concurrency, data integrity, packaging, the modem, audio, emergency calling,
-telephony standards, numbers abroad, accessibility, the scripting API, the tests
-themselves, onboarding, FlipCTL's conventions, licensing, battery use, failure
-recovery and privacy. What they found is fixed or written down in
-[ROADMAP.md](ROADMAP.md).
-
 The panel apps also run in the real FlipCTL (its browser view, in a VM).
 **Dolphone has not yet carried a real call**: that needs the hardware test in
 [docs/HARDWARE.md](docs/HARDWARE.md), whose deciding question is whether the

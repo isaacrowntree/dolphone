@@ -5,7 +5,7 @@
 First version, built for the Flipper One, tested against fake-mm, a SIP far end and
 in the real FlipCTL; not yet on a real modem.
 
-The roadmap from the reviews, done:
+Features:
 
 - It rings: a logind inhibitor while a call exists; catching up after resume; the
   modem allowed to wake the board (udev); ModemManager's signals instead of polling;
@@ -71,10 +71,7 @@ The roadmap from the reviews, done:
   (`scripts/ui-e2e.sh`); CI runs in Debian 13 containers; the suite also passes
   with every CPU core busy.
 
-Fixed after twenty more reviews (security from a program and from the network,
-robustness, concurrency, data, packaging, the modem, audio, emergency calling,
-telephony standards, numbers abroad, accessibility, the scripting API, the tests,
-onboarding, FlipCTL's conventions, licensing, battery, failure recovery, privacy):
+Fixed:
 
 - Security: an AppImage front end must be a real FUSE mount; a SIP peer is a
   contact's number only from the account's provider, and SIP texts run no rules;
@@ -109,7 +106,7 @@ onboarding, FlipCTL's conventions, licensing, battery, failure recovery, privacy
 - Battery: the apps redraw and poll only when something changed; contacts are read
   once; phoned wakes less when idle.
 
-The rest of that roadmap:
+More features:
 
 - Signals with numbers in them go in full only to Dolphone's own apps and
   programs granted reading (they register with `Settings.Register`); everyone
@@ -147,7 +144,7 @@ The first version:
 - dolphone-desktop for desktop mode, with tel: and sms: links.
 - phonectl, fake-mm, an end-to-end suite, a Debian package and CI.
 
-Fixed after ten reviews, before release:
+Fixed before release:
 
 - Security: reading messages and the call log, answering, keypad tones, audio
   routing, Bluetooth, the block list and settings are limited to Dolphone's own apps
