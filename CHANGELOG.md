@@ -125,7 +125,10 @@ The rest of that roadmap:
 - A PIN screen in Messages (panel and desktop) and PIN settings in both Settings.
 - Emergency alerts queue, the most severe first ("1 of 3"); the attention tone
   and its vibration are the 10.5 s pattern of 47 CFR 10.520, everywhere.
-- The desktop app attaches pictures through the file-chooser portal.
+- Pictures can be attached from the apps: the desktop app through the
+  file-chooser portal, panel Messages from a list of the newest in Pictures and
+  Downloads. A reply from the panel to a group now reaches everyone in it (it went
+  to the first number only).
 - Serial call audio keeps the modem's clock and PipeWire's apart with a small
   buffer that drops or pads whole frames, so a long call does not drift.
 
