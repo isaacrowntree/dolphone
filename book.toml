@@ -1,0 +1,21 @@
+[book]
+title = "Dolphone"
+description = "Calls and texts for the Flipper One"
+authors = ["Isaac Rowntree"]
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "target/book"
+
+[output.html]
+site-url = "/dolphone/"
+git-repository-url = "https://github.com/isaacrowntree/dolphone"
+edit-url-template = "https://github.com/isaacrowntree/dolphone/edit/main/{path}"
+default-theme = "light"
+preferred-dark-theme = "navy"
+additional-css = ["docs/book.css"]
+no-section-label = true
+
+[output.html.fold]
+enable = false

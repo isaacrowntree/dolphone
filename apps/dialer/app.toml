@@ -1,0 +1,10 @@
+# The Dialer: keypad, recent calls, contacts, and every call screen.
+#
+# phoned raises it with `flipctl open` when a call rings or an outside program asks
+# to dial, so it is also where confirmations are drawn. It draws with flipctl's own
+# widgets, so it looks like the rest of the panel.
+name = "Phone"
+wayland = "./target/release/dolphone-dialer"
+icon = "icon.png"
+audio = true
+folder = "Phone"

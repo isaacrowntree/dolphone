@@ -1,0 +1,11 @@
+{
+  "_comment": "Copy to ~/.config/dolphone/audio.json and adjust for your board. Every key is optional; these are the defaults.",
+  "speaker_commands": [["amixer", "-q", "sset", "Speaker", "unmute"], ["amixer", "-q", "sset", "Headphone", "mute"]],
+  "wired_commands": [["amixer", "-q", "sset", "Speaker", "mute"], ["amixer", "-q", "sset", "Headphone", "unmute"]],
+  "codec_sink": "",
+  "mic_source": "",
+  "modem_match": ["Quectel", "RM520", "RM500"],
+  "echo_cancel_sink": "dolphone_ec_sink",
+  "echo_cancel_source": "dolphone_ec_source",
+  "assume_wired": false
+}

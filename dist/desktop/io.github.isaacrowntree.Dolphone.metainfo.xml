@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.isaacrowntree.Dolphone</id>
+  <name>Dolphone</name>
+  <summary>Calls and texts for the Flipper One</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="io.github.isaacrowntree">
+    <name>Isaac Rowntree</name>
+  </developer>
+  <description>
+    <p>
+      Dolphone turns a Flipper One with a cellular modem into a phone: calls over
+      VoLTE, texts, contacts and the call log, with Bluetooth headsets and the
+      3.5 mm jack. On the Flipper's own screen it runs as FlipCTL apps; in desktop
+      mode this window is the same phone for a monitor, mouse and keyboard.
+    </p>
+    <p>
+      It is unofficial and not made by Flipper Devices. It is not suitable for
+      emergency calls.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.isaacrowntree.Dolphone.desktop</launchable>
+  <url type="homepage">https://github.com/isaacrowntree/dolphone</url>
+  <url type="bugtracker">https://github.com/isaacrowntree/dolphone/issues</url>
+  <categories>
+    <category>Network</category>
+    <category>Telephony</category>
+  </categories>
+  <provides>
+    <binary>dolphone-desktop</binary>
+    <binary>phonectl</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-10-29">
+      <description><p>First release: calls, texts, contacts, call log, audio routing and Bluetooth, on the panel and the desktop.</p></description>
+    </release>
+  </releases>
+</component>

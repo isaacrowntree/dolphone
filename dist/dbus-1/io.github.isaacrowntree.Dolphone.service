@@ -1,0 +1,5 @@
+# D-Bus activation: the first front end to call phoned starts it.
+[D-BUS Service]
+Name=io.github.isaacrowntree.Dolphone
+Exec=/bin/false
+SystemdService=phoned.service

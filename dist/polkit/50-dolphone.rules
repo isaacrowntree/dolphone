@@ -1,0 +1,16 @@
+// Dolphone: let the person at the device use the modem's calls, texts and USSD.
+//
+// ModemManager guards Voice, Messaging and USSD with polkit. phoned runs in the
+// owner's own session, so this allows those actions to an active, local session
+// and nothing wider: a remote SSH login still has to authenticate.
+polkit.addRule(function (action, subject) {
+    var ours = [
+        "org.freedesktop.ModemManager1.Voice",
+        "org.freedesktop.ModemManager1.Messaging",
+        "org.freedesktop.ModemManager1.USSD",
+        "org.freedesktop.ModemManager1.Device.Control",
+    ];
+    if (ours.indexOf(action.id) >= 0 && subject.local && subject.active) {
+        return polkit.Result.YES;
+    }
+});

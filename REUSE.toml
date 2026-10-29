@@ -1,0 +1,16 @@
+version = 1
+
+[[annotations]]
+path = ["**/*.rs", "**/*.slint", "**/*.toml", "scripts/**", "tools/**", "dist/**", "docs/**", ".github/**", "*.md"]
+SPDX-FileCopyrightText = "2026 Isaac Rowntree and Dolphone contributors"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = ["apps/*/icon.png", "docs/screens/**"]
+SPDX-FileCopyrightText = "2026 Isaac Rowntree and Dolphone contributors"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = ["about.hbs", "about.toml"]
+SPDX-FileCopyrightText = "Flipper Devices Inc."
+SPDX-License-Identifier = "MIT"

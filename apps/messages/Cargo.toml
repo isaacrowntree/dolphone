@@ -1,0 +1,35 @@
+# Its own workspace, as upstream's apps are: it builds for the panel with Slint,
+# which nothing in the main workspace links.
+[workspace]
+
+[package]
+name = "dolphone-messages"
+version = "0.1.0"
+edition = "2021"
+# The source. The binary links flipctl-app, and so Slint, which makes the built
+# app GPL-3.0-only, as flipctl's own apps are.
+license = "MIT"
+publish = false
+
+[features]
+default = ["device"]
+# The motor and the touchpad, read straight from evdev on the device.
+device = ["flipctl-app/device"]
+
+[dependencies]
+flipctl-app = { git = "https://github.com/flipperdevices/flipctl-slint" }
+slint = { version = "1.17", default-features = false, features = ["compat-1-2", "backend-winit-wayland", "renderer-software", "std"] }
+phone-api = { path = "../../crates/phone-api" }
+phone-bus = { path = "../../crates/phone-bus" }
+phone-core = { path = "../../crates/phone-core" }
+
+[dev-dependencies]
+flipper-ui = { git = "https://github.com/flipperdevices/flipctl-slint", default-features = false, features = ["slint"] }
+png = "0.17"
+
+[build-dependencies]
+flipctl-app = { git = "https://github.com/flipperdevices/flipctl-slint", features = ["build"] }
+
+[profile.release]
+opt-level = "z"
+strip = true

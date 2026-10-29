@@ -1,0 +1,672 @@
+// Dolphone on a desktop: the same phone, for a monitor, mouse and keyboard.
+//
+// A sidebar for the four places (Calls, Messages, Contacts, Settings), and over
+// everything, the things that cannot wait: a ringing call, the live call, and a
+// confirmation phoned is holding. Nothing here knows about ModemManager; it all
+// comes from phoned through Rust, which fills these models and answers these
+// callbacks.
+import { Button, LineEdit, ListView, ComboBox, CheckBox, Switch, ScrollView, VerticalBox, HorizontalBox, Palette } from "std-widgets.slint";
+
+export struct Row {
+    // The line in bold, the line under it, what sits at the right.
+    title: string,
+    subtitle: string,
+    aside: string,
+    // A dot: 0 none, 1 unread or missed, 2 a warning (failed, blocked).
+    mark: int,
+    key: string,
+}
+
+export struct Bubble {
+    text: string,
+    time: string,
+    mine: bool,
+    state: string,
+}
+
+export struct Choice {
+    label: string,
+    value: string,
+}
+
+export global Brand {
+    // The Flipper's orange, kept for the one thing that should catch the eye.
+    out property <color> accent: #ff8200;
+    out property <color> danger: #c23b3b;
+    out property <color> ok: #217a45;
+    // Your own bubbles: the orange darkened until white text on it reads (4.6:1).
+    out property <color> bubble: #b35400;
+    // Secondary text: the theme's own ink, lightened, so it holds about 4.5:1 in
+    // both light and dark themes where a fixed grey would fail one of them.
+    out property <color> muted: Palette.foreground.with-alpha(0.68);
+}
+
+component Badge inherits Rectangle {
+    in property <int> count;
+    visible: count > 0;
+    width: max(18px, label.preferred-width + 10px);
+    height: 18px;
+    border-radius: 9px;
+    background: Brand.accent;
+    label := Text {
+        text: count;
+        color: white;
+        font-size: 11px;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component NavItem inherits Rectangle {
+    in property <string> label;
+    in property <string> glyph;
+    in property <bool> active;
+    in property <int> badge;
+    callback clicked();
+    height: 40px;
+    border-radius: 8px;
+    accessible-role: button;
+    accessible-label: badge > 0 ? label + ", " + badge + " new" : label;
+    accessible-action-default => { root.clicked(); }
+    background: active ? Palette.selection-background : touch.has-hover ? Palette.alternate-background : transparent;
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 10px;
+        spacing: 10px;
+        Text { text: glyph; font-size: 16px; vertical-alignment: center; color: active ? Palette.selection-foreground : Palette.foreground; }
+        Text { text: label; vertical-alignment: center; horizontal-stretch: 1; font-weight: active ? 600 : 400; color: active ? Palette.selection-foreground : Palette.foreground; }
+        VerticalLayout { alignment: center; Badge { count: badge; } }
+    }
+}
+
+component RowView inherits Rectangle {
+    in property <Row> entry;
+    in property <bool> selected;
+    callback clicked();
+    callback primary();
+    in property <string> primary-label;
+    height: 56px;
+    border-radius: 8px;
+    accessible-role: list-item;
+    accessible-label: entry.title + ", " + entry.subtitle + ", " + entry.aside;
+    accessible-action-default => { root.primary(); }
+    background: selected ? Palette.selection-background : touch.has-hover ? Palette.alternate-background : transparent;
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+        double-clicked => { root.primary(); }
+    }
+    HorizontalLayout {
+        padding: 8px;
+        padding-left: 12px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 8px; height: 8px; border-radius: 4px;
+                background: entry.mark == 1 ? Brand.accent : entry.mark == 2 ? Brand.danger : transparent;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            horizontal-stretch: 1;
+            Text { text: entry.title; font-weight: entry.mark == 1 ? 700 : 500; overflow: elide; color: selected ? Palette.selection-foreground : Palette.foreground; }
+            Text { text: entry.subtitle; font-size: 12px; overflow: elide; color: selected ? Palette.selection-foreground : Brand.muted; }
+        }
+        Text { text: entry.aside; font-size: 12px; vertical-alignment: center; color: selected ? Palette.selection-foreground : Brand.muted; }
+        if primary-label != "" && (touch.has-hover || selected): Button {
+            text: primary-label;
+            clicked => { root.primary(); }
+        }
+    }
+}
+
+component DialKey inherits Rectangle {
+    in property <string> digit;
+    in property <string> letters;
+    callback pressed(string);
+    width: 72px;
+    height: 56px;
+    border-radius: 28px;
+    accessible-role: button;
+    accessible-label: digit == "*" ? "star" : digit == "#" ? "hash" : digit;
+    accessible-action-default => { root.pressed(digit); }
+    background: touch.pressed ? Palette.selection-background : touch.has-hover ? Palette.alternate-background : Palette.control-background;
+    touch := TouchArea {
+        clicked => { root.pressed(digit); }
+    }
+    VerticalLayout {
+        alignment: center;
+        Text { text: digit; font-size: 22px; horizontal-alignment: center; color: Palette.foreground; }
+        Text { text: letters; font-size: 9px; horizontal-alignment: center; color: Brand.muted; letter-spacing: 1px; }
+    }
+}
+
+component Dialpad inherits VerticalLayout {
+    in-out property <string> number;
+    in property <string> hint;
+    callback call(string);
+    callback typed(string);
+    spacing: 10px;
+    alignment: start;
+    LineEdit {
+        text <=> root.number;
+        placeholder-text: "Number or *code#";
+        font-size: 20px;
+        horizontal-alignment: center;
+        accepted => { root.call(root.number); }
+        edited => { root.typed(self.text); }
+    }
+    Text { text: hint; horizontal-alignment: center; color: Brand.muted; height: 16px; }
+    for row in [["1", "", "2", "ABC", "3", "DEF"], ["4", "GHI", "5", "JKL", "6", "MNO"], ["7", "PQRS", "8", "TUV", "9", "WXYZ"], ["*", "", "0", "+", "#", ""]]: HorizontalLayout {
+        alignment: center;
+        spacing: 14px;
+        DialKey { digit: row[0]; letters: row[1]; pressed(d) => { root.number += d; root.typed(root.number); } }
+        DialKey { digit: row[2]; letters: row[3]; pressed(d) => { root.number += d; root.typed(root.number); } }
+        DialKey { digit: row[4]; letters: row[5]; pressed(d) => { root.number += d; root.typed(root.number); } }
+    }
+    HorizontalLayout {
+        alignment: center;
+        spacing: 14px;
+        Rectangle { width: 72px; }
+        Rectangle {
+            width: 72px; height: 56px; border-radius: 28px;
+            accessible-role: button;
+            accessible-label: "Call";
+            accessible-action-default => { root.call(root.number); }
+            background: callt.has-hover ? Brand.ok.darker(10%) : Brand.ok;
+            callt := TouchArea { clicked => { root.call(root.number); } }
+            Text { text: "Call"; color: white; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+        }
+        Rectangle {
+            width: 72px; height: 56px;
+            back := TouchArea { clicked => { root.number = ""; root.typed(""); } }
+            Text { text: root.number == "" ? "" : "Clear"; color: Brand.muted; horizontal-alignment: center; vertical-alignment: center; }
+        }
+    }
+}
+
+// The card that sits over everything while a call rings or is live.
+component CallCard inherits Rectangle {
+    in property <bool> ringing;
+    in property <bool> waiting;
+    in property <string> name;
+    in property <string> detail;
+    in property <string> timer;
+    in property <bool> muted;
+    in property <bool> two-calls;
+    in property <string> held-name;
+    in property <[Choice]> routes;
+    in property <int> route-index;
+    in property <bool> keypad;
+    callback answer();
+    callback decline();
+    callback hangup();
+    callback mute(bool);
+    callback swap();
+    callback route(int);
+    callback dtmf(string);
+    callback toggle-keypad();
+    callback reply(string);
+
+    width: 420px;
+    height: inner.preferred-height + 40px;
+    border-radius: 16px;
+    background: Palette.background;
+    drop-shadow-blur: 24px;
+    drop-shadow-color: #0006;
+    border-width: 1px;
+    border-color: ringing ? Brand.accent : Palette.border;
+
+    inner := VerticalLayout {
+        padding: 20px;
+        spacing: 12px;
+        Text {
+            text: ringing ? (waiting ? "Call waiting" : "Incoming call") : (timer == "" ? "Calling..." : timer);
+            horizontal-alignment: center;
+            color: ringing ? Brand.accent : Brand.muted;
+            font-weight: 600;
+        }
+        Text { text: name; font-size: 26px; font-weight: 700; horizontal-alignment: center; overflow: elide; color: Palette.foreground; }
+        Text { text: detail; horizontal-alignment: center; color: Brand.muted; visible: detail != ""; }
+        if two-calls && !ringing: Text { text: "On hold: " + held-name; horizontal-alignment: center; color: Brand.muted; }
+
+        if ringing: HorizontalLayout {
+            spacing: 12px;
+            Button { text: "Decline"; clicked => { root.decline(); } }
+            Button { text: "Answer"; primary: true; clicked => { root.answer(); } }
+        }
+        if ringing: HorizontalLayout {
+            spacing: 6px;
+            for r in ["Can't talk now", "On my way", "Call you back"]: Button {
+                text: r;
+                clicked => { root.reply(r); }
+            }
+        }
+        if !ringing && keypad: HorizontalLayout {
+            alignment: center;
+            spacing: 6px;
+            for d in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"]: Button {
+                text: d;
+                width: 28px;
+                clicked => { root.dtmf(d); }
+            }
+        }
+        if !ringing: HorizontalLayout {
+            spacing: 8px;
+            Button { text: muted ? "Unmute" : "Mute"; checkable: true; checked: muted; clicked => { root.mute(!muted); } }
+            Button { text: "Keypad"; checkable: true; checked: keypad; clicked => { root.toggle-keypad(); } }
+            if two-calls: Button { text: "Swap"; clicked => { root.swap(); } }
+            ComboBox {
+                horizontal-stretch: 1;
+                model: [routes[0].label, routes[1].label, routes[2].label];
+                current-index: route-index;
+                selected => { root.route(self.current-index); }
+            }
+        }
+        if !ringing: Rectangle {
+            height: 44px;
+            border-radius: 22px;
+            accessible-role: button;
+            accessible-label: "End call";
+            accessible-action-default => { root.hangup(); }
+            background: endt.has-hover ? Brand.danger.darker(10%) : Brand.danger;
+            endt := TouchArea { clicked => { root.hangup(); } }
+            Text { text: "End call"; color: white; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "Dolphone";
+    preferred-width: 980px;
+    preferred-height: 660px;
+    min-width: 720px;
+    min-height: 520px;
+    background: Palette.background;
+
+    // 0 calls, 1 messages, 2 contacts, 3 settings.
+    in-out property <int> page;
+
+    // The sidebar's view of the phone.
+    in property <string> operator;
+    in property <string> signal;
+    in property <int> unread;
+    in property <int> missed;
+    in property <bool> connected;
+
+    // Calls.
+    in-out property <string> number;
+    in property <string> number-hint;
+    in property <[Row]> recents;
+    in-out property <int> recent-selected: -1;
+
+    // Messages.
+    in property <[Row]> threads;
+    in-out property <int> thread-selected: -1;
+    in property <string> thread-title;
+    in property <string> thread-number;
+    in property <[Bubble]> bubbles;
+    in-out property <string> draft;
+    in property <string> draft-cost;
+
+    // Contacts.
+    in property <[Row]> contacts;
+    in-out property <int> contact-selected: -1;
+    in-out property <string> contact-filter;
+
+    // Settings.
+    in property <[Choice]> routes: [{label: "Speaker"}, {label: "Headset"}, {label: "Bluetooth"}];
+    in property <int> route-index;
+    in property <int> ringer-index;
+    in property <bool> vibrate;
+    in property <bool> private-notify;
+    in property <bool> delete-from-sim;
+    in property <bool> bt-available;
+    in property <bool> bt-powered;
+    in property <[Row]> bt-devices;
+    in property <[Row]> blocked;
+    in property <string> modem-text;
+
+    // The call card.
+    in property <bool> call-visible;
+    in property <bool> call-ringing;
+    in property <bool> call-waiting;
+    in property <string> call-name;
+    in property <string> call-detail;
+    in property <string> call-timer;
+    in property <bool> call-muted;
+    in property <bool> call-two;
+    in property <string> call-held-name;
+    in-out property <bool> call-keypad;
+
+    // A confirmation phoned is holding.
+    in property <bool> confirm-visible;
+    in property <string> confirm-title;
+    in property <string> confirm-body;
+    in property <string> confirm-reason;
+
+    // A passing message.
+    in property <string> toast;
+
+    callback navigate(int);
+    callback dial(string);
+    callback number-typed(string);
+    callback recent-call(int);
+    callback recent-text(int);
+    callback open-thread(int);
+    callback send(string);
+    callback draft-edited(string);
+    callback new-message(string);
+    callback thread-call();
+    callback thread-block();
+    callback thread-delete();
+    callback contact-call(int);
+    callback contact-text(int);
+    callback contacts-filtered(string);
+    callback answer();
+    callback decline();
+    callback hangup();
+    callback mute(bool);
+    callback swap();
+    callback route(int);
+    callback dtmf(string);
+    callback reply(string);
+    callback allow();
+    callback deny();
+    callback set-ringer(int);
+    callback set-flag(string, bool);
+    callback bt-power(bool);
+    callback bt-scan();
+    callback bt-action(int);
+    callback unblock(int);
+    callback wipe();
+
+    HorizontalLayout {
+        // Sidebar.
+        Rectangle {
+            width: 220px;
+            background: Palette.alternate-background;
+            VerticalLayout {
+                padding: 14px;
+                spacing: 4px;
+                HorizontalLayout {
+                    spacing: 6px;
+                    Text { text: "Dolphone"; font-size: 24px; font-weight: 800; color: Brand.accent; }
+                }
+                Text { text: connected ? operator : "Phone service not running"; color: Brand.muted; font-size: 12px; overflow: elide; }
+                Text { text: signal; color: Brand.muted; font-size: 12px; }
+                Rectangle { height: 14px; }
+                NavItem { label: "Calls"; glyph: "\u{260E}"; active: page == 0; badge: missed; clicked => { root.navigate(0); } }
+                NavItem { label: "Messages"; glyph: "\u{2709}"; active: page == 1; badge: unread; clicked => { root.navigate(1); } }
+                NavItem { label: "Contacts"; glyph: "\u{263A}"; active: page == 2; clicked => { root.navigate(2); } }
+                NavItem { label: "Settings"; glyph: "\u{2699}"; active: page == 3; clicked => { root.navigate(3); } }
+                Rectangle { vertical-stretch: 1; }
+                Text { text: "Not for emergency calls."; font-size: 12px; color: Brand.muted; wrap: word-wrap; }
+            }
+        }
+
+        // The page.
+        Rectangle {
+            horizontal-stretch: 1;
+            if page == 0: HorizontalLayout {
+                padding: 20px;
+                spacing: 24px;
+                Dialpad {
+                    width: 260px;
+                    number <=> root.number;
+                    hint: root.number-hint;
+                    call(n) => { root.dial(n); }
+                    typed(t) => { root.number-typed(t); }
+                }
+                VerticalLayout {
+                    spacing: 8px;
+                    Text { text: "Recent calls"; font-size: 18px; font-weight: 700; color: Palette.foreground; }
+                    ListView {
+                        for r[i] in root.recents: RowView {
+                            entry: r;
+                            selected: i == root.recent-selected;
+                            primary-label: "Call";
+                            clicked => { root.recent-selected = i; }
+                            primary => { root.recent-call(i); }
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: end;
+                        spacing: 8px;
+                        Button { text: "Text"; enabled: root.recent-selected >= 0; clicked => { root.recent-text(root.recent-selected); } }
+                        Button { text: "Call back"; primary: true; enabled: root.recent-selected >= 0; clicked => { root.recent-call(root.recent-selected); } }
+                    }
+                }
+            }
+
+            if page == 1: HorizontalLayout {
+                Rectangle {
+                    width: 300px;
+                    border-width: 0px;
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 8px;
+                        HorizontalLayout {
+                            Text { text: "Messages"; font-size: 18px; font-weight: 700; horizontal-stretch: 1; color: Palette.foreground; }
+                            Button { text: "New"; clicked => { root.new-message(root.contact-filter); } }
+                        }
+                        ListView {
+                            for t[i] in root.threads: RowView {
+                                entry: t;
+                                selected: i == root.thread-selected;
+                                clicked => { root.thread-selected = i; root.open-thread(i); }
+                            }
+                        }
+                    }
+                }
+                Rectangle { width: 1px; background: Palette.border; }
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 8px;
+                    if root.thread-title == "": Text {
+                        text: "Choose a conversation, or start a new one.";
+                        color: Brand.muted;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        vertical-stretch: 1;
+                    }
+                    if root.thread-title != "": HorizontalLayout {
+                        spacing: 8px;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            Text { text: root.thread-title; font-size: 18px; font-weight: 700; color: Palette.foreground; }
+                            Text { text: root.thread-number; font-size: 12px; color: Brand.muted; }
+                        }
+                        Button { text: "Call"; clicked => { root.thread-call(); } }
+                        Button { text: "Block"; clicked => { root.thread-block(); } }
+                        Button { text: "Delete"; clicked => { root.thread-delete(); } }
+                    }
+                    if root.thread-title != "": ListView {
+                        vertical-stretch: 1;
+                        for b in root.bubbles: HorizontalLayout {
+                            padding: 4px;
+                            alignment: b.mine ? end : start;
+                            Rectangle {
+                                max-width: 420px;
+                                border-radius: 14px;
+                                background: b.mine ? Brand.bubble : Palette.alternate-background;
+                                VerticalLayout {
+                                    padding: 10px;
+                                    padding-top: 7px;
+                                    padding-bottom: 7px;
+                                    Text { text: b.text; wrap: word-wrap; color: b.mine ? white : Palette.foreground; }
+                                    Text { text: b.time + (b.state == "" ? "" : "  " + b.state); font-size: 10px; color: b.mine ? #fffc : Brand.muted; horizontal-alignment: right; }
+                                }
+                            }
+                        }
+                    }
+                    if root.thread-title != "": HorizontalLayout {
+                        spacing: 8px;
+                        LineEdit {
+                            text <=> root.draft;
+                            placeholder-text: "Text message";
+                            edited => { root.draft-edited(self.text); }
+                            accepted => { root.send(root.draft); }
+                        }
+                        Text { text: root.draft-cost; color: Brand.muted; font-size: 11px; vertical-alignment: center; }
+                        Button { text: "Send"; primary: true; enabled: root.draft != ""; clicked => { root.send(root.draft); } }
+                    }
+                }
+            }
+
+            if page == 2: VerticalLayout {
+                padding: 20px;
+                spacing: 8px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: "Contacts"; font-size: 18px; font-weight: 700; horizontal-stretch: 1; color: Palette.foreground; }
+                    LineEdit {
+                        width: 240px;
+                        placeholder-text: "Search";
+                        text <=> root.contact-filter;
+                        edited => { root.contacts-filtered(self.text); }
+                    }
+                }
+                ListView {
+                    for c[i] in root.contacts: RowView {
+                        entry: c;
+                        selected: i == root.contact-selected;
+                        primary-label: "Call";
+                        clicked => { root.contact-selected = i; }
+                        primary => { root.contact-call(i); }
+                    }
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: 8px;
+                    Text { text: "Contacts are .vcf files in ~/.local/share/dolphone/contacts"; color: Brand.muted; font-size: 11px; vertical-alignment: center; horizontal-stretch: 1; }
+                    Button { text: "Text"; enabled: root.contact-selected >= 0; clicked => { root.contact-text(root.contact-selected); } }
+                    Button { text: "Call"; primary: true; enabled: root.contact-selected >= 0; clicked => { root.contact-call(root.contact-selected); } }
+                }
+            }
+
+            if page == 3: ScrollView {
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 14px;
+                    alignment: start;
+                    Text { text: "Settings"; font-size: 18px; font-weight: 700; color: Palette.foreground; }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Text { text: "Ringer"; width: 180px; vertical-alignment: center; color: Palette.foreground; }
+                        ComboBox { model: ["Ring", "Vibrate", "Silent"]; current-index: root.ringer-index; selected => { root.set-ringer(self.current-index); } }
+                    }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Text { text: "Call audio"; width: 180px; vertical-alignment: center; color: Palette.foreground; }
+                        ComboBox { model: [root.routes[0].label, root.routes[1].label, root.routes[2].label]; current-index: root.route-index; selected => { root.route(self.current-index); } }
+                    }
+                    CheckBox { text: "Vibrate when ringing"; checked: root.vibrate; toggled => { root.set-flag("vibrate", self.checked); } }
+                    CheckBox { text: "Hide message text in notifications"; checked: root.private-notify; toggled => { root.set-flag("private_notify", self.checked); } }
+                    CheckBox { text: "Clear texts from the SIM once saved"; checked: root.delete-from-sim; toggled => { root.set-flag("delete_from_sim", self.checked); } }
+
+                    Text { text: "Bluetooth"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
+                    if !root.bt-available: Text { text: "No Bluetooth adapter."; color: Brand.muted; }
+                    if root.bt-available: HorizontalLayout {
+                        spacing: 12px;
+                        Switch { text: "Bluetooth"; checked: root.bt-powered; toggled => { root.bt-power(self.checked); } }
+                        Button { text: "Scan for headsets and speakers"; enabled: root.bt-powered; clicked => { root.bt-scan(); } }
+                    }
+                    for d[i] in root.bt-devices: RowView {
+                        entry: d;
+                        primary-label: d.aside;
+                        primary => { root.bt-action(i); }
+                    }
+
+                    Text { text: "Blocked numbers"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
+                    if root.blocked.length == 0: Text { text: "Nobody is blocked."; color: Brand.muted; }
+                    for b[i] in root.blocked: RowView {
+                        entry: b;
+                        primary-label: "Unblock";
+                        primary => { root.unblock(i); }
+                    }
+
+                    Text { text: "Modem"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
+                    Text { text: root.modem-text; color: Brand.muted; wrap: word-wrap; }
+
+                    Text { text: "Danger zone"; font-size: 15px; font-weight: 700; color: Brand.danger; }
+                    HorizontalLayout {
+                        alignment: start;
+                        Button { text: "Delete all texts, calls and blocks..."; clicked => { root.wipe(); } }
+                    }
+                }
+            }
+        }
+    }
+
+    // A dim layer under the card and the confirmation, so they read as on top.
+    if call-visible || confirm-visible: Rectangle {
+        background: #0005;
+        TouchArea {}
+    }
+
+    if call-visible: CallCard {
+        x: (root.width - self.width) / 2;
+        y: 40px;
+        ringing: root.call-ringing;
+        waiting: root.call-waiting;
+        name: root.call-name;
+        detail: root.call-detail;
+        timer: root.call-timer;
+        muted: root.call-muted;
+        two-calls: root.call-two;
+        held-name: root.call-held-name;
+        routes: root.routes;
+        route-index: root.route-index;
+        keypad: root.call-keypad;
+        answer => { root.answer(); }
+        decline => { root.decline(); }
+        hangup => { root.hangup(); }
+        mute(m) => { root.mute(m); }
+        swap => { root.swap(); }
+        route(r) => { root.route(r); }
+        dtmf(d) => { root.dtmf(d); }
+        toggle-keypad => { root.call-keypad = !root.call-keypad; }
+        reply(t) => { root.reply(t); }
+    }
+
+    if confirm-visible && !call-visible: Rectangle {
+        x: (root.width - self.width) / 2;
+        y: 80px;
+        width: 420px;
+        height: cbox.preferred-height + 20px;
+        border-radius: 16px;
+        background: Palette.background;
+        border-width: 2px;
+        border-color: Brand.accent;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #0006;
+        cbox := VerticalLayout {
+            padding: 20px;
+            spacing: 10px;
+            Text { text: root.confirm-title; font-size: 18px; font-weight: 700; wrap: word-wrap; color: Palette.foreground; }
+            Text { text: root.confirm-body; wrap: word-wrap; color: Palette.foreground; visible: root.confirm-body != ""; }
+            Text { text: root.confirm-reason; color: Brand.accent; font-weight: 600; }
+            HorizontalLayout {
+                alignment: end;
+                spacing: 8px;
+                Button { text: "Deny"; clicked => { root.deny(); } }
+                Button { text: "Allow"; primary: true; clicked => { root.allow(); } }
+            }
+        }
+    }
+
+    if toast != "": Rectangle {
+        x: (root.width - self.width) / 2;
+        y: root.height - self.height - 24px;
+        width: min(root.width - 80px, tt.preferred-width + 32px);
+        height: 40px;
+        border-radius: 20px;
+        background: #222e;
+        tt := Text { text: root.toast; color: white; horizontal-alignment: center; vertical-alignment: center; }
+    }
+}

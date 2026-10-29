@@ -1,0 +1,107 @@
+// Messages' screens: the thread list (a menu), a conversation and the preview
+// before sending (detail screens), and flipctl's keyboard for writing. A modal sits
+// over any of them for confirmations and errors.
+import { Shell, PanelStatus } from "@app/shell.slint";
+import { MenuBody, ListItem } from "@flipctl/list.slint";
+import { DetailBody, DetailRow } from "@flipctl/detail.slint";
+import { TextInputBody, KbCell } from "@flipctl/keyboard.slint";
+import { Modal } from "@flipctl/modal.slint";
+
+export { ListItem, DetailRow, KbCell, PanelStatus }
+
+export component AppWindow inherits Shell {
+    // 1 menu, 2 detail, 3 keyboard.
+    in property <int> mode: 1;
+
+    in property <[ListItem]> items;
+    in property <int> selected;
+    in property <int> scroll;
+    in property <int> total;
+    in property <string> breadcrumb;
+    in property <int> tick;
+
+    in property <[DetailRow]> rows;
+    in property <int> offset;
+    in property <bool> at_start;
+    in property <bool> at_end;
+
+    in property <string> kb_title;
+    in property <string> kb_text;
+    in property <length> kb_field_w;
+    in property <length> kb_cursor_dx;
+    in property <bool> kb_cursor_on;
+    in property <bool> kb_field_focused;
+    in property <string> kb_warning;
+    in property <[KbCell]> kb_cells;
+    in property <length> kb_chrome_x;
+    in property <length> kb_chrome_y;
+    in property <length> kb_chrome_w;
+    in property <length> kb_chrome_h;
+    in property <string> kb_lang_label;
+    in property <string> kb_tab_label;
+    in property <int> kb_tab_focus;
+    in property <int> kb_tab_pressed;
+    in property <int> kb_discard: -1;
+
+    in property <[string]> buttons;
+    in property <int> pressed_slot: -1;
+
+    in property <[string]> modal_lines;
+    in property <string> modal_left;
+    in property <string> modal_right;
+
+    callback keyed(string, bool);
+    key(text, down) => {
+        root.keyed(text, down);
+    }
+
+    if root.mode == 1: MenuBody {
+        items: root.items;
+        selected: root.selected;
+        scroll: root.scroll;
+        total: root.total;
+        breadcrumb: root.breadcrumb;
+        tick: root.tick;
+        buttons: root.modal_lines.length > 0 ? [] : root.buttons;
+        pressed_slot: root.pressed_slot;
+    }
+
+    if root.mode == 2: DetailBody {
+        rows: root.rows;
+        breadcrumb: root.breadcrumb;
+        offset: root.offset;
+        at_start: root.at_start;
+        at_end: root.at_end;
+        buttons: root.modal_lines.length > 0 ? [] : root.buttons;
+        pressed_slot: root.pressed_slot;
+    }
+
+    if root.mode == 3: TextInputBody {
+        title: root.kb_title;
+        visible_text: root.kb_text;
+        field_w: root.kb_field_w;
+        cursor_dx: root.kb_cursor_dx;
+        cursor_on: root.kb_cursor_on;
+        field_focused: root.kb_field_focused;
+        warning: root.kb_warning;
+        cells: root.kb_cells;
+        chrome_x: root.kb_chrome_x;
+        chrome_y: root.kb_chrome_y;
+        chrome_w: root.kb_chrome_w;
+        chrome_h: root.kb_chrome_h;
+        lang_label: root.kb_lang_label;
+        tab_label: root.kb_tab_label;
+        tab_focus: root.kb_tab_focus;
+        tab_pressed: root.kb_tab_pressed;
+        buttons: root.buttons;
+        pressed_slot: root.pressed_slot;
+        discard: root.kb_discard;
+    }
+
+    if root.modal_lines.length > 0: Modal {
+        lines: root.modal_lines;
+        left_label: root.modal_left;
+        right_label: root.modal_right;
+        pressed_slot: root.pressed_slot;
+    }
+}

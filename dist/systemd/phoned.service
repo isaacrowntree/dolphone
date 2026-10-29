@@ -1,0 +1,33 @@
+# Dolphone's phone daemon, one per user session.
+#
+# Installed to /usr/lib/systemd/user (or ~/.config/systemd/user) and started with
+# the session, or on first use through D-Bus activation
+# (dist/dbus-1/io.github.isaacrowntree.Dolphone.service).
+[Unit]
+Description=Dolphone phone daemon (calls, texts, call audio)
+# Keep restarting however often it fails: a phone that stops ringing after five
+# quick crashes is worse than one that keeps trying.
+StartLimitIntervalSec=0
+Documentation=https://github.com/isaacrowntree/dolphone
+# Call audio is PipeWire's; start after it when it is there, without needing it.
+After=pipewire.service wireplumber.service
+Wants=pipewire.service
+
+[Service]
+Type=dbus
+BusName=io.github.isaacrowntree.Dolphone
+ExecStart=/usr/bin/phoned
+Restart=on-failure
+RestartSec=2
+# Numbers in the journal are masked by phoned itself; keep its output there.
+StandardOutput=journal
+StandardError=journal
+# No sandboxing options, deliberately. In a *user* unit every one of them
+# (ProtectSystem=, NoNewPrivileges=, even PrivateTmp=) runs phoned in a user
+# namespace, and PipeWire's tools then stall for seconds or a full 25 s D-Bus
+# timeout on every call: measured, and it delayed call audio and froze call
+# signals. phoned runs as the user, talks only to the buses and PipeWire, and
+# writes only under ~/.local/share/dolphone and $XDG_RUNTIME_DIR/dolphone.
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,6 @@
+# Phone Settings: the ringer, where call audio goes, Bluetooth headsets, blocked
+# numbers, privacy, and wiping the phone's data.
+name = "Phone Settings"
+wayland = "./target/release/dolphone-settings"
+icon = "icon.png"
+folder = "Phone"

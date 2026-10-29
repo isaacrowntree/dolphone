@@ -1,0 +1,13 @@
+[package]
+name = "phone-api"
+description = "Dolphone's D-Bus interface: names, types, and client proxies"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+# The runtime is the binary's choice: phoned and phonectl bring tokio, the apps
+# bring zbus's own. This crate only needs the proxy half.
+zbus = { version = "6", default-features = false, features = ["proxy"] }

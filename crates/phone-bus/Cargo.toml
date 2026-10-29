@@ -1,0 +1,13 @@
+[package]
+name = "phone-bus"
+description = "The front ends' side of phoned: a D-Bus worker thread that turns signals and replies into events"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+futures-util = { version = "0.3", default-features = false }
+phone-api.workspace = true
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+zbus.workspace = true

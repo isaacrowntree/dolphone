@@ -1,0 +1,8 @@
+# Messages: conversations, and writing on flipctl's own keyboard.
+#
+# The Dialer hands it a number to text through $XDG_RUNTIME_DIR/dolphone/compose and
+# brings it up with `flipctl open`.
+name = "Messages"
+wayland = "./target/release/dolphone-messages"
+icon = "icon.png"
+folder = "Phone"

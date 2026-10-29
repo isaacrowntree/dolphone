@@ -1,0 +1,58 @@
+// Phone Settings: flipctl's menu (with its toggles and adjustable values), a
+// detail screen for the modem, and a modal for confirmations.
+import { Shell, PanelStatus } from "@app/shell.slint";
+import { MenuBody, ListItem } from "@flipctl/list.slint";
+import { DetailBody, DetailRow } from "@flipctl/detail.slint";
+import { Modal } from "@flipctl/modal.slint";
+
+export { ListItem, DetailRow, PanelStatus }
+
+export component AppWindow inherits Shell {
+    in property <int> mode: 1;
+    in property <[ListItem]> items;
+    in property <int> selected;
+    in property <int> scroll;
+    in property <int> total;
+    in property <string> breadcrumb;
+    in property <int> tick;
+    in property <int> arrow_pressed;
+    in property <[DetailRow]> rows;
+    in property <[string]> buttons;
+    in property <int> pressed_slot: -1;
+    in property <[string]> modal_lines;
+    in property <string> modal_left;
+    in property <string> modal_right;
+
+    callback keyed(string, bool);
+    key(text, down) => {
+        root.keyed(text, down);
+    }
+
+    if root.mode == 1: MenuBody {
+        items: root.items;
+        selected: root.selected;
+        scroll: root.scroll;
+        total: root.total;
+        breadcrumb: root.breadcrumb;
+        tick: root.tick;
+        arrow_pressed: root.arrow_pressed;
+        buttons: root.modal_lines.length > 0 ? [] : root.buttons;
+        pressed_slot: root.pressed_slot;
+    }
+
+    if root.mode == 2: DetailBody {
+        rows: root.rows;
+        // The labels are ours, so the signal gauge is sized around them.
+        fit_gauges: true;
+        breadcrumb: root.breadcrumb;
+        buttons: root.modal_lines.length > 0 ? [] : root.buttons;
+        pressed_slot: root.pressed_slot;
+    }
+
+    if root.modal_lines.length > 0: Modal {
+        lines: root.modal_lines;
+        left_label: root.modal_left;
+        right_label: root.modal_right;
+        pressed_slot: root.pressed_slot;
+    }
+}

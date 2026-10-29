@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/phone-core",
+    "crates/phone-api",
+    "crates/phone-bus",
+    "crates/phoned",
+    "crates/fake-mm",
+    "crates/phonectl",
+    "apps/desktop",
+]
+# The apps under apps/ are not members. Each carries its own [workspace] table, as
+# upstream's apps do: they link flipctl-app, and so Slint, and build for the panel,
+# while everything here builds for the host and links no UI at all.
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/isaacrowntree/dolphone"
+rust-version = "1.92"
+
+[workspace.dependencies]
+phone-core = { path = "crates/phone-core" }
+phone-api = { path = "crates/phone-api" }
+phone-bus = { path = "crates/phone-bus" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process", "signal", "fs", "io-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zbus = { version = "6", default-features = false, features = ["tokio", "proxy", "service", "object-manager"] }
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+strip = true

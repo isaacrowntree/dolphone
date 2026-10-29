@@ -1,0 +1,7 @@
+/* Dolphone's orange for links and the title, as on the device. */
+:root { --dolphone: #c25e00; }
+.navy, .coal, .ayu { --dolphone: #ff8a00; }
+.menu-title { color: var(--dolphone); font-weight: 800; }
+a, a:visited { color: var(--dolphone); }
+.content img.lcd { image-rendering: pixelated; border-radius: 6px; box-shadow: 0 2px 10px #0003; margin: 4px; }
+.shots { display: flex; flex-wrap: wrap; gap: 8px; }

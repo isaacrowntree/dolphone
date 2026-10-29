@@ -1,0 +1,13 @@
+# Development only: the fake modem, as a user service on the system bus. Needs
+# dist/dev/dolphone-fake-mm.conf in /etc/dbus-1/system.d and the real ModemManager
+# masked (scripts/dev-setup.sh does both).
+[Unit]
+Description=Dolphone fake ModemManager (development)
+Before=phoned.service
+
+[Service]
+ExecStart=%h/.local/bin/fake-mm
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

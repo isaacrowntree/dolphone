@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: System packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libfontconfig-dev libxkbcommon-dev desktop-file-utils file squashfs-tools zstd
+      - name: flipctl-slint, for its bundler and pinned AppImage tools
+        run: |
+          git clone -q https://github.com/flipperdevices/flipctl-slint "$HOME/flipctl-slint"
+          cd "$HOME/flipctl-slint" && tools/appimage/build.sh --native apps/sysmon >/dev/null
+          echo "UPSTREAM=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+      - name: Bundles and the Debian package
+        run: scripts/package-deb.sh
+      - name: Corresponding source (GPL-3.0 for the binaries)
+        run: scripts/source-tarball.sh
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "Dolphone $GITHUB_REF_NAME" \
+            --notes "Built against flipctl-slint $UPSTREAM. Not for emergency calls." \
+            target/deb/*.deb target/bundles/*.AppImage target/bundles/*.sha256 target/source/*.tar.zst

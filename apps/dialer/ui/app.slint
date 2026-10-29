@@ -1,0 +1,81 @@
+// The Dialer's screens.
+//
+// Three shapes, all flipctl's own: a canvas (the keypad and the call screens,
+// whose frames Rust paints and whose text Slint places), a menu (recent calls and
+// contacts) and a detail screen (a USSD reply, a caller's details). A modal sits
+// over any of them for confirmations and errors.
+//
+// Every position is decided in Rust (src/view.rs); this file draws and measures
+// nothing but the width of the text it is told to centre.
+import { Shell, PanelStatus } from "@app/shell.slint";
+import { CanvasBody, CanvasText } from "@flipctl/canvas.slint";
+import { MenuBody, ListItem } from "@flipctl/list.slint";
+import { DetailBody, DetailRow } from "@flipctl/detail.slint";
+import { Modal } from "@flipctl/modal.slint";
+
+export { CanvasText, ListItem, DetailRow, PanelStatus }
+
+export component AppWindow inherits Shell {
+    // 0 canvas, 1 menu, 2 detail.
+    in property <int> mode;
+
+    in property <image> picture;
+    in property <[CanvasText]> texts;
+    in property <bool> status_bar: true;
+
+    in property <[ListItem]> items;
+    in property <int> selected;
+    in property <int> scroll;
+    in property <int> total;
+    in property <string> breadcrumb;
+    in property <int> tick;
+
+    in property <[DetailRow]> rows;
+    in property <int> offset;
+
+    in property <[string]> buttons;
+    in property <int> pressed_slot: -1;
+
+    in property <[string]> modal_lines;
+    in property <string> modal_left;
+    in property <string> modal_right;
+
+    callback keyed(string, bool);
+    key(text, down) => {
+        root.keyed(text, down);
+    }
+
+    if root.mode == 0: CanvasBody {
+        bitmap: root.picture;
+        texts: root.texts;
+        status_bar: root.status_bar;
+        buttons: root.modal_lines.length > 0 ? [] : root.buttons;
+        pressed_slot: root.pressed_slot;
+    }
+
+    if root.mode == 1: MenuBody {
+        items: root.items;
+        selected: root.selected;
+        scroll: root.scroll;
+        total: root.total;
+        breadcrumb: root.breadcrumb;
+        tick: root.tick;
+        buttons: root.modal_lines.length > 0 ? [] : root.buttons;
+        pressed_slot: root.pressed_slot;
+    }
+
+    if root.mode == 2: DetailBody {
+        rows: root.rows;
+        breadcrumb: root.breadcrumb;
+        offset: root.offset;
+        buttons: root.modal_lines.length > 0 ? [] : root.buttons;
+        pressed_slot: root.pressed_slot;
+    }
+
+    if root.modal_lines.length > 0: Modal {
+        lines: root.modal_lines;
+        left_label: root.modal_left;
+        right_label: root.modal_right;
+        pressed_slot: root.pressed_slot;
+    }
+}

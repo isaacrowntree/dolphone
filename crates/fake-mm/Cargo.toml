@@ -1,0 +1,18 @@
+[package]
+name = "fake-mm"
+description = "A scriptable stand-in for ModemManager: one modem with voice, messaging and USSD"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "fake-mm"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zbus.workspace = true

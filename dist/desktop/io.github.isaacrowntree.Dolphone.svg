@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Dolphone: a handset with its ring, on the Flipper's orange. -->
+  <rect x="4" y="4" width="120" height="120" rx="28" fill="#ff8200"/>
+  <path d="M40 30c4-3 10-2 12 3l7 15c2 4 1 8-2 11l-6 5c4 9 11 16 20 20l5-6c3-3 7-4 11-2l15 7c5 2 6 8 3 12l-6 7c-5 6-14 7-22 4-25-9-43-27-52-52-3-8-2-17 4-22z" fill="#fff"/>
+  <path d="M78 22a32 32 0 0 1 28 28" stroke="#fff" stroke-width="8" stroke-linecap="round" fill="none"/>
+  <path d="M74 38a18 18 0 0 1 16 16" stroke="#fff" stroke-width="8" stroke-linecap="round" fill="none"/>
+</svg>

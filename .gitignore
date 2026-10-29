@@ -1,0 +1,4 @@
+/target
+apps/*/target
+.DS_Store
+docs/outreach/

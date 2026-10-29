@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Dolphone
+GenericName=Phone
+Comment=Calls and texts from your Flipper One
+Exec=dolphone-desktop %u
+Icon=io.github.isaacrowntree.Dolphone
+Terminal=false
+Categories=Network;Telephony;
+Keywords=phone;call;dial;sms;text;messages;
+# Clicking a phone number in a browser or a mail opens the dial pad with it, and an
+# sms: link opens a conversation with the text filled in. Nothing is sent or dialled
+# until you press Call or Send.
+MimeType=x-scheme-handler/tel;x-scheme-handler/sms;x-scheme-handler/callto;
+StartupNotify=true
+SingleMainWindow=true
