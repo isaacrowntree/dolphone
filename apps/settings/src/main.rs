@@ -156,10 +156,11 @@ impl App {
                     out.push(Event::Setting(key.into(), c.settings.get(key).await?));
                 }
                 out.push(Event::Routes(c.audio.routes().await?));
-                out.push(Event::Bluetooth {
-                    available: c.bluetooth.available().await?,
-                    powered: c.bluetooth.powered().await?,
-                });
+                // Powered is only asked of an adapter that is there: with BlueZ
+                // running and no adapter it is an error, which would lose the
+                // whole page.
+                let available = c.bluetooth.available().await?;
+                out.push(Event::Bluetooth { available, powered: available && c.bluetooth.powered().await? });
                 out.push(Event::Blocked(c.settings.blocked().await?));
                 out.push(Event::Status(c.modem.status().await?));
                 Ok(out)

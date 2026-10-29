@@ -240,8 +240,19 @@ pub struct Found {
 /// The first modem with Voice or Messaging, or None when ModemManager has none (or
 /// is not running).
 pub async fn find(system: &zbus::Connection) -> Option<Found> {
-    let om = zbus::fdo::ObjectManagerProxy::builder(system).destination(SERVICE).path(ROOT).build().await.ok()?;
-    let objects = om.get_managed_objects().await.ok()?;
+    lookup(system).await.ok().flatten()
+}
+
+/// The modem, or None when ModemManager has none or is not running; an error when
+/// the question itself failed (a timeout on a busy bus), which says nothing about
+/// the modem and must not be taken as it leaving: that would end its calls.
+pub async fn lookup(system: &zbus::Connection) -> zbus::Result<Option<Found>> {
+    let om = zbus::fdo::ObjectManagerProxy::builder(system).destination(SERVICE).path(ROOT).build().await?;
+    let objects = match om.get_managed_objects().await {
+        Ok(o) => o,
+        Err(zbus::fdo::Error::ServiceUnknown(_) | zbus::fdo::Error::NameHasNoOwner(_)) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
     let mut found: Vec<Found> = objects
         .into_iter()
         .filter(|(_, ifaces)| ifaces.keys().any(|k| k.as_str() == iface::MODEM))
@@ -260,7 +271,7 @@ pub async fn find(system: &zbus::Connection) -> Option<Found> {
     found.sort_by(|a, b| {
         (b.voice || b.messaging).cmp(&(a.voice || a.messaging)).then(a.path.as_str().cmp(b.path.as_str()))
     });
-    found.into_iter().next()
+    Ok(found.into_iter().next())
 }
 
 /// The emergency-alert channels a phone listens to (3GPP TS 23.041): national

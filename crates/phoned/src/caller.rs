@@ -49,6 +49,11 @@ impl Caller {
 /// Whether `exe` is one of our front ends, installed where only the package or an
 /// AppImage puts it.
 pub fn is_front_end(exe: &Path) -> bool {
+    front_end_with(exe, TRUST_APPIMAGES.load(Ordering::SeqCst))
+}
+
+/// The same, with the trust_appimages setting given rather than read.
+fn front_end_with(exe: &Path, trust_appimages: bool) -> bool {
     let Some(name) = exe.file_name().and_then(|n| n.to_str()) else { return false };
     if !FRONT_ENDS.contains(&name) {
         return false;
@@ -61,7 +66,7 @@ pub fn is_front_end(exe: &Path) -> bool {
     if s.starts_with("/usr/bin/") {
         return root_owned(exe);
     }
-    if !TRUST_APPIMAGES.load(Ordering::SeqCst) {
+    if !trust_appimages {
         return false;
     }
     // An AppImage runs from its squashfs, mounted at /tmp/.mount_<random>, or from a
@@ -167,11 +172,10 @@ mod tests {
 
     #[test]
     fn appimages_can_be_left_untrusted() {
-        super::set_trust_appimages(false);
+        // The setting is given, not set: the global it lives in is shared with
+        // the test above, which runs alongside.
         let mount = Path::new("/tmp/.mount_dolphoXYZ/usr/bin/dolphone-dialer");
-        let untrusted = !is_front_end(mount);
-        super::set_trust_appimages(true);
-        assert!(untrusted, "with AppImages off, only /usr/bin counts");
-        assert!(is_front_end(mount));
+        assert!(!super::front_end_with(mount, false), "with AppImages off, only /usr/bin counts");
+        assert!(super::front_end_with(mount, true));
     }
 }

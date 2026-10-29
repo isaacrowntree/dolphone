@@ -68,9 +68,18 @@ impl Bt {
     }
 
     async fn objects(&self) -> Option<Objects> {
+        // Only a BlueZ that is running. Calling org.bluez when it is not asks the
+        // bus to start it, and where it cannot start (no adapter, or a container)
+        // each call then waits out the bus's activation timeout, which would hold
+        // up every screen that shows Bluetooth.
+        let bus = zbus::fdo::DBusProxy::new(&self.system).await.ok()?;
+        if !bus.name_has_owner(SERVICE.try_into().ok()?).await.unwrap_or(false) {
+            return None;
+        }
         let om =
             zbus::fdo::ObjectManagerProxy::builder(&self.system).destination(SERVICE).path("/").build().await.ok()?;
-        let objs = om.get_managed_objects().await.ok()?;
+        let objs =
+            tokio::time::timeout(std::time::Duration::from_secs(3), om.get_managed_objects()).await.ok()?.ok()?;
         Some(
             objs.into_iter()
                 .map(|(p, ifaces)| {

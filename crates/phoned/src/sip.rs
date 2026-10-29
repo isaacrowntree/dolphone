@@ -142,8 +142,11 @@ pub fn test_audio() -> bool {
 
 /// baresip's config, for the account and the audio devices of the moment.
 pub fn config(listen: &str) -> String {
+    // The test's speaker is ALSA's null device, not aufile: baresip 1.1.0's
+    // aufile player starts its thread before marking it running, so a player
+    // freed at once (a short call, on a busy machine) is used after it is freed.
     let audio = if test_audio() {
-        "module ausine.so\nmodule aufile.so\naudio_player aufile,/dev/null\naudio_source ausine,440\naudio_alert aufile,/dev/null\n"
+        "module ausine.so\nmodule alsa.so\naudio_player alsa,null\naudio_source ausine,440\naudio_alert alsa,null\n"
     } else {
         "audio_player pulse,\naudio_source pulse,\naudio_alert pulse,\n"
     };
@@ -220,11 +223,21 @@ pub struct Sip {
     owner: Mutex<Option<String>>,
     pub status: Mutex<String>,
     child: Mutex<Option<tokio::process::Child>>,
+    /// One command at a time. baresip's commands act on its current call, so
+    /// "callfind <id>" and the command after it must not be split by another
+    /// task's pair, or a hangup meant for one call could end the other.
+    busy: tokio::sync::Mutex<()>,
 }
 
 impl Sip {
     pub fn new(session: zbus::Connection) -> Self {
-        Self { session, owner: Mutex::new(None), status: Mutex::new(String::new()), child: Mutex::new(None) }
+        Self {
+            session,
+            owner: Mutex::new(None),
+            status: Mutex::new(String::new()),
+            child: Mutex::new(None),
+            busy: tokio::sync::Mutex::new(()),
+        }
     }
 
     pub fn status(&self) -> String {
@@ -247,14 +260,30 @@ impl Sip {
     }
 
     pub async fn invoke(&self, cmd: &str) -> zbus::Result<String> {
-        self.proxy().await?.invoke(cmd).await
+        let _one = self.busy.lock().await;
+        self.send(cmd).await
+    }
+
+    async fn send(&self, cmd: &str) -> zbus::Result<String> {
+        self.proxy().await?.invoke(cmd).await.map_err(|e| {
+            // baresip went away before answering (it crashed, or was stopped);
+            // run() starts it again. zbus reports this as a method error or as
+            // the fdo error, so go by the D-Bus name either way.
+            let gone = ["org.freedesktop.DBus.Error.NoReply", "org.freedesktop.DBus.Error.ServiceUnknown"];
+            if gone.iter().any(|n| e.to_string().contains(n)) {
+                zbus::Error::Failure("SIP stopped during the command; it is starting again, so try once more".into())
+            } else {
+                e
+            }
+        })
     }
 
     /// Act on one call: baresip's commands work on the current call, so the call
-    /// is chosen first.
+    /// is chosen first, and nothing else is sent in between.
     pub async fn on_call(&self, id: &str, cmd: &str) -> zbus::Result<String> {
-        self.invoke(&format!("callfind {id}")).await?;
-        self.invoke(cmd).await
+        let _one = self.busy.lock().await;
+        self.send(&format!("callfind {id}")).await?;
+        self.send(cmd).await
     }
 
     /// Dial, and return baresip's id for the call.
@@ -294,6 +323,7 @@ pub async fn run(phone: Arc<Phone>, changed: Arc<tokio::sync::Notify>) {
             changed.notified().await;
             continue;
         }
+        let started = std::time::Instant::now();
         match start(&phone, &account).await {
             Ok(child_pid) => {
                 let settings_changed = tokio::select! {
@@ -308,8 +338,10 @@ pub async fn run(phone: Arc<Phone>, changed: Arc<tokio::sync::Notify>) {
                 };
                 phone.sip.stop();
                 phone.sip_lost().await;
-                if settings_changed {
-                    // Straight on with the new settings (or to off).
+                // Straight on with new settings (or to off), and after a crash of
+                // one that had been running fine; only one that keeps dying at
+                // once waits below.
+                if settings_changed || started.elapsed() > Duration::from_secs(30) {
                     continue;
                 }
             }

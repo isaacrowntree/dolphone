@@ -99,6 +99,7 @@ fake SIP far end (a second baresip, with ctrl_tcp on 127.0.0.1:4444; see e2e.sh)
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
+    let _ = STARTED.set(phone_core::now());
     let args: Vec<String> = std::env::args().skip(1).collect();
     let json = args.iter().any(|a| a == "--json");
     let words: Vec<&str> = args.iter().map(String::as_str).filter(|a| *a != "--json").collect();
@@ -715,6 +716,10 @@ async fn send_and_wait(conn: &zbus::Connection, to: &str, text: &str, secs: u64,
 
 /// Wait for a one-time code. Reading the code needs a read grant, as reading any
 /// text does.
+/// When phonectl started, for `otp --wait`: a code that arrives while it is still
+/// connecting is the one asked for.
+static STARTED: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+
 async fn otp(conn: &zbus::Connection, w: &[&str], region: &str, json: bool) -> Result<()> {
     let mut from = None;
     let mut secs = 60u64;
@@ -729,7 +734,28 @@ async fn otp(conn: &zbus::Connection, w: &[&str], region: &str, json: bool) -> R
     let messages = MessagesProxy::new(conn).await?;
     let mut added = messages.receive_message_added().await?;
     // Fail now, not after a minute, if this program may not read texts.
-    messages.threads().await?;
+    let threads = messages.threads().await?;
+    let print = |code: &str, peer: &str, id: i64| -> Result<()> {
+        if json {
+            out(&serde_json::json!({"code": code, "from": peer, "id": id}))
+        } else {
+            println!("{code}");
+            Ok(())
+        }
+    };
+    // A text that came while phonectl was still connecting, before the signal was
+    // being watched (with two seconds' grace for the network's clock).
+    let since = STARTED.get().copied().unwrap_or_else(phone_core::now) - 2;
+    for t in threads.iter().filter(|t| t.last_at >= since && t.last_direction == 0) {
+        if from.as_deref().is_some_and(|f| !phone_core::number::same_party(f, &t.peer)) {
+            continue;
+        }
+        for m in messages.conversation(&t.peer).await?.into_iter().filter(|m| m.at >= since && m.direction == 0) {
+            if let Some(code) = phone_core::text::one_time_code(&m.body) {
+                return print(&code, &m.peer, m.id);
+            }
+        }
+    }
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(secs);
     loop {
         let s =
@@ -740,18 +766,11 @@ async fn otp(conn: &zbus::Connection, w: &[&str], region: &str, json: bool) -> R
         }
         let body = messages.conversation(&m.peer).await?.into_iter().find(|x| x.id == m.id).map(|x| x.body);
         if let Some(code) = body.as_deref().and_then(phone_core::text::one_time_code) {
-            if json {
-                out(&serde_json::json!({"code": code, "from": m.peer, "id": m.id}))?;
-            } else {
-                println!("{code}");
-            }
-            return Ok(());
+            return print(&code, &m.peer, m.id);
         }
     }
 }
 
-/// One command to the far end's baresip, over its ctrl_tcp netstring protocol.
-/// Events stream on the same socket; the reply is the object marked a response.
 /// The far end of MMS, against fake-mmsd on the session bus.
 async fn fake_mms(w: &[&str]) -> Result<()> {
     let conn = zbus::Connection::session().await.context("session bus")?;
@@ -781,6 +800,8 @@ async fn fake_mms(w: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// One command to the far end's baresip, over its ctrl_tcp netstring protocol.
+/// Events stream on the same socket; the reply is the object marked a response.
 fn fake_sip(command: &str, params: &str) -> Result<String> {
     use std::io::{Read, Write};
     let addr = std::env::var("DOLPHONE_FAKE_SIP").unwrap_or_else(|_| "127.0.0.1:4444".into());

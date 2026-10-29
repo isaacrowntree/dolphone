@@ -19,6 +19,33 @@ fail() { printf '  FAIL  %s\n        got: %s\n' "$1" "$2"; fails=$((fails + 1));
 expect() { # name, haystack, needle
     if grep -qF -- "$3" <<<"$2"; then pass "$1"; else fail "$1" "$2"; fi
 }
+# Run a command until its output has the needle, for up to 10 s, and print its
+# last output: a check waits for the state it expects instead of guessing how long
+# phoned takes, which on a busy machine is longer.
+until_has() {
+    local needle=$1 o=
+    shift
+    for _ in $(seq 1 100); do
+        o=$("$@" 2>&1) || true
+        grep -qF -- "$needle" <<<"$o" && break
+        sleep 0.1
+    done
+    printf '%s\n' "$o"
+}
+# A SIP command as a person would give it: baresip 1.1.0's ctrl_dbus can crash
+# mid-command (phoned says so, and starts it again), and then you try once more.
+sip_try() {
+    local o
+    if o=$("$P" "$@" 2>&1); then printf '%s\n' "$o"; return 0; fi
+    if grep -q "try once more" <<<"$o"; then
+        echo "  (baresip stopped during: $*; once more)" >&2
+        sleep 2
+        "$P" "$@"
+    else
+        printf '%s\n' "$o" >&2
+        return 1
+    fi
+}
 refute() {
     if grep -qF -- "$3" <<<"$2"; then fail "$1" "$2"; else pass "$1"; fi
 }
@@ -53,13 +80,13 @@ sip_listen 127.0.0.1:5073
 module opus.so
 module g711.so
 module ausine.so
-module aufile.so
+module alsa.so
 module_app account.so
 module_app contact.so
 module_app menu.so
 module_app ctrl_tcp.so
 ctrl_tcp_listen 127.0.0.1:4444
-audio_player aufile,/dev/null
+audio_player alsa,null
 audio_source ausine,440
 CONF
         # Plain RTP: baresip 1.1.0 crashes on a hold re-INVITE with SRTP restarting.
@@ -86,12 +113,17 @@ fi
 start_phoned() {
     "$BIN/phoned" >>/tmp/dolphone-e2e-phoned.log 2>&1 &
     PHONED=$!
-    for _ in $(seq 1 30); do
-        "$P" status >/dev/null 2>&1 && return
+    for _ in $(seq 1 100); do
+        "$P" status >/dev/null 2>&1 && break
         sleep 0.1
     done
-    echo "phoned did not come up" >&2
-    exit 1
+    "$P" status >/dev/null 2>&1 || { echo "phoned did not come up" >&2; exit 1; }
+    # And until it has found the modem: a fixed pause was too short on a busy CI
+    # runner, and the first ring went unseen.
+    for _ in $(seq 1 100); do
+        "$P" status 2>/dev/null | grep -q "no modem" || break
+        sleep 0.1
+    done
 }
 # phoned's own baresip, for the SIP checks: on loopback, with a tone for a
 # microphone (debug builds only), since the test has no sound server.
@@ -116,12 +148,10 @@ echo "incoming call, answered"
 WATCH=$!
 sleep 0.3
 "$P" fake ring +61491570156 >/dev/null
-sleep 0.4
-out=$("$P" calls)
+out=$(until_has "Incoming call" "$P" calls)
 expect "the call rings" "$out" "Incoming call"
 "$P" answer
-sleep 0.3
-out=$("$P" calls)
+out=$(until_has "Connected" "$P" calls)
 expect "answering connects it" "$out" "Connected"
 id=$(awk '{print $1; exit}' <<<"$out")
 "$P" dtmf "$id" 42 && pass "DTMF on the live call" || fail "DTMF" "error"
@@ -141,16 +171,14 @@ echo "incoming call, missed and declined"
 "$P" fake ring 0491570157 >/dev/null
 sleep 0.3
 "$P" fake hangup
-sleep 0.4
-out=$("$P" recents 1)
+out=$(until_has "missed" "$P" recents 1)
 expect "the caller giving up is a missed call" "$out" "missed"
 out=$("$P" status)
 expect "missed count" "$out" "missed 1"
 "$P" fake ring 0491570157 >/dev/null
 sleep 0.3
 "$P" hangup
-sleep 0.4
-out=$("$P" recents 1)
+out=$(until_has "declined" "$P" recents 1)
 expect "hanging up a ringing call declines it" "$out" "declined"
 
 echo "call waiting"
@@ -159,12 +187,10 @@ sleep 0.3
 "$P" answer
 sleep 0.2
 "$P" fake ring 0491570162 >/dev/null
-sleep 0.4
-out=$("$P" calls)
+out=$(until_has "Call waiting" "$P" calls)
 expect "a second call while one is active waits" "$out" "Call waiting"
 "$P" answer "$(awk '/Call waiting/ {print $1}' <<<"$out")"
-sleep 0.4
-out=$("$P" calls)
+out=$(until_has "On hold" "$P" calls)
 expect "answering it holds the first" "$out" "On hold"
 "$P" merge
 sleep 0.4
@@ -180,8 +206,7 @@ out=$("$P" calls)
 
 echo "call waiting off, and silencing unknown callers"
 "$P" set call_waiting false
-sleep 0.3
-out=$("$P" fake dump)
+out=$(until_has "call_waiting=false" "$P" fake dump)
 expect "turning call waiting off reaches the modem" "$out" "call_waiting=false"
 "$P" fake ring 0491570161 >/dev/null
 sleep 0.3
@@ -200,8 +225,7 @@ sleep 0.4
 out=$(grep "incoming call" /tmp/dolphone-e2e-phoned.log | tail -1)
 expect "an unknown caller rings silently" "$out" "silence=true"
 "$P" fake hangup
-sleep 0.4
-out=$("$P" recents 1)
+out=$(until_has "silenced" "$P" recents 1)
 expect "and is logged as silenced, to call back" "$out" "silenced"
 "$P" set silence_unknown false
 
@@ -230,8 +254,7 @@ expect "as JSON" "$out" '"channel":4370'
 
 echo "SIM PIN"
 "$P" fake lock on
-sleep 0.8
-out=$("$P" status)
+out=$(until_has "SIM locked" "$P" status)
 expect "a locked SIM is reported" "$out" "SIM locked"
 out=$("$P" unlock 1111 2>&1 || true)
 expect "a wrong PIN says how many tries are left" "$out" "2 tries left"
@@ -244,8 +267,7 @@ expect "registered" "$out" "registered"
 
 echo "texts"
 "$P" fake sms +61491570158 "Hey, running 10 min late" >/dev/null
-sleep 0.5
-out=$("$P" threads)
+out=$(until_has "Hey, running 10 min late" "$P" threads)
 expect "an incoming text starts a thread" "$out" "Hey, running 10 min late"
 expect "and is unread" "$out" "(1)"
 out=$("$P" read 0491570158)
@@ -253,12 +275,10 @@ expect "the conversation has it" "$out" "< Hey, running 10 min late"
 out=$("$P" status)
 expect "reading clears unread" "$out" "unread 0"
 "$P" fake sms Telstra "Your bill is ready" >/dev/null
-sleep 0.5
-out=$("$P" threads)
+out=$(until_has "Telstra" "$P" threads)
 expect "an alphanumeric sender keeps its name" "$out" "Telstra"
 "$P" fake sms +61491570158 $'evil‮txt.exe' >/dev/null
-sleep 0.5
-out=$("$P" thread +61491570158)
+out=$(until_has "eviltxt.exe" "$P" thread +61491570158)
 expect "bidi overrides are stripped" "$out" "eviltxt.exe"
 out=$("$P" fake dump)
 refute "received texts are deleted from the modem once stored" "$out" "sms "
@@ -281,29 +301,24 @@ wait "$PHONED" 2>/dev/null || true
 
 echo "as Dolphone's own app (trusted)"
 DOLPHONE_TRUST_ALL=1 start_phoned
-sleep 0.6
-out=$("$P" dial 0491570163)
+out=$(until_has "call " "$P" dial 0491570163)
 expect "our dialer's call goes straight out" "$out" "call "
-sleep 0.9
-out=$("$P" calls)
+out=$(until_has "Ringing" "$P" calls)
 expect "it rings out" "$out" "Ringing"
-sleep 2.3
-out=$("$P" calls)
+out=$(until_has "Connected" "$P" calls)
 expect "the far end answers" "$out" "Connected"
 "$P" hangup
-sleep 0.4
-out=$("$P" recents 1)
+out=$(until_has "out " "$P" recents 1)
 expect "logged as outgoing" "$out" "out "
 out=$("$P" send 0491570158 "No worries, see you soon")
 expect "our app's text goes straight out" "$out" "text "
 sleep 0.6
-out=$("$P" thread 0491570158)
+out=$(until_has "> No worries, see you soon" "$P" thread 0491570158)
 expect "and is sent" "$out" "> No worries, see you soon"
 refute "not stuck sending" "$out" "(sending)"
 "$P" fake sendfails on
 failed=$("$P" send 0491570158 "this one fails" | awk '{print $2}')
-sleep 0.6
-out=$("$P" thread 0491570158)
+out=$(until_has "this one fails (failed)" "$P" thread 0491570158)
 expect "a network failure is shown" "$out" "this one fails (failed)"
 "$P" fake sendfails off
 "$P" retry "$failed"
@@ -314,8 +329,7 @@ out=$("$P" send --wait 10 0491570158 "On my way")
 expect "send --wait waits for the modem" "$out" "sent "
 "$P" set delivery_reports true
 "$P" send 0491570158 "Delivered?" >/dev/null
-sleep 1.5
-out=$("$P" thread 0491570158)
+out=$(until_has "Delivered? (delivered)" "$P" thread 0491570158)
 expect "a delivery report marks it delivered" "$out" "Delivered? (delivered)"
 out=$("$P" fake dump)
 refute "and the modem's copy is then deleted" "$out" "sms "
@@ -348,8 +362,7 @@ chmod +x "$XDG_CONFIG_HOME/status.sh"
 printf '[{"from": "0491570166", "contains": "status", "secret": "4821", "run": ["%s"], "reply": true}]' \
     "$XDG_CONFIG_HOME/status.sh" >"$XDG_CONFIG_HOME/dolphone/rules.json"
 "$P" fake sms +61491570166 "STATUS 4821" >/dev/null
-sleep 1
-out=$("$P" thread 0491570166)
+out=$(until_has "> uplink ok" "$P" thread 0491570166)
 expect "a matching text runs the rule, which replies" "$out" "> uplink ok"
 "$P" fake sms +61491570166 "STATUS" >/dev/null
 sleep 1
@@ -362,12 +375,10 @@ echo "uplink watch"
 "$P" set uplink_interface eth0
 "$P" set uplink_grace_s 2
 "$P" fake uplink off
-sleep 6
-out=$("$P" thread 0491570194)
+out=$(until_has "eth0 is down" "$P" thread 0491570194)
 expect "an outage longer than the grace is texted" "$out" "eth0 is down"
 "$P" fake uplink on
-sleep 4
-out=$("$P" thread 0491570194)
+out=$(until_has "eth0 is back up" "$P" thread 0491570194)
 expect "and so is the link coming back" "$out" "eth0 is back up"
 "$P" set uplink_alert_to ""
 
@@ -437,8 +448,7 @@ if [ -n "${DOLPHONE_E2E_SIP:-}" ]; then
     # Calls go out through the far end, as through a provider's proxy.
     "$P" set sip_proxy sip:127.0.0.1:5073
     "$P" set sip_enabled true
-    sleep 2.5
-    out=$("$P" status)
+    out=$(until_has "SIP registered" "$P" status)
     expect "phoned starts baresip with the account" "$out" "SIP registered"
     out=$("$P" get sip_password)
     [ "$out" = "set" ] && pass "the password is never read back" || fail "password hidden" "$out"
@@ -447,13 +457,11 @@ if [ -n "${DOLPHONE_E2E_SIP:-}" ]; then
     out=$("$P" set sip_account 'sip:x@example.com>;outbound=evil' 2>&1 || true)
     expect "an account cannot smuggle in options" "$out" "a SIP account looks like"
     "$P" fake sip ring sip:me@127.0.0.1:5072 >/dev/null
-    sleep 1
-    out=$("$P" calls)
+    out=$(until_has "Incoming call" "$P" calls)
     expect "a SIP call rings like any other" "$out" "Incoming call"
     expect "showing the caller's address" "$out" "sip:far@127.0.0.1:5073"
     "$P" answer
-    sleep 1
-    out=$("$P" calls)
+    out=$(until_has "Connected" "$P" calls)
     expect "answering connects it" "$out" "Connected"
     "$P" dtmf "$(awk '{print $1; exit}' <<<"$out")" 5 && pass "keypad tones over SIP" || fail "SIP DTMF" "error"
     "$P" fake sip hangup
@@ -464,14 +472,12 @@ if [ -n "${DOLPHONE_E2E_SIP:-}" ]; then
     expect "and it is in the log" "$out" "in "
     "$P" set sip_use always
     "$P" fake sip autoanswer on
-    out=$("$P" dial 0491570190)
+    out=$(sip_try dial 0491570190)
     expect "with SIP set to always, a call goes over SIP" "$out" "call "
-    sleep 2
-    out=$("$P" calls)
+    out=$(until_has "Connected" "$P" calls)
     expect "and connects" "$out" "Connected"
     "$P" hangup
-    sleep 1
-    out=$("$P" recents 1)
+    out=$(until_has "out " "$P" recents 1)
     expect "logged as outgoing" "$out" "out "
     "$P" dial 000 >/dev/null
     sleep 0.5
@@ -479,7 +485,7 @@ if [ -n "${DOLPHONE_E2E_SIP:-}" ]; then
     "$P" hangup >/dev/null 2>&1 || true
     sleep 0.5
     "$P" fake sip autoanswer off
-    "$P" dial 0491570191 >/dev/null
+    sip_try dial 0491570191 >/dev/null
     sleep 1
     "$P" fake sip hangup
     sleep 1
@@ -497,8 +503,7 @@ if [ -n "${DOLPHONE_E2E_SIP:-}" ]; then
     "$P" answer
     sleep 1
     "$P" fake ring 0491570192 >/dev/null
-    sleep 0.6
-    out=$("$P" calls)
+    out=$(until_has "Call waiting" "$P" calls)
     expect "a mobile call during a SIP call waits" "$out" "Call waiting"
     "$P" answer "$(awk '/Call waiting/ {print $1}' <<<"$out")"
     sleep 1
@@ -568,8 +573,7 @@ expect "premium numbers are held even for our app" "$out" "waiting for confirmat
 req=$(awk '{print $NF}' <<<"$out" | tr -d ')')
 out=$("$P" confirm "$req")
 expect "and go out once confirmed" "$out" "request "
-sleep 0.2
-out=$("$P" calls)
+out=$(until_has "1900 123 456" "$P" calls)
 expect "the confirmed call is placed" "$out" "1900 123 456"
 sleep 0.3
 "$P" hangup || true
@@ -578,8 +582,7 @@ expect "USSD from our dialer" "$out" "Your balance is"
 
 echo "MMS: pictures and group texts"
 "$P" fake sms 0491570164 "" >/dev/null
-sleep 0.4
-out=$("$P" threads)
+out=$(until_has "install mmsd-tng" "$P" threads)
 expect "without mmsd-tng, an MMS notice says what is missing" "$out" "install mmsd-tng"
 out=$("$P" mms 0491570162 Hello 2>&1 || true)
 expect "and sending one says what it needs" "$out" "needs mmsd-tng"
@@ -588,8 +591,7 @@ MMSD=$!
 sleep 0.6
 printf '\xff\xd8\xff\xe0 a small jpeg' >"$DOLPHONE_MMS_DIR/cat.jpg"
 "$P" fake mms +61491570162 --file "$DOLPHONE_MMS_DIR/cat.jpg" "Look at this" >/dev/null
-sleep 0.6
-out=$("$P" threads)
+out=$(until_has "Look at this" "$P" threads)
 expect "a picture message arrives as a text" "$out" "Look at this"
 out=$("$P" read 0491570162)
 expect "with its picture" "$out" "< Look at this [Picture: "
@@ -598,24 +600,20 @@ cmp -s "$pic" "$DOLPHONE_MMS_DIR/cat.jpg" && pass "the picture is kept whole, be
 out=$("$P" fake mms dump)
 expect "and mmsd-tng's copy is deleted once stored" "$out" "held 0"
 "$P" fake mms +61491570163 --to +61491570162 "Dinner at 7?" >/dev/null
-sleep 0.6
-out=$("$P" threads)
+out=$(until_has "0491 570 162, 0491 570 163" "$P" threads)
 expect "a group text is one thread with everyone on it" "$out" "0491 570 162, 0491 570 163"
 "$P" send 0491570163,0491570162 "Yes!" >/dev/null
-sleep 0.8
-out=$("$P" fake mms dump)
+out=$(until_has 'sent to=+61491570162,+61491570163 text="Yes!"' "$P" fake mms dump)
 expect "a reply to the group goes to everyone, as MMS" "$out" 'sent to=+61491570162,+61491570163 text="Yes!"'
 out=$("$P" thread 0491570162,0491570163)
 expect "and is in the group's thread, sent" "$out" "> Yes!"
 refute "not still sending" "$out" "(sending)"
 "$P" mms 0491570162 --file "$DOLPHONE_MMS_DIR/cat.jpg" "Mine" >/dev/null
-sleep 0.8
-out=$("$P" fake mms dump)
+out=$(until_has 'text="Mine" image/jpeg=17b' "$P" fake mms dump)
 expect "a picture goes out as a part of its own" "$out" 'text="Mine" image/jpeg=17b'
 "$P" fake mms fails on
 "$P" mms 0491570162 "Will fail" >/dev/null
-sleep 0.8
-out=$("$P" thread 0491570162)
+out=$(until_has "> Will fail (failed)" "$P" thread 0491570162)
 expect "a failed MMS shows as failed" "$out" "> Will fail (failed)"
 "$P" fake mms fails off
 "$P" fake sms 0491570165 "" >/dev/null
@@ -642,8 +640,7 @@ out=$("$P" modem setup)
 expect "the setup names the modem" "$out" "Quectel fake-mm RM520N-GL"
 expect "and finds VoLTE off" "$out" "volte             change"
 "$P" device use flipper-one
-sleep 0.3
-out=$("$P" modem setup)
+out=$(until_has "usb audio         change" "$P" modem setup)
 expect "on the Flipper One it checks USB audio" "$out" "usb audio         change"
 out=$("$P" fake dump)
 expect "the profile's start-up command reached the modem" "$out" "qpcmv=1,2"
@@ -661,8 +658,7 @@ expect "without ModemManager's debug mode, it says so" "$out" "only in debug mod
 "$P" device use auto
 
 "$P" fake signal 30 5G
-sleep 1
-out=$("$P" status)
+out=$(until_has "5G 30%" "$P" status)
 expect "signal changes reach the status, without waiting for a poll" "$out" "5G 30%"
 out=$("$P" wipe)
 expect "wiping asks first" "$out" "waiting for confirmation"
@@ -735,8 +731,7 @@ expect "or the call log" "$out" "may not read messages"
 out=$("$P" block 0491570170 2>&1 || true)
 expect "a script cannot change the block list" "$out" "only Dolphone's own apps"
 "$P" fake ring 0491570171 >/dev/null
-sleep 0.4
-out=$("$P" answer 2>&1 || true)
+out=$(until_has "only Dolphone's own apps can answer" "$P" answer)
 expect "a script cannot answer (no room-bugging)" "$out" "only Dolphone's own apps can answer"
 "$P" hangup && pass "but anyone may hang up" || fail "anyone may hang up" "error"
 sleep 0.3
@@ -791,7 +786,7 @@ wait "$PHONED" 2>/dev/null || true
 echo "the audit log, from Dolphone's own Settings"
 DOLPHONE_TRUST_ALL=1 start_phoned
 sleep 0.4
-out=$("$P" audit)
+out=$(until_has "sent under a grant" "$P" audit)
 expect "sends under a grant are logged" "$out" "sent under a grant"
 expect "so are refusals" "$out" "over its grant's limit"
 expect "and denials" "$out" "denied"
@@ -805,8 +800,7 @@ DB="$XDG_DATA_HOME/dolphone/dolphone.db"
 if echo probe | systemd-creds --user encrypt --name=probe - - >/dev/null 2>&1; then
     DOLPHONE_TRUST_ALL=1 start_phoned
     "$P" fake sms 0491570190 "Meet at the usual place" >/dev/null
-    sleep 0.5
-    out=$("$BIN/phoned" --encrypt-store 2>&1 || true)
+    out=$(until_has "stop phoned first" "$BIN/phoned" --encrypt-store)
     expect "it is not rewritten while phoned has it open" "$out" "stop phoned first"
     kill "$PHONED"
     wait "$PHONED" 2>/dev/null || true
@@ -825,8 +819,7 @@ if echo probe | systemd-creds --user encrypt --name=probe - - >/dev/null 2>&1; t
     out=$("$P" threads)
     refute "without its key the store stays locked" "$out" "usual place"
     "$P" fake sms 0491570191 "While locked" >/dev/null
-    sleep 0.5
-    out=$("$P" fake dump)
+    out=$(until_has "sms " "$P" fake dump)
     expect "and a text that arrives stays on the SIM" "$out" "sms "
     kill "$PHONED"
     wait "$PHONED" 2>/dev/null || true
@@ -883,9 +876,9 @@ print(written, heard, flush=True)
     out=$("$P" fake dump)
     expect "after AT+CPCMREG=1, once the call connected" "$out" "cpcmreg=1"
     "$P" hangup
-    sleep 0.8
-    out=$("$P" fake dump)
+    out=$(until_has "cpcmreg=0" "$P" fake dump)
     expect "and AT+CPCMREG=0 when it ends" "$out" "cpcmreg=0"
+    for _ in $(seq 1 50); do pgrep -x pw-cat >/dev/null || break; sleep 0.1; done
     out=$(pgrep -a pw-cat || true)
     [ -z "$out" ] && pass "the bridge stops with the call" || fail "the bridge stops with the call" "$out"
     wait "$PTY" 2>/dev/null || true

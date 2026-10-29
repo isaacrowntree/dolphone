@@ -2,3 +2,7 @@
 apps/*/target
 .DS_Store
 docs/outreach/
+
+# Core dumps (baresip 1.1.0 crashes now and then; see crates/phoned/src/sip.rs)
+/core
+core.[0-9]*

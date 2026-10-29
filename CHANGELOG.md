@@ -92,6 +92,16 @@ Fixed after ten reviews, before release:
 - Modem: a locked SIM or disabled modem is reported (and a disabled modem enabled);
   watchers restart when a subscription fails; SIGTERM is handled; an unreadable store
   is moved aside instead of stopping phoned; the store uses WAL with full sync.
+- Reliability, found by running the suites with every core busy: a ModemManager
+  lookup that times out is no longer taken as the modem leaving (which ended its
+  calls); commands to baresip go one at a time, so "callfind" and the command after
+  it cannot be split by another call's; a BlueZ that is installed but not running
+  is not woken on every Bluetooth question (each waited out the bus's activation
+  timeout, stalling Phone Settings); `otp --wait` sees a code that arrives while it
+  is still connecting; baresip is restarted at once after a crash; the tests wait
+  for states instead of sleeping, and their SIP audio uses ALSA's null device
+  rather than baresip 1.1.0's aufile player, whose thread can outlive the player
+  it plays for.
 - Panel: names the panel cannot draw show as the number.
 - Desktop: screen-reader roles and labels on every custom control; contrast raised to
   WCAG AA for secondary text and your own bubbles.

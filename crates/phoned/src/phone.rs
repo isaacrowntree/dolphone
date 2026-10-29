@@ -1215,7 +1215,14 @@ impl Phone {
     // Modem
 
     pub async fn refresh_status(self: &Arc<Self>) {
-        let found = mm::find(&self.system).await;
+        let found = match mm::lookup(&self.system).await {
+            Ok(f) => f,
+            Err(e) => {
+                // Not an answer about the modem: keep what is known, and look again.
+                tracing::debug!("could not ask ModemManager for its modem: {e}");
+                return;
+            }
+        };
         let mut status = match &found {
             None => no_modem(),
             Some(f) => read_status(&self.system, f).await,
