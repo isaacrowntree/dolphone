@@ -11,6 +11,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use zbus::proxy;
 
 use crate::caller::Caller;
@@ -72,6 +73,11 @@ impl Watch {
             (false, Some(_)) => None,
         }
     }
+
+    /// Seconds until a down link's grace runs out, while it is down and unreported.
+    pub fn grace_left(&self, now: i64, grace: i64) -> Option<i64> {
+        self.down_since.filter(|_| !self.reported).map(|since| since + grace - now)
+    }
 }
 
 /// Is the link up? None when NetworkManager cannot say (not running, no such
@@ -108,12 +114,48 @@ fn text_for(change: Change, what: &str, now: i64) -> String {
     }
 }
 
-/// Watch for phoned's lifetime. Looks every ten seconds; does nothing while no
-/// number is set.
+/// NetworkManager's property changes, on any of its objects: connectivity, and
+/// every device's state. None when they cannot be followed.
+async fn nm_changes(system: &zbus::Connection) -> Option<zbus::MessageStream> {
+    let rule = zbus::MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .sender("org.freedesktop.NetworkManager")
+        .interface("org.freedesktop.DBus.Properties")
+        .member("PropertiesChanged")
+        .build()
+        .ok()?;
+    zbus::MessageStream::for_match_rule(rule, system, std::num::NonZeroUsize::new(64)).await.ok()
+}
+
+/// Watch for phoned's lifetime: looks again whenever NetworkManager says something
+/// changed, when a reported-to-be outage's grace runs out, and once a minute
+/// besides (for the settings, and NetworkManager starting late). Does nothing while
+/// no number is set.
 pub async fn run(phone: Arc<Phone>) {
     let mut watch = Watch::default();
+    let mut changes = nm_changes(&phone.system).await;
+    if changes.is_none() {
+        tracing::info!("not following NetworkManager's signals; looking every ten seconds");
+    }
+    let mut next = Duration::ZERO;
     loop {
-        tokio::time::sleep(Duration::from_secs(if cfg!(debug_assertions) { 2 } else { 10 })).await;
+        match changes.as_mut() {
+            Some(c) => {
+                if let Ok(Some(_)) = tokio::time::timeout(next, c.next()).await {
+                    // A burst (a link going down changes several properties) is
+                    // one look.
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    while let Ok(Some(_)) = tokio::time::timeout(Duration::ZERO, c.next()).await {}
+                }
+            }
+            None => tokio::time::sleep(next).await,
+        }
+        let fallback = Duration::from_secs(match (changes.is_some(), cfg!(debug_assertions)) {
+            (_, true) => 2,
+            (true, false) => 60,
+            (false, false) => 10,
+        });
+        next = fallback;
         let to = phone.setting(phone_api::keys::UPLINK_ALERT_TO);
         if to.trim().is_empty() {
             watch = Watch::default();
@@ -123,7 +165,11 @@ pub async fn run(phone: Arc<Phone>) {
         let grace = phone.setting(phone_api::keys::UPLINK_GRACE_S).parse::<i64>().unwrap_or(60).clamp(0, 3600);
         let Some(up) = link_up(&phone.system, iface.trim()).await else { continue };
         let now = phone_core::now();
-        if let Some(change) = watch.step(up, now, grace) {
+        let change = watch.step(up, now, grace);
+        if let Some(left) = watch.grace_left(now, grace) {
+            next = next.min(Duration::from_secs(left.max(1) as u64));
+        }
+        if let Some(change) = change {
             let what = if iface.trim().is_empty() { "the network".to_string() } else { iface.trim().to_string() };
             let body = text_for(change, &what, now);
             tracing::warn!(?change, "uplink");
@@ -150,6 +196,9 @@ mod tests {
         assert_eq!(w.step(false, 400, 60), None, "said once");
         assert_eq!(w.step(true, 500, 60), Some(Change::Up { since: 200 }));
         assert_eq!(w.step(true, 510, 60), None);
+        assert_eq!(w.grace_left(510, 60), None);
+        w.step(false, 600, 60);
+        assert_eq!(w.grace_left(615, 60), Some(45), "the next look is when the grace runs out");
     }
 
     #[test]

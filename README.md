@@ -160,8 +160,11 @@ phonectl contacts import ~/Downloads/contacts.vcf
 phonectl device                                     # which device profile, and why
 ```
 
-`phonectl help` lists the rest. Everything it does is on the D-Bus API, which
-`busctl` and `gdbus` reach as well.
+`phonectl help` lists the rest. For scripts, it exits 0 when done (or waiting
+for the device), 1 when tried and failed, 2 when not allowed, 3 for a bad
+argument or something this phone does not do, 4 over a rate limit, and 5 when
+phoned is not running. Everything it does is on the D-Bus API, which `busctl`
+and `gdbus` reach as well.
 
 ## What is not done
 

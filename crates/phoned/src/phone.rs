@@ -934,9 +934,9 @@ impl Phone {
             return Err(zbus::fdo::Error::InvalidArgs("a text needs a number and a body".into()));
         }
         let class = number::classify(&peer, &region);
-        if class == Class::Emergency {
+        if class == Class::Emergency && !(caller.trusted && texts_reach_emergency(&region)) {
             return Err(zbus::fdo::Error::NotSupported(
-                "texting emergency numbers is not supported; call instead".into(),
+                "texting emergency numbers is not supported here; call instead".into(),
             ));
         }
         if !confirmed {
@@ -1947,7 +1947,11 @@ impl Phone {
 
     /// Keep a message's parts: in the store when it is encrypted (shown from the
     /// runtime directory), else as files beside it.
-    fn keep_parts<'a>(&self, id: i64, parts: impl Iterator<Item = (&'a str, &'a [u8])>) -> Vec<phone_core::model::Part> {
+    fn keep_parts<'a>(
+        &self,
+        id: i64,
+        parts: impl Iterator<Item = (&'a str, &'a [u8])>,
+    ) -> Vec<phone_core::model::Part> {
         if !self.parts_in_store.load(std::sync::atomic::Ordering::Relaxed) {
             return save_parts(id, parts);
         }
@@ -2240,6 +2244,7 @@ impl Phone {
                 return Err(zbus::fdo::Error::InvalidArgs("a PIN is 4 to 12 digits".into()));
             };
             self.store_read(|s| s.set_setting(key, &stored))?;
+            self.kdeconnect.changed.notify_one();
             // Just set: open, since the owner is the one setting it.
             if stored.is_empty() {
                 self.pin_lock.close();
@@ -2303,6 +2308,8 @@ impl Phone {
             return Err(zbus::fdo::Error::InvalidArgs("fallback or always".into()));
         }
         self.store_read(|s| s.set_setting(key, value))?;
+        // KDE Connect follows its switch and the privacy settings.
+        self.kdeconnect.changed.notify_one();
         if key == keys::DEVICE_PROFILE.0 {
             self.choose_device(value);
         }
@@ -2707,6 +2714,15 @@ async fn read_status(system: &zbus::Connection, f: &mm::Found) -> ModemStatus {
     s
 }
 
+/// Whether a text to the emergency number can reach help in this region: in the
+/// US the national carriers deliver texts to 911 where the local call centre takes
+/// them (the FCC's text-to-911 rules, 47 CFR 9.10(q)), and send back a message
+/// saying to call where it does not. Elsewhere a text to an emergency number goes
+/// nowhere useful, so it is refused rather than left to fail silently.
+pub fn texts_reach_emergency(region: &str) -> bool {
+    region == "US"
+}
+
 /// Where an MMS's parts are kept: beside the store, private like it.
 pub fn parts_dir() -> std::path::PathBuf {
     phone_core::store::data_dir().join("mms")
@@ -2853,6 +2869,13 @@ mod tests {
 
     fn caller(trusted: bool) -> Caller {
         Caller { name: if trusted { "dolphone-dialer" } else { "python3" }.into(), trusted, reader: false }
+    }
+
+    #[test]
+    fn texts_to_emergency_only_where_they_reach_help() {
+        assert!(texts_reach_emergency("US"));
+        assert!(!texts_reach_emergency("AU"));
+        assert!(!texts_reach_emergency("GB"));
     }
 
     #[test]

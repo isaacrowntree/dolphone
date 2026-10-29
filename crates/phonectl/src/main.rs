@@ -81,6 +81,10 @@ covers every script that uses phonectl)
 
 anything that waits for the device prints 'waiting for confirmation (request N)'
 and exits 0; phonectl wait N then exits 0 once allowed and done, 1 if not
+
+exit codes: 0 done (or waiting for the device), 1 tried and failed, 2 not allowed,
+3 a bad argument or not something this phone does, 4 over a rate limit, 5 phoned
+is not running
   wait <request> [seconds]   (default 130: requests expire after two minutes)
 
 commands marked (apps) are refused from here: only Dolphone's own apps may
@@ -121,16 +125,49 @@ async fn main() -> Result<()> {
     if words[0] == "fake" {
         return fake(&words[1..]).await;
     }
+    let _ = JSON.set(json);
     let conn = zbus::Connection::session().await.context("session bus")?;
-    run(&conn, &words, json).await.map_err(|e| {
-        if let Some(zbus::Error::MethodError(name, msg, _)) = e.downcast_ref::<zbus::Error>() {
-            if name.as_str() == "org.freedesktop.DBus.Error.ServiceUnknown" {
-                return anyhow::anyhow!("phoned is not running");
-            }
-            return anyhow::anyhow!("{}", msg.clone().unwrap_or_else(|| name.to_string()));
+    if let Err(e) = run(&conn, &words, json).await {
+        let (code, msg) = failure(&e);
+        eprintln!("Error: {msg}");
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
+/// Whether --json was given, for the helpers that print a result.
+static JSON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// An error's exit code and words. 2: not allowed (only Dolphone's apps, or no
+/// read grant); 3: a bad argument, or not something this phone does; 4: over a
+/// rate limit; 5: phoned is not running; 1: anything else (it was tried and failed).
+fn failure(e: &anyhow::Error) -> (i32, String) {
+    let named = |name: &str, msg: String| {
+        let code = match name {
+            "org.freedesktop.DBus.Error.AccessDenied" => 2,
+            "org.freedesktop.DBus.Error.InvalidArgs" | "org.freedesktop.DBus.Error.NotSupported" => 3,
+            "org.freedesktop.DBus.Error.LimitsExceeded" => 4,
+            "org.freedesktop.DBus.Error.ServiceUnknown" | "org.freedesktop.DBus.Error.NameHasNoOwner" => 5,
+            n if n.starts_with("org.freedesktop.DBus.Error.Spawn.") => 6,
+            _ => 1,
+        };
+        match code {
+            5 => (5, "phoned is not running".to_string()),
+            6 => (5, format!("phoned could not start: {msg}")),
+            _ => (code, msg),
         }
-        e
-    })
+    };
+    match e.downcast_ref::<zbus::Error>() {
+        Some(zbus::Error::MethodError(name, msg, _)) => {
+            named(name.as_str(), msg.clone().unwrap_or_else(|| name.to_string()))
+        }
+        Some(zbus::Error::FDO(f)) => {
+            let text = f.to_string();
+            let (name, msg) = text.split_once(": ").unwrap_or((text.as_str(), text.as_str()));
+            named(name, msg.to_string())
+        }
+        _ => (1, format!("{e:#}")),
+    }
 }
 
 fn state_word(s: MessageState) -> &'static str {
@@ -226,7 +263,14 @@ async fn run(conn: &zbus::Connection, w: &[&str], json: bool) -> Result<()> {
                 println!("{:<10} {:<16} {}s", what, show(&r.peer), r.duration);
             }
         }
-        ["ussd", code] => println!("{}", ModemProxy::new(conn).await?.ussd(code).await?),
+        ["ussd", code] => {
+            let reply = ModemProxy::new(conn).await?.ussd(code).await?;
+            if json {
+                out(&serde_json::json!({"code": code, "reply": reply}))?
+            } else {
+                println!("{reply}")
+            }
+        }
         ["modem", "setup"] => print_steps(&ModemProxy::new(conn).await?.setup().await?, json),
         ["modem", "setup", "apply"] => {
             let (p, steps) = ModemProxy::new(conn).await?.apply_setup().await?;
@@ -479,7 +523,14 @@ async fn run(conn: &zbus::Connection, w: &[&str], json: bool) -> Result<()> {
         ["ringer"] => println!("{}", AudioProxy::new(conn).await?.ringer().await?),
         ["ringer", mode] => AudioProxy::new(conn).await?.set_ringer(mode).await?,
         ["bt", rest @ ..] => bluetooth(conn, rest).await?,
-        ["get", key] => println!("{}", SettingsProxy::new(conn).await?.get(key).await?),
+        ["get", key] => {
+            let value = SettingsProxy::new(conn).await?.get(key).await?;
+            if json {
+                out(&serde_json::json!({"key": key, "value": value}))?
+            } else {
+                println!("{value}")
+            }
+        }
         ["set", key, value] => set_setting(conn, key, value, json).await?,
         ["block", n] => SettingsProxy::new(conn).await?.block(n).await?,
         ["unblock", n] => SettingsProxy::new(conn).await?.unblock(n).await?,
@@ -559,6 +610,10 @@ fn print_steps(steps: &[(String, String, String)], json: bool) {
 }
 
 fn placed(what: &str, p: Placed) {
+    if JSON.get().copied().unwrap_or(false) {
+        println!("{}", serde_json::json!({"what": what, "id": p.id, "pending": p.pending}));
+        return;
+    }
     if p.pending != 0 {
         println!("{what} waiting for confirmation on the device (request {})", p.pending);
     } else {

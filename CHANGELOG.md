@@ -105,6 +105,23 @@ onboarding, FlipCTL's conventions, licensing, battery, failure recovery, privacy
 - Battery: the apps redraw and poll only when something changed; contacts are read
   once; phoned wakes less when idle.
 
+The rest of that roadmap:
+
+- Signals with numbers in them go in full only to Dolphone's own apps and
+  programs granted reading (they register with `Settings.Register`); everyone
+  else gets the number masked.
+- A Messages PIN (4 to 12 digits, kept as a PBKDF2 hash): Messages and its
+  notifications stay closed without it, it opens for a few minutes at a time, and
+  wrong guesses slow down after five.
+- MMS pictures go into the encrypted store with the texts (`--encrypt-store` moves
+  them in, `--decrypt-store` back out).
+- Text-to-911 in the US (47 CFR 9.10(q)); texts to emergency numbers elsewhere are
+  still refused.
+- `phonectl` exits with a code that says why (2 not allowed, 3 bad argument or not
+  supported, 4 rate-limited, 5 phoned not running), and `--json` for `get`,
+  `ussd` and what it sends.
+- The uplink watch and KDE Connect wake on changes instead of every few seconds.
+
 - phoned: calls (dial, answer, decline, hold/swap, waiting, DTMF, mute), texts
   (multipart, cleaning, deletion from the modem once stored), confirmations for
   outside requests and premium numbers, rate limits, blocking, USSD, call log,

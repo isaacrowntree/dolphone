@@ -416,6 +416,8 @@ pub struct KdeConnect {
     /// The owner's "show message text in notifications" (private notifications
     /// off), kept here from the settings; off until read, which is the private side.
     show_bodies: AtomicBool,
+    /// A setting changed: look again at the switch and the privacy settings.
+    pub changed: tokio::sync::Notify,
 }
 
 impl KdeConnect {
@@ -595,7 +597,7 @@ pub fn message_json(m: &phone_core::model::Message) -> Value {
 pub async fn run(phone: Arc<Phone>) {
     loop {
         if !phone.flag(phone_api::keys::KDECONNECT) {
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            let _ = tokio::time::timeout(Duration::from_secs(60), phone.kdeconnect.changed.notified()).await;
             continue;
         }
         note_privacy(&phone);
@@ -687,7 +689,9 @@ async fn serve(phone: &Arc<Phone>) -> anyhow::Result<()> {
                     });
                 }
             }
-            _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+            _ = phone.kdeconnect.changed.notified() => {}
+            // A slow look besides, for settings changed other ways (a wipe).
+            _ = tokio::time::sleep(Duration::from_secs(60)) => {}
         }
     }
 }

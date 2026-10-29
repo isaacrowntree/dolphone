@@ -787,7 +787,7 @@ mod tests {
         let s = Store::open_keyed(&path, Some(&key)).unwrap();
         assert_eq!(s.conversation("+61491570156").unwrap()[0].body, "secret plans");
         let v: i64 = s.db.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
-        assert_eq!(v, 4, "the schema version comes along");
+        assert_eq!(v, 5, "the schema version comes along");
         drop(s);
         rekey_file(&path, Some(&key), None).unwrap();
         assert!(!is_encrypted(&path));
