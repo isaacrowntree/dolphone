@@ -60,7 +60,7 @@ emergency alert stays still when the ringer is on Silent.
 | a second call waiting | two long |
 | a call dropped (not ended here) | one long |
 | a text not sent | short, short, long |
-| an emergency alert | three long, even on silent |
+| an emergency alert | the alert tone's rhythm (long, short, short, twice), even on silent |
 | a press ignored on purpose | a quick stutter (three very short) |
 
 ## Messages

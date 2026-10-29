@@ -148,13 +148,11 @@ always 0700) and plays them with `pw-play`:
 - the **text tone**, when the ringer is on;
 - the **alert tone** for emergency alerts, in the Alarm role, whatever the ringer
   says. It is 853 Hz and 960 Hz together, the attention signal alert systems use.
-  In the United States and its territories it follows Wireless Emergency Alerts'
-  rule (47 CFR 10.520): a 2 s tone, then two 1 s tones, 0.5 s between each,
-  the whole sequence twice with 0.5 s between, 10.5 s in all. EU-Alert (ETSI TS
-  102 900 V1.3.1, clause 6.1.2) asks only for a dedicated attention signal and leaves
-  its form to each country, and no national pattern has been found, so elsewhere
-  it is four 0.9 s bursts, about 4 s (`alert_attention` in
-  `phone-core/src/tones.rs`);
+  Its cadence is Wireless Emergency Alerts' (47 CFR 10.520): a 2 s tone, then two
+  1 s tones, 0.5 s between each, the whole sequence twice with 0.5 s between,
+  10.5 s in all. It is the same in every country, as on Android, whose alert app
+  plays one tone outside Japan; EU-Alert (ETSI TS 102 900) leaves the form to each
+  country (`ALERT_ATTENTION` in `phone-core/src/tones.rs`);
 - the **call-progress tones** of the country the SIM (or the owner's setting) says
   you are in: busy and congestion after the network turns a call away, and, for
   networks that send silence while ringing out, ringback (Phone Settings > Calls >

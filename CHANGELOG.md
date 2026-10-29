@@ -123,8 +123,8 @@ The rest of that roadmap:
 - The uplink watch, KDE Connect and the headphone jack wake on changes instead of
   every few seconds.
 - A PIN screen in Messages (panel and desktop) and PIN settings in both Settings.
-- Emergency alerts queue, the most severe first ("1 of 3"); in the US the
-  attention tone is the 10.5 s pattern of 47 CFR 10.520.
+- Emergency alerts queue, the most severe first ("1 of 3"); the attention tone
+  and its vibration are the 10.5 s pattern of 47 CFR 10.520, everywhere.
 - The desktop app attaches pictures through the file-chooser portal.
 - Serial call audio keeps the modem's clock and PipeWire's apart with a small
   buffer that drops or pads whole frames, so a long call does not drift.

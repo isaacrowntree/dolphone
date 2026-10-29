@@ -926,11 +926,10 @@ impl Audio {
         play_once("Notification", file);
     }
 
-    /// Sound an emergency alert's attention signal, whatever the ringer says (that is
-    /// what an emergency alert is for), as `region` (ISO 3166 alpha-2) has it: in the United States the 10.5 s pattern of 47 CFR 10.520 (see
-    /// phone_core::tones::alert_attention), elsewhere four short bursts.
-    pub fn play_alert(&self, region: &str) {
-        let Some(file) = alert_file(region) else { return };
+    /// Sound an emergency alert's attention signal (phone_core::tones::ALERT_ATTENTION),
+    /// whatever the ringer says: that is what an emergency alert is for.
+    pub fn play_alert(&self) {
+        let Some(file) = alert_file() else { return };
         play_once("Alarm", file);
     }
 
@@ -1896,13 +1895,11 @@ fn synth(tone: Tone) -> Vec<i16> {
     out
 }
 
-/// A region's emergency alert attention signal as a WAV, written on first use.
-fn alert_file(region: &str) -> Option<PathBuf> {
-    let region: String = region.chars().filter(char::is_ascii_alphabetic).take(2).collect();
-    let dir = runtime_dir()?;
-    let path = dir.join(format!("alert-{}.wav", region.to_ascii_lowercase()));
+/// The emergency alert attention signal as a WAV, written on first use.
+fn alert_file() -> Option<PathBuf> {
+    let path = runtime_dir()?.join("alert-wea.wav");
     if !path.exists() {
-        std::fs::write(&path, wav(&synth_cadence(tones::alert_attention(&region), 1, 0.9))).ok()?;
+        std::fs::write(&path, wav(&synth_cadence(tones::ALERT_ATTENTION, 1, 0.9))).ok()?;
     }
     Some(path)
 }
@@ -2172,11 +2169,9 @@ mod tests {
 
     #[test]
     fn alerts_have_their_length() {
-        let us = synth_cadence(tones::alert_attention("US"), 1, 0.9);
-        assert_eq!(us.len(), RATE as usize * 21 / 2, "47 CFR 10.520: 10.5 s");
-        let other = synth_cadence(tones::alert_attention(""), 1, 0.9);
-        assert_eq!(other.len(), RATE as usize * 42 / 10);
-        assert!(other.iter().any(|&s| s > i16::MAX / 2), "loud: it is an alarm");
+        let alert = synth_cadence(tones::ALERT_ATTENTION, 1, 0.9);
+        assert_eq!(alert.len(), RATE as usize * 21 / 2, "47 CFR 10.520: 10.5 s");
+        assert!(alert.iter().any(|&s| s > i16::MAX / 2), "loud: it is an alarm");
     }
 
     #[test]

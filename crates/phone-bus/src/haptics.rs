@@ -21,8 +21,9 @@ pub const WAITING: &[u16] = &[300, 200, 300];
 pub const DROPPED: &[u16] = &[600];
 /// A text failed to send: short, short, long.
 pub const FAILED: &[u16] = &[60, 100, 60, 100, 400];
-/// An emergency alert: long, long, long.
-pub const ALERT: &[u16] = &[900, 200, 900, 200, 900];
+/// An emergency alert: the alert tone's cadence, 2 s, 1 s, 1 s, twice, with 0.5 s
+/// between (47 CFR 10.530; phone_core::tones::ALERT_ATTENTION).
+pub const ALERT: &[u16] = &[2000, 500, 1000, 500, 1000, 500, 2000, 500, 1000, 500, 1000];
 /// A press that was ignored on purpose (a screen that just appeared, End right
 /// after answering, Decline that needs a hold): a quick stutter, unlike a tick,
 /// so a press that did nothing does not feel like one that did.
