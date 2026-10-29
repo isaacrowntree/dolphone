@@ -30,9 +30,13 @@
 //! were asked on one worker thread. A short call's stop can then never overtake its
 //! start.
 
+use std::collections::VecDeque;
+use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::process::{ChildStdin, ChildStdout};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -208,11 +212,21 @@ fn private_dir(dir: &Path) -> Option<PathBuf> {
     Some(dir.to_path_buf())
 }
 
-// Two libc calls std does not wrap. std links libc already, so declaring them is
+// libc calls std does not wrap. std links libc already, so declaring them is
 // enough.
 extern "C" {
     fn getuid() -> u32;
     fn tcflush(fd: i32, queue: i32) -> i32;
+    fn poll(fds: *mut PollFd, nfds: std::ffi::c_ulong, timeout: i32) -> i32;
+    fn ioctl(fd: i32, request: std::ffi::c_ulong, ...) -> i32;
+}
+
+/// struct pollfd.
+#[repr(C)]
+struct PollFd {
+    fd: i32,
+    events: i16,
+    revents: i16,
 }
 
 fn uid() -> u32 {
@@ -439,8 +453,12 @@ pub fn serial_plan(route: Route, nodes: &[Node], cfg: &Config, rate: u32) -> Vec
     let rate = pcm_rate(rate).to_string();
     let cat = |mode: &str, target: &str, name: &str| {
         // --raw: bare samples, not a sound file with a header.
+        // --latency: 20 ms at a time, a frame, so the bridge's buffers can be kept
+        // short (pw-cat asks for 100 ms otherwise).
         let mut a: Vec<String> =
-            ["pw-cat", mode, "--raw", "--rate", &rate, "--channels", "1", "--format", "s16"].map(String::from).to_vec();
+            ["pw-cat", mode, "--raw", "--rate", &rate, "--channels", "1", "--format", "s16", "--latency", "20ms"]
+                .map(String::from)
+                .to_vec();
         let stay = if target.is_empty() { String::new() } else { format!(" {}", STAY.replace('=', " = ")) };
         a.extend([
             "--media-role".into(),
@@ -526,6 +544,8 @@ struct Inner {
     rate: u32,
     /// The serial port the call's audio is bridged over, when it is.
     serial: Option<String>,
+    /// phoned's own thread between that port and the two pw-cat legs.
+    bridge: Option<Arc<Bridge>>,
     /// Where the call's audio plays, for the tones that belong in the ear.
     output: String,
     /// A Bluetooth headset phoned moved to its hands-free profile for the call, and
@@ -621,6 +641,7 @@ impl Audio {
                 port: String::new(),
                 rate: 8_000,
                 serial: None,
+                bridge: None,
                 output: String::new(),
                 bt_restore: None,
                 muted: false,
@@ -794,7 +815,7 @@ impl Audio {
             kill(i.legs[1].take());
         } else if i.in_call && i.legs[1].is_none() {
             if let Some(args) = i.plan.get(1).cloned() {
-                i.legs[1] = spawn_leg(&args, i.serial.as_deref(), false);
+                i.legs[1] = spawn_leg(&mut i, &args, false);
             }
         }
     }
@@ -900,15 +921,22 @@ impl Audio {
     }
 
     /// Play a tone once, in the background. An alert plays whatever the ringer says;
-    /// that is what an emergency alert is for.
+    /// that is what an emergency alert is for. `Tone::Alert` here is the attention
+    /// signal for no country in particular; play_alert has the country's own.
     pub fn play(&self, tone: Tone) {
         let Some(file) = tone_file(tone) else { return };
         let role = if matches!(tone, Tone::Alert) { "Alarm" } else { "Notification" };
-        std::thread::spawn(move || {
-            if let Some(child) = pw_play(role, "", &file) {
-                wait_within(child, Duration::from_secs(30), "pw-play");
-            }
-        });
+        play_once(role, file);
+    }
+
+    /// Sound an emergency alert's attention signal as `region` (ISO 3166 alpha-2)
+    /// has it: in the United States the 10.5 s pattern of 47 CFR 10.520 (see
+    /// phone_core::tones::alert_attention), elsewhere four short bursts.
+    // Until phone.rs's two alert call sites use it in place of play(Tone::Alert).
+    #[allow(dead_code)]
+    pub fn play_alert(&self, region: &str) {
+        let Some(file) = alert_file(region) else { return };
+        play_once("Alarm", file);
     }
 
     /// Say something (a caller's name), when espeak-ng is installed, on the ringer's
@@ -987,6 +1015,14 @@ fn ring(looper: &Looper, ticket: u64, file: &Path, target: &str, waiting: bool) 
             std::thread::sleep(Duration::from_secs(3));
         }
     }
+}
+
+fn play_once(role: &'static str, file: PathBuf) {
+    std::thread::spawn(move || {
+        if let Some(child) = pw_play(role, "", &file) {
+            wait_within(child, Duration::from_secs(30), "pw-play");
+        }
+    });
 }
 
 fn pw_play(role: &str, target: &str, file: &Path) -> Option<Child> {
@@ -1198,6 +1234,7 @@ fn sync_legs(i: &mut Inner, dump: Dump) {
             // Raw bytes both ways: no echo, no newline translation.
             run(&["stty".into(), "-F".into(), t.clone(), "raw".into(), "-echo".into()]);
             tracing::info!(port = %t, rate = i.rate, "call audio over serial PCM");
+            i.bridge = Bridge::open(t, i.rate);
         }
         i.serial = tty;
     }
@@ -1214,7 +1251,7 @@ fn sync_legs(i: &mut Inner, dump: Dump) {
         if leg == 1 && i.muted {
             continue;
         }
-        i.legs[leg] = want.and_then(|a| spawn_leg(a, i.serial.as_deref(), leg == 0));
+        i.legs[leg] = want.and_then(|a| spawn_leg(i, a, leg == 0));
     }
     i.plan = plan;
     // A leg that died may mean PipeWire restarted, and the canceller's streams
@@ -1327,13 +1364,19 @@ fn kill_legs(i: &mut Inner) {
     }
     i.plan.clear();
     i.serial = None;
+    if let Some(b) = i.bridge.take() {
+        b.stop.store(true, Ordering::SeqCst);
+    }
 }
 
-fn spawn_leg(args: &[String], serial: Option<&str>, downlink: bool) -> Option<Child> {
-    match serial {
-        Some(tty) => spawn_serial(args, tty, downlink),
-        None => spawn(args),
+fn spawn_leg(i: &mut Inner, args: &[String], downlink: bool) -> Option<Child> {
+    let Some(tty) = i.serial.clone() else { return spawn(args) };
+    // The port could not be opened when the call's audio started (or the bridge
+    // has stopped): try again, as check_call brings the legs back.
+    if i.bridge.as_ref().is_none_or(|b| b.stop.load(Ordering::SeqCst)) {
+        i.bridge = Bridge::open(&tty, i.rate);
     }
+    spawn_serial(args, i.bridge.as_ref()?, downlink)
 }
 
 fn spawn(args: &[String]) -> Option<Child> {
@@ -1347,39 +1390,438 @@ fn spawn(args: &[String]) -> Option<Child> {
     }
 }
 
-/// A pw-cat leg wired to the modem's serial port: the downlink reads from it, the
-/// uplink writes to it.
-fn spawn_serial(args: &[String], tty: &str, downlink: bool) -> Option<Child> {
-    use std::os::fd::AsRawFd;
-    use std::os::unix::fs::OpenOptionsExt;
+/// A pw-cat leg of a serial PCM call, joined to the bridge: the downlink's stdin
+/// is fed what the modem sends, the uplink's stdout is what the bridge sends it.
+fn spawn_serial(args: &[String], bridge: &Arc<Bridge>, downlink: bool) -> Option<Child> {
     let (cmd, rest) = args.split_first()?;
-    // O_NOCTTY: the port must never become phoned's controlling terminal.
-    const O_NOCTTY: i32 = 0o400;
-    let file = match std::fs::OpenOptions::new().read(downlink).write(!downlink).custom_flags(O_NOCTTY).open(tty) {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::warn!(
-                port = tty,
-                "the modem's audio port cannot be opened: {e} (is the owner in the dialout group?)"
-            );
-            return None;
+    let pipes = || if downlink { (Stdio::piped(), Stdio::null()) } else { (Stdio::null(), Stdio::piped()) };
+    // pw-cat's raw mode goes through stdio, which moves 4096 bytes at a time (256
+    // ms at 8 kHz): it takes that much of the pipe ahead of playing it, and writes
+    // what it records in bursts that long. Unbuffered (coreutils' stdbuf, which
+    // then runs pw-cat itself) it moves each 5 to 20 ms as it goes, so the pipe
+    // shows what is really waiting and the uplink is a quarter-second sooner.
+    // Without stdbuf the bridge allows for the bursts instead.
+    let (i, o) = pipes();
+    let spawned = Command::new("stdbuf")
+        .args(["-i0", "-o0"])
+        .arg(cmd)
+        .args(rest)
+        .stdin(i)
+        .stdout(o)
+        .stderr(Stdio::null())
+        .spawn();
+    let spawned = match spawned {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let (i, o) = pipes();
+            Command::new(cmd).args(rest).stdin(i).stdout(o).stderr(Stdio::null()).spawn()
         }
+        other => other,
     };
-    // Drop what is queued from before (a previous call, a leg that died): stale
-    // bytes would play as noise, and an odd one would misalign every sample after.
-    const TCIFLUSH: i32 = 0;
-    const TCOFLUSH: i32 = 1;
-    // SAFETY: the descriptor is open and ours for the duration of the call.
-    unsafe { tcflush(file.as_raw_fd(), if downlink { TCIFLUSH } else { TCOFLUSH }) };
-    let (stdin, stdout) =
-        if downlink { (Stdio::from(file), Stdio::null()) } else { (Stdio::null(), Stdio::from(file)) };
-    match Command::new(cmd).args(rest).stdin(stdin).stdout(stdout).stderr(Stdio::null()).spawn() {
-        Ok(c) => Some(c),
+    match spawned {
+        Ok(mut c) => {
+            if let Some(pipe) = c.stdin.take() {
+                bridge.attach_downlink(pipe);
+            }
+            if let Some(pipe) = c.stdout.take() {
+                bridge.attach_uplink(pipe);
+            }
+            Some(c)
+        }
         Err(e) => {
             tracing::warn!("{cmd}: {e}");
             None
         }
     }
+}
+
+/// A serial PCM frame: 20 ms of samples, the unit the bridge moves, drops and
+/// pads by.
+const FRAME_MS: usize = 20;
+
+/// What to do about a buffer's fill.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Adjust {
+    Keep,
+    /// It has drifted too long: drop this many frames to come back to the target.
+    Drop(usize),
+    /// It is about to run dry: add this many frames of silence.
+    Pad(usize),
+}
+
+/// The bounds a serial PCM call's buffers are kept within, in bytes of 16-bit
+/// mono at the call's rate. The modem's clock and the sound card's are not the
+/// same clock, so over a long call one side gets ahead of the other: with nothing
+/// in between, latency grows without bound in the port's buffer, or the stream
+/// runs dry. A buffer is let wander between 20 ms and 200 ms and, past either,
+/// brought back to 60 ms a whole frame at a time, which is heard as a 20 ms
+/// skip or gap every few minutes rather than a delay that keeps growing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Jitter {
+    pub frame: usize,
+    pub target: usize,
+    pub low: usize,
+    pub high: usize,
+}
+
+impl Jitter {
+    pub fn new(rate: u32) -> Self {
+        let bytes = |ms: usize| pcm_rate(rate) as usize * 2 * ms / 1000;
+        Self { frame: bytes(FRAME_MS), target: bytes(60), low: bytes(20), high: bytes(200) }
+    }
+
+    /// What to do about a buffer holding `fill` bytes. For one filled in bursts of
+    /// up to `burst` bytes (0 for a steady one): it peaks a burst above its level
+    /// between them, so the bound past which frames
+    /// are dropped, and the level a drop comes back to, are a burst higher. Running
+    /// dry is still running dry.
+    pub fn adjust_around(&self, fill: usize, burst: usize) -> Adjust {
+        if fill > self.high + burst {
+            Adjust::Drop((fill - self.target - burst) / self.frame)
+        } else if fill < self.low {
+            Adjust::Pad((self.target - fill).div_ceil(self.frame))
+        } else {
+            Adjust::Keep
+        }
+    }
+
+    /// adjust_around, and a slow trim: a buffer that has stayed above the target
+    /// for a second (its low point over the last 50 frames more than a frame
+    /// above it) is brought back down, so latency picked up once (a stream's
+    /// first moments, a stall) does not stay for the rest of the call just because
+    /// it is under the 200 ms bound.
+    pub fn settle(&self, fill: usize, burst: usize, level: &mut Level) -> Adjust {
+        let a = self.adjust_around(fill, burst);
+        if a != Adjust::Keep {
+            (level.low_point, level.seen) = (None, 0);
+            return a;
+        }
+        let low = level.low_point.map_or(fill, |l| l.min(fill));
+        level.seen += 1;
+        if level.seen < TRIM_FRAMES {
+            level.low_point = Some(low);
+            return Adjust::Keep;
+        }
+        (level.low_point, level.seen) = (None, 0);
+        if low > self.target + self.frame {
+            Adjust::Drop((low - self.target) / self.frame)
+        } else {
+            Adjust::Keep
+        }
+    }
+
+    /// A frame from the modem, with `fill` bytes waiting for the downlink's pw-cat
+    /// (in the pipe to it and read but not yet played; None when that cannot be
+    /// told): the frames of silence to write before it, or None to drop it.
+    pub fn downlink(&self, fill: Option<usize>, level: &mut Level) -> Option<usize> {
+        if level.pending > 0 {
+            level.pending -= 1;
+            return None;
+        }
+        match fill.map(|f| self.settle(f, 0, level)) {
+            Some(Adjust::Drop(n)) => {
+                level.pending = n.saturating_sub(1);
+                None
+            }
+            Some(Adjust::Pad(n)) => Some(n),
+            _ => Some(0),
+        }
+    }
+
+    /// The frame to send the modem now, from what the uplink's pw-cat recorded,
+    /// or None for silence. A pad carries over the frames that follow, so the
+    /// buffer fills back up to the target while silence goes out. `burst` is the
+    /// most pw-cat has lately written at once.
+    pub fn uplink(&self, ring: &mut VecDeque<u8>, level: &mut Level, burst: usize) -> Option<Vec<u8>> {
+        if level.pending > 0 {
+            level.pending -= 1;
+            return None;
+        }
+        match self.settle(ring.len(), burst, level) {
+            Adjust::Pad(n) => {
+                level.pending = n.saturating_sub(1);
+                return None;
+            }
+            Adjust::Drop(n) => drop(ring.drain(..n * self.frame)),
+            Adjust::Keep => {}
+        }
+        Some(ring.drain(..self.frame).collect())
+    }
+}
+
+/// How many frames the slow trim looks over: a second.
+const TRIM_FRAMES: usize = 1000 / FRAME_MS;
+
+/// One buffer's state from frame to frame, for Jitter's decisions.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Level {
+    /// Frames still to drop (the downlink) or pad (the uplink) after a decision
+    /// to drop or pad several.
+    pub pending: usize,
+    /// The lowest fill seen in this trim window, and how many frames it has had.
+    low_point: Option<usize>,
+    seen: usize,
+}
+
+/// What the downlink's pw-cat has read from its pipe and not yet played, which
+/// the pipe's fill does not show. pw-cat reads when it has run low, so after it
+/// has read `taken` bytes since the last look it holds about those, less the
+/// `played` bytes the time since is worth: nothing much when it reads only what it
+/// plays (unbuffered), most of a burst when stdio has read ahead. Without a read
+/// it is the last estimate less what has played. Being set afresh at each read,
+/// the system clock's own drift never adds up in it.
+pub fn held(prev: f64, taken: usize, played: f64) -> f64 {
+    let had = if taken > 0 { taken as f64 } else { prev };
+    (had - played).max(0.0)
+}
+
+/// The downlink's side of the bridge, from one frame to the next.
+struct Down {
+    level: Level,
+    /// held(), in bytes.
+    held: f64,
+    /// The pipe's fill just after the last write.
+    after: usize,
+    at: Instant,
+}
+
+const FLUSH_IN: u8 = 1;
+const FLUSH_OUT: u8 = 2;
+
+/// phoned's own thread between a serial PCM modem's port and the call's two
+/// pw-cat legs. It reads the port a frame at a time and writes each frame to the
+/// downlink's pw-cat, keeping the pipe to it (whose fill the kernel reports) near
+/// the target; and for every frame the modem sends it sends the modem one from
+/// what the uplink's pw-cat recorded, so the uplink goes at the modem's own clock
+/// and its buffer, here, is the only place the two clocks' drift collects.
+struct Bridge {
+    tty: std::fs::File,
+    jitter: Jitter,
+    /// The downlink pw-cat's stdin, while one runs.
+    downlink: Mutex<Option<ChildStdin>>,
+    /// What the uplink's pw-cat recorded, waiting for the modem.
+    uplink: Mutex<VecDeque<u8>>,
+    /// Which uplink pw-cat fills the buffer: an older one's last bytes do not.
+    uplink_gen: AtomicU64,
+    /// The most the uplink's pw-cat has lately written at once.
+    burst: AtomicUsize,
+    /// Port queues to flush, done on the bridge's thread so it starts its frame
+    /// afresh.
+    flush: AtomicU8,
+    stop: AtomicBool,
+}
+
+impl Bridge {
+    fn open(tty: &str, rate: u32) -> Option<Arc<Bridge>> {
+        use std::os::unix::fs::OpenOptionsExt;
+        // O_NOCTTY: the port must never become phoned's controlling terminal.
+        // O_NONBLOCK: a modem that stops taking the uplink must not stall the
+        // downlink, or the bridge's stopping.
+        const O_NOCTTY: i32 = 0o400;
+        const O_NONBLOCK: i32 = 0o4000;
+        let tty_file =
+            match std::fs::OpenOptions::new().read(true).write(true).custom_flags(O_NOCTTY | O_NONBLOCK).open(tty) {
+                Ok(f) => f,
+                Err(e) => {
+                    tracing::warn!(
+                        port = tty,
+                        "the modem's audio port cannot be opened: {e} (is the owner in the dialout group?)"
+                    );
+                    return None;
+                }
+            };
+        let b = Arc::new(Bridge {
+            tty: tty_file,
+            jitter: Jitter::new(rate),
+            downlink: Mutex::new(None),
+            uplink: Mutex::new(VecDeque::new()),
+            uplink_gen: AtomicU64::new(0),
+            burst: AtomicUsize::new(0),
+            flush: AtomicU8::new(FLUSH_IN | FLUSH_OUT),
+            stop: AtomicBool::new(false),
+        });
+        let run = b.clone();
+        std::thread::Builder::new().name("serial-pcm".into()).spawn(move || run.run()).ok()?;
+        Some(b)
+    }
+
+    fn attach_downlink(&self, pipe: ChildStdin) {
+        if let Ok(mut d) = self.downlink.lock() {
+            *d = Some(pipe);
+        }
+        // Drop what is queued from before (a previous call, a leg that died):
+        // stale bytes would play as noise, and an odd one would misalign every
+        // sample after.
+        self.flush.fetch_or(FLUSH_IN, Ordering::SeqCst);
+    }
+
+    fn attach_uplink(self: &Arc<Self>, mut pipe: ChildStdout) {
+        let generation = self.uplink_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Ok(mut r) = self.uplink.lock() {
+            r.clear();
+        }
+        self.burst.store(0, Ordering::SeqCst);
+        self.flush.fetch_or(FLUSH_OUT, Ordering::SeqCst);
+        let b = self.clone();
+        let _ = std::thread::Builder::new().name("serial-pcm-up".into()).spawn(move || {
+            let mut buf = [0u8; 4096];
+            // Until pw-cat exits (it is killed when the leg stops or the call ends).
+            while let Ok(n @ 1..) = pipe.read(&mut buf) {
+                if b.uplink_gen.load(Ordering::SeqCst) != generation {
+                    return;
+                }
+                // The largest read lately, let go of slowly: one late read that
+                // caught several writes only widens the bound for a while.
+                let burst = b.burst.load(Ordering::SeqCst);
+                b.burst.store(n.max(burst - burst / 64), Ordering::SeqCst);
+                let Ok(mut r) = b.uplink.lock() else { return };
+                r.extend(&buf[..n]);
+                // Bounded even if the modem stops asking: a second at most.
+                let cap = b.jitter.frame * (1000 / FRAME_MS);
+                if r.len() > cap {
+                    let over = (r.len() - b.jitter.target).next_multiple_of(b.jitter.frame).min(r.len());
+                    r.drain(..over);
+                }
+            }
+        });
+    }
+
+    fn run(&self) {
+        let fd = self.tty.as_raw_fd();
+        let j = self.jitter;
+        let silence = vec![0u8; j.frame];
+        let mut frame = Vec::with_capacity(j.frame);
+        let mut buf = vec![0u8; 4096];
+        let mut down = Down { level: Level::default(), held: 0.0, after: 0, at: Instant::now() };
+        let mut up = Level::default();
+        // An uplink frame the port took only part of, to finish first.
+        let mut pending: Vec<u8> = Vec::new();
+        let mut heard = Instant::now();
+        let (mut dropped, mut padded, mut logged) = (0u64, 0u64, 0u64);
+        while !self.stop.load(Ordering::SeqCst) {
+            let flush = self.flush.swap(0, Ordering::SeqCst);
+            const TCIFLUSH: i32 = 0;
+            const TCOFLUSH: i32 = 1;
+            if flush & FLUSH_IN != 0 {
+                // SAFETY: the descriptor is the bridge's own, open while it lives.
+                unsafe { tcflush(fd, TCIFLUSH) };
+                frame.clear();
+                down.level = Level::default();
+            }
+            if flush & FLUSH_OUT != 0 {
+                // SAFETY: as above.
+                unsafe { tcflush(fd, TCOFLUSH) };
+                pending.clear();
+                up = Level::default();
+            }
+            const POLLIN: i16 = 1;
+            let mut p = PollFd { fd, events: POLLIN, revents: 0 };
+            // SAFETY: one pollfd, ours, for the length of the call.
+            let ready = unsafe { poll(&mut p, 1, FRAME_MS as i32) };
+            if ready <= 0 {
+                // The modem has sent nothing for a while (it should send all
+                // through a call): keep the uplink going on phoned's own clock.
+                if heard.elapsed() > Duration::from_millis(200) {
+                    self.send_up(&mut up, &mut pending, &silence);
+                }
+                continue;
+            }
+            let n = match (&self.tty).read(&mut buf) {
+                Ok(n) if n > 0 => n,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                // Hung up or gone (the modem resetting): wait, rather than spin.
+                _ => {
+                    std::thread::sleep(Duration::from_millis(FRAME_MS as u64));
+                    continue;
+                }
+            };
+            heard = Instant::now();
+            let mut rest = &buf[..n];
+            while !rest.is_empty() {
+                let take = (j.frame - frame.len()).min(rest.len());
+                frame.extend_from_slice(&rest[..take]);
+                rest = &rest[take..];
+                if frame.len() < j.frame {
+                    break;
+                }
+                match self.send_down(&frame, &mut down, &silence) {
+                    Some(0) => {}
+                    Some(n) => padded += n as u64,
+                    None => dropped += 1,
+                }
+                self.send_up(&mut up, &mut pending, &silence);
+                frame.clear();
+            }
+            if dropped + padded >= logged + 25 {
+                logged = dropped + padded;
+                tracing::debug!(dropped, padded, "serial PCM downlink frames dropped and padded for drift");
+            }
+        }
+    }
+
+    /// One frame from the modem to the downlink's pw-cat: Some(frames of silence
+    /// written before it), or None when it was dropped for drift.
+    fn send_down(&self, frame: &[u8], down: &mut Down, silence: &[u8]) -> Option<usize> {
+        let Ok(mut d) = self.downlink.lock() else { return Some(0) };
+        // No downlink running (it died, check_call is bringing it back): the
+        // modem's audio is read and let go, so none of it is stale later.
+        let Some(pipe) = d.as_mut() else { return Some(0) };
+        let fill = queued(pipe.as_raw_fd());
+        let bytes_per_s = (self.jitter.frame * 1000 / FRAME_MS) as f64;
+        let played = down.at.elapsed().as_secs_f64() * bytes_per_s;
+        down.at = Instant::now();
+        let waiting = fill.map(|f| {
+            down.held = held(down.held, down.after.saturating_sub(f), played);
+            f + down.held as usize
+        });
+        let written = self.jitter.downlink(waiting, &mut down.level).map(|pads| {
+            // The pipe is never let much past 200 ms, far short of its 64 KB, so
+            // these writes never wait on pw-cat.
+            let ok = (0..pads).all(|_| pipe.write_all(silence).is_ok()) && pipe.write_all(frame).is_ok();
+            (ok, pads)
+        });
+        down.after = queued(pipe.as_raw_fd()).unwrap_or(0);
+        match written {
+            Some((false, _)) => {
+                *d = None;
+                Some(0)
+            }
+            Some((true, pads)) => Some(pads),
+            None => None,
+        }
+    }
+
+    /// One frame to the modem: recorded audio, or silence while there is none
+    /// (muted, or the uplink coming up).
+    fn send_up(&self, level: &mut Level, pending: &mut Vec<u8>, silence: &[u8]) {
+        let mut out = &self.tty;
+        if !pending.is_empty() {
+            match out.write(pending) {
+                Ok(n) => drop(pending.drain(..n)),
+                Err(_) => return,
+            }
+            if !pending.is_empty() {
+                // The port is not taking it: this frame is lost, whole, so the
+                // samples stay aligned.
+                return;
+            }
+        }
+        let burst = self.burst.load(Ordering::SeqCst);
+        let frame = self.uplink.lock().ok().and_then(|mut r| self.jitter.uplink(&mut r, level, burst));
+        let frame = frame.as_deref().unwrap_or(silence);
+        match out.write(frame) {
+            Ok(n) if n < frame.len() => pending.extend_from_slice(&frame[n..]),
+            _ => {}
+        }
+    }
+}
+
+/// The bytes waiting in a pipe (FIONREAD, which Linux answers for either end).
+fn queued(fd: i32) -> Option<usize> {
+    const FIONREAD: std::ffi::c_ulong = 0x541B;
+    let mut n: i32 = 0;
+    // SAFETY: FIONREAD writes one int, to `n`.
+    let r = unsafe { ioctl(fd, FIONREAD, &mut n as *mut i32) };
+    (r == 0).then_some(n.max(0) as usize)
 }
 
 /// How long a profile's command (amixer, alsaucm, wpctl) may take. They run with
@@ -1405,12 +1847,16 @@ pub enum Tone {
     Waiting,
     /// A text arrived.
     Text,
-    /// An emergency alert: the attention signal alert systems use (853 + 960 Hz).
+    /// An emergency alert: the attention signal alert systems use (853 + 960 Hz),
+    /// as no country in particular has it (see Audio::play_alert).
     Alert,
 }
 
 /// The tone as a WAV in the runtime directory, written on first use.
 fn tone_file(tone: Tone) -> Option<PathBuf> {
+    if matches!(tone, Tone::Alert) {
+        return alert_file("");
+    }
     let dir = runtime_dir()?;
     let path = dir.join(match tone {
         Tone::Ring => "ring.wav",
@@ -1458,14 +1904,20 @@ fn synth(tone: Tone) -> Vec<i16> {
             burst(ms(60), &[0.0], 0.0);
             burst(ms(140), &[1760.0], 0.45);
         }
-        Tone::Alert => {
-            for _ in 0..4 {
-                burst(ms(900), &[853.0, 960.0], 0.9);
-                burst(ms(150), &[0.0], 0.0);
-            }
-        }
+        Tone::Alert => return synth_cadence(tones::alert_attention(""), 1, 0.9),
     }
     out
+}
+
+/// A region's emergency alert attention signal as a WAV, written on first use.
+fn alert_file(region: &str) -> Option<PathBuf> {
+    let region: String = region.chars().filter(char::is_ascii_alphabetic).take(2).collect();
+    let dir = runtime_dir()?;
+    let path = dir.join(format!("alert-{}.wav", region.to_ascii_lowercase()));
+    if !path.exists() {
+        std::fs::write(&path, wav(&synth_cadence(tones::alert_attention(&region), 1, 0.9))).ok()?;
+    }
+    Some(path)
 }
 
 /// A call-progress tone as a WAV: one cycle of ringback (it loops), or about four
@@ -1477,14 +1929,14 @@ fn progress_file(region: &str, p: Progress) -> Option<PathBuf> {
     if !path.exists() {
         let c = tones::cadence(&region, p);
         let cycles = if p == Progress::Ringback { 1 } else { 4000u32.div_ceil(c.cycle_ms()) };
-        std::fs::write(&path, wav(&synth_cadence(c, cycles))).ok()?;
+        // Progress tones are quieter than the ringer: they play in the ear.
+        std::fs::write(&path, wav(&synth_cadence(c, cycles, 0.3))).ok()?;
     }
     Some(path)
 }
 
-/// A cadence's on/off pattern, `cycles` times. Progress tones are quieter than the
-/// ringer: they play in the ear.
-fn synth_cadence(c: tones::Cadence, cycles: u32) -> Vec<i16> {
+/// A cadence's on/off pattern, `cycles` times, at `amp` of full scale.
+fn synth_cadence(c: tones::Cadence, cycles: u32, amp: f32) -> Vec<i16> {
     let ms = |m: u32| (RATE * m / 1000) as usize;
     let steps: &[u32] = if c.steps.is_empty() { &[1000, 0] } else { c.steps };
     let mut out = Vec::new();
@@ -1503,7 +1955,7 @@ fn synth_cadence(c: tones::Cadence, cycles: u32) -> Vec<i16> {
                     c.freqs.iter().map(|f| (t * f * std::f32::consts::TAU).sin()).sum::<f32>() / c.freqs.len() as f32;
                 // Some countries' tones alternate levels (Australia's congestion).
                 let level = c.level(i / 2);
-                out.push((s * 0.3 * level * edge * i16::MAX as f32) as i16);
+                out.push((s * amp * level * edge * i16::MAX as f32) as i16);
             }
         }
     }
@@ -1568,6 +2020,179 @@ mod tests {
     }
 
     #[test]
+    fn serial_buffers_drop_and_pad_whole_frames() {
+        let j = Jitter::new(8_000);
+        assert_eq!((j.frame, j.target, j.low, j.high), (320, 960, 320, 3200), "20, 60, 20 and 200 ms of 8 kHz s16");
+        assert_eq!(Jitter::new(16_000).frame, 640);
+        assert_eq!(Jitter::new(0), j, "8 kHz when nothing is reported");
+        assert_eq!(j.adjust_around(960, 0), Adjust::Keep);
+        assert_eq!(j.adjust_around(320, 0), Adjust::Keep, "20 ms is still enough");
+        assert_eq!(j.adjust_around(3200, 0), Adjust::Keep, "and 200 ms not yet too much");
+        assert_eq!(j.adjust_around(0, 0), Adjust::Pad(3), "empty: back up to 60 ms");
+        assert_eq!(j.adjust_around(319, 0), Adjust::Pad(3), "whole frames only");
+        assert_eq!(j.adjust_around(3201, 0), Adjust::Drop(7));
+        assert_eq!(j.adjust_around(10 * 320 + 960, 0), Adjust::Drop(10), "back down to 60 ms");
+
+        let mut skip = Level::default();
+        assert_eq!(j.downlink(Some(0), &mut skip), Some(3), "the first frame goes in behind 60 ms of silence");
+        assert_eq!(j.downlink(Some(960), &mut skip), Some(0));
+        assert_eq!(j.downlink(None, &mut skip), Some(0), "a pipe that cannot be measured is left alone");
+        assert_eq!(j.downlink(Some(4000), &mut skip), None);
+        assert_eq!(skip.pending, 8, "and the next frames go too, until 60 ms is left");
+
+        let mut ring: VecDeque<u8> = (0..4000u32).map(|n| n as u8).collect();
+        let mut pad = Level::default();
+        let f = j.uplink(&mut ring, &mut pad, 0).unwrap();
+        assert_eq!(f.len(), 320);
+        assert_eq!(f[0], (9 * 320) as u8, "the oldest nine frames were dropped");
+        assert_eq!(ring.len(), 4000 - 10 * 320);
+        let mut empty = VecDeque::new();
+        assert_eq!(j.uplink(&mut empty, &mut pad, 0), None, "silence while there is nothing");
+        assert_eq!(pad.pending, 2, "and twice more while it fills");
+        let mut level = Level::default();
+        let trims: Vec<Adjust> = (0..TRIM_FRAMES).map(|n| j.settle(2000 + n, 0, &mut level)).collect();
+        assert!(trims[..TRIM_FRAMES - 1].iter().all(|a| *a == Adjust::Keep));
+        assert_eq!(trims[TRIM_FRAMES - 1], Adjust::Drop(3), "a second spent above 60 ms: back to it");
+        let mut level = Level::default();
+        assert!(
+            (0..3 * TRIM_FRAMES).all(|n| j.settle(900 + n % 400, 0, &mut level) == Adjust::Keep),
+            "near it: left alone"
+        );
+        assert_eq!(j.adjust_around(4096 + 960, 4096), Adjust::Keep, "a burst on top is not drift");
+        assert_eq!(j.adjust_around(4096 + 3201, 4096), Adjust::Drop(7));
+        assert_eq!(j.adjust_around(0, 4096), Adjust::Pad(3));
+
+        assert_eq!(held(0.0, 4096, 320.0), 3776.0, "pw-cat read a burst");
+        assert_eq!(held(500.0, 330, 320.0), 10.0, "or only what it played");
+        assert_eq!(held(4096.0, 0, 320.0), 3776.0, "and plays it at the rate");
+        assert_eq!(held(100.0, 0, 320.0), 0.0);
+    }
+
+    /// A model of an hour's call with each clock off by 1%, far worse than real
+    /// crystals, with pw-cat moving its audio in small pieces (through stdbuf) and
+    /// in stdio's 4096-byte bursts: the buffers stay bounded, and the frames
+    /// dropped or padded are few.
+    #[test]
+    fn serial_drift_stays_bounded() {
+        let j = Jitter::new(8_000);
+        let ticks = 3600 * 1000 / FRAME_MS;
+        for chunk in [80usize, 4096] {
+            for ratio in [1.01f64, 0.99] {
+                // Uplink: the modem takes a frame each tick; pw-cat records at
+                // `ratio`, handing it over `chunk` bytes at a time.
+                let (mut ring, mut pad, mut made, mut silent, mut burst) =
+                    (VecDeque::new(), Level::default(), 0.0f64, 0, 0usize);
+                for _ in 0..ticks {
+                    made += ratio * j.frame as f64;
+                    while made >= chunk as f64 {
+                        ring.extend(vec![0u8; chunk]);
+                        made -= chunk as f64;
+                        burst = burst.max(chunk);
+                    }
+                    if j.uplink(&mut ring, &mut pad, burst).is_none() {
+                        silent += 1;
+                    }
+                    assert!(ring.len() <= j.high + chunk + 2 * j.frame, "{chunk} {ratio}: {}", ring.len());
+                }
+                assert!(silent < ticks / 50, "{chunk} {ratio}: {silent} silent frames");
+
+                // Downlink: a frame arrives each tick; pw-cat plays at `ratio`,
+                // reading what the pipe has (up to `chunk`) whenever it runs low.
+                let (mut pipe, mut inside, mut skip, mut est, mut after) =
+                    (0usize, 0.0f64, Level::default(), 0.0f64, 0usize);
+                let (mut underruns, mut changed) = (0, 0);
+                for _ in 0..ticks {
+                    est = held(est, after.saturating_sub(pipe), j.frame as f64);
+                    match j.downlink(Some(pipe + est as usize), &mut skip) {
+                        Some(0) => pipe += j.frame,
+                        Some(pads) => {
+                            pipe += (pads + 1) * j.frame;
+                            changed += 1;
+                        }
+                        None => changed += 1,
+                    }
+                    after = pipe;
+                    let want = ratio * j.frame as f64;
+                    if inside < want {
+                        // fread reads until it has what it needs: in stdio's
+                        // buffer, as much of the pipe as fits.
+                        let took = pipe.min(chunk.max((want - inside).ceil() as usize));
+                        pipe -= took;
+                        inside += took as f64;
+                    }
+                    if inside < want {
+                        underruns += 1;
+                    }
+                    inside = (inside - want).max(0.0);
+                    assert!(pipe + inside as usize <= j.high + chunk + 4 * j.frame, "{chunk} {ratio}: {pipe}");
+                }
+                assert!(underruns < ticks / 50, "{chunk} {ratio}: {underruns} underruns");
+                assert!(changed < ticks / 25, "{chunk} {ratio}: {changed} frames dropped or padded");
+            }
+        }
+    }
+
+    extern "C" {
+        fn posix_openpt(flags: i32) -> i32;
+        fn grantpt(fd: i32) -> i32;
+        fn unlockpt(fd: i32) -> i32;
+        fn ptsname_r(fd: i32, buf: *mut std::ffi::c_char, len: usize) -> i32;
+    }
+
+    /// The bridge over a pty standing in for the modem's port, with shell commands
+    /// standing in for pw-cat: what the "modem" sends reaches the downlink, and the
+    /// uplink's recording comes back at the pace the modem sends.
+    #[test]
+    fn bridge_carries_both_ways() {
+        use std::os::fd::FromRawFd;
+        // SAFETY: plain libc calls on a descriptor this test owns.
+        let (mut master, slave) = unsafe {
+            let fd = posix_openpt(0o2 | 0o400 | 0o4000);
+            assert!(fd >= 0 && grantpt(fd) == 0 && unlockpt(fd) == 0);
+            let mut name = [0 as std::ffi::c_char; 64];
+            assert_eq!(ptsname_r(fd, name.as_mut_ptr(), name.len()), 0);
+            let slave = std::ffi::CStr::from_ptr(name.as_ptr()).to_string_lossy().into_owned();
+            (std::fs::File::from_raw_fd(fd), slave)
+        };
+        assert!(run(&["stty".into(), "-F".into(), slave.clone(), "raw".into(), "-echo".into()]));
+        let tmp = tempfile::tempdir().unwrap();
+        let heard = tmp.path().join("downlink");
+        let bridge = Bridge::open(&slave, 8_000).unwrap();
+        let sh = |c: String| vec!["sh".to_string(), "-c".into(), c];
+        let down = spawn_serial(&sh(format!("cat > {}", heard.display())), &bridge, true).unwrap();
+        let up =
+            spawn_serial(&sh("while :; do printf UUUUUUUUUUUUUUUU; sleep 0.001; done".into()), &bridge, false).unwrap();
+        let (mut sent, mut back) = (0, Vec::new());
+        let mut buf = [0u8; 4096];
+        for _ in 0..50 {
+            sent += master.write(&[7u8; 320]).unwrap_or(0);
+            std::thread::sleep(Duration::from_millis(20));
+            if let Ok(n) = master.read(&mut buf) {
+                back.extend_from_slice(&buf[..n]);
+            }
+        }
+        bridge.stop.store(true, Ordering::SeqCst);
+        kill(Some(down));
+        kill(Some(up));
+        let played = std::fs::read(&heard).unwrap();
+        assert!(played.len() >= sent - 640, "{} of {sent} bytes", played.len());
+        assert!(played.contains(&7), "the modem's audio");
+        assert_eq!(played.len() % 2, 0, "whole samples");
+        assert!(back.contains(&b'U'), "the recording reached the modem");
+        // One frame back for each frame sent, give or take the last few.
+        assert!(back.len() <= sent + 640 && back.len() + 1280 >= sent, "{} back for {sent}", back.len());
+    }
+
+    #[test]
+    fn alerts_have_their_length() {
+        let us = synth_cadence(tones::alert_attention("US"), 1, 0.9);
+        assert_eq!(us.len(), RATE as usize * 21 / 2, "47 CFR 10.520: 10.5 s");
+        let other = synth(Tone::Alert);
+        assert_eq!(other.len(), RATE as usize * 42 / 10);
+        assert!(other.iter().any(|&s| s > i16::MAX / 2), "loud: it is an alarm");
+    }
+
+    #[test]
     fn parses_and_finds_modem() {
         let n = parse_dump(DUMP).nodes;
         assert_eq!(n.len(), 8);
@@ -1580,10 +2205,10 @@ mod tests {
 
     #[test]
     fn progress_tones_have_their_cadence() {
-        let au = synth_cadence(tones::cadence("AU", Progress::Ringback), 1);
+        let au = synth_cadence(tones::cadence("AU", Progress::Ringback), 1, 0.3);
         assert_eq!(au.len(), RATE as usize * 3, "0.4 + 0.2 + 0.4 + 2.0 s");
         assert!(au[RATE as usize..].iter().all(|&s| s == 0), "silent after the double ring");
-        let us = synth_cadence(tones::cadence("US", Progress::Busy), 4);
+        let us = synth_cadence(tones::cadence("US", Progress::Busy), 4, 0.3);
         assert_eq!(us.len(), RATE as usize * 4);
     }
 
