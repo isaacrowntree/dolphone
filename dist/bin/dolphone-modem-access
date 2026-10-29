@@ -70,7 +70,9 @@ port)
             retag
         fi
         echo "port on: ModemManager leaves the modem's spare AT port to Dolphone (members of the dolphone group)"
-        [ -e "$DROPIN" ] && echo "debug mode is still on; sudo dolphone-modem-access off, unless something else needs it"
+        if [ -e "$DROPIN" ]; then
+            echo "debug mode is still on; sudo dolphone-modem-access off, unless something else needs it"
+        fi
         ;;
     off)
         if [ -e "$PORT_FLAG" ]; then
