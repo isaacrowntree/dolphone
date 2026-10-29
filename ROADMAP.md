@@ -42,13 +42,9 @@ audio. What only a board can confirm:
 
 ## 2. Not built yet
 
-- **Attaching a picture from the apps.** Pictures that arrive are shown (in the
-  desktop app; named on the panel), and replies to a group go to everyone, but
-  sending a picture is `phonectl mms` or the D-Bus API. The desktop app needs a file
-  picker (a portal), and the panel has nowhere to pick from.
-- **From the second round of reviews, still to do:**
-  - A newer emergency alert replaces one not yet dismissed; they should queue, the
-    most severe on top. The alert tone is 4 s (the US asks for about 10.5 s).
-  - Serial call audio has no buffer for the two clocks drifting apart over a long
-    call; a ring buffer that drops or pads would.
-  - The jack is still looked at every 5 s; events would be cheaper.
+- **Attaching a picture on the panel.** The desktop app attaches pictures through
+  the file-chooser portal; the panel has nowhere to pick from, so there it is
+  `phonectl mms` or the D-Bus API.
+- **Alert tones outside the US.** The US pattern is the one in 47 CFR 10.520;
+  EU-Alert (ETSI TS 102 900) leaves the pattern to each country, and elsewhere a
+  short tone plays until a country's published pattern is added.

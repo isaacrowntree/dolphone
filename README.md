@@ -171,8 +171,8 @@ and `gdbus` reach as well.
 - **A real call.** Everything is tested against stand-ins; the hardware test in
   [docs/HARDWARE.md](docs/HARDWARE.md) comes first, and with it the Quectel commands
   that only real firmware can confirm.
-- **Sending pictures from the apps**: they show pictures that arrive and reply to
-  groups, but attaching one is `phonectl mms` or the D-Bus API for now.
+- **Sending pictures from the panel**: the desktop app attaches them (through the
+  file-chooser portal); on the panel it is `phonectl mms` or the D-Bus API.
 - **A large-text mode and fonts beyond Latin and Cyrillic** on the panel: both are
   FlipCTL's fonts; names it cannot draw fall back to the number.
 - **News outside Dolphone's apps on the panel** (a status-bar badge, a toast): that

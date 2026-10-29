@@ -1197,7 +1197,7 @@ impl Phone {
         let emergency_alert = from == "+61444444444";
         if emergency_alert {
             tracing::warn!("an Emergency Alert text");
-            self.audio.play(Tone::Alert);
+            self.audio.play_alert(&self.region());
             launch::dialer();
             self.notify.alert("Emergency Alert", &body).await;
         }
@@ -1851,7 +1851,7 @@ impl Phone {
         let info = AlertInfo { id, channel, level: level as u8, text: body.clone(), at: now };
         api::emit_alert_received(&self.session, info).await;
         if level != AlertLevel::Info {
-            self.audio.play(Tone::Alert);
+            self.audio.play_alert(&self.region());
             launch::dialer();
         }
         self.notify.alert(level.label(), &body).await;

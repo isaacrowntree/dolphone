@@ -160,16 +160,19 @@ phonectl contacts import ~/Downloads/contacts.vcf
 phonectl device                                     # which device profile, and why
 ```
 
-`phonectl help` lists the rest. Everything it does is on the D-Bus API, which
-`busctl` and `gdbus` reach as well.
+`phonectl help` lists the rest. For scripts, it exits 0 when done (or waiting
+for the device), 1 when tried and failed, 2 when not allowed, 3 for a bad
+argument or something this phone does not do, 4 over a rate limit, and 5 when
+phoned is not running. Everything it does is on the D-Bus API, which `busctl`
+and `gdbus` reach as well.
 
 ## What is not done
 
 - **A real call.** Everything is tested against stand-ins; the hardware test in
   [docs/HARDWARE.md](HARDWARE.md) comes first, and with it the Quectel commands
   that only real firmware can confirm.
-- **Sending pictures from the apps**: they show pictures that arrive and reply to
-  groups, but attaching one is `phonectl mms` or the D-Bus API for now.
+- **Sending pictures from the panel**: the desktop app attaches them (through the
+  file-chooser portal); on the panel it is `phonectl mms` or the D-Bus API.
 - **A large-text mode and fonts beyond Latin and Cyrillic** on the panel: both are
   FlipCTL's fonts; names it cannot draw fall back to the number.
 - **News outside Dolphone's apps on the panel** (a status-bar badge, a toast): that

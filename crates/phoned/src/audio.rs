@@ -920,20 +920,15 @@ impl Audio {
         self.s.progress.stop();
     }
 
-    /// Play a tone once, in the background. An alert plays whatever the ringer says;
-    /// that is what an emergency alert is for. `Tone::Alert` here is the attention
-    /// signal for no country in particular; play_alert has the country's own.
+    /// Play a tone once, in the background.
     pub fn play(&self, tone: Tone) {
         let Some(file) = tone_file(tone) else { return };
-        let role = if matches!(tone, Tone::Alert) { "Alarm" } else { "Notification" };
-        play_once(role, file);
+        play_once("Notification", file);
     }
 
-    /// Sound an emergency alert's attention signal as `region` (ISO 3166 alpha-2)
-    /// has it: in the United States the 10.5 s pattern of 47 CFR 10.520 (see
+    /// Sound an emergency alert's attention signal, whatever the ringer says (that is
+    /// what an emergency alert is for), as `region` (ISO 3166 alpha-2) has it: in the United States the 10.5 s pattern of 47 CFR 10.520 (see
     /// phone_core::tones::alert_attention), elsewhere four short bursts.
-    // Until phone.rs's two alert call sites use it in place of play(Tone::Alert).
-    #[allow(dead_code)]
     pub fn play_alert(&self, region: &str) {
         let Some(file) = alert_file(region) else { return };
         play_once("Alarm", file);
@@ -1847,22 +1842,15 @@ pub enum Tone {
     Waiting,
     /// A text arrived.
     Text,
-    /// An emergency alert: the attention signal alert systems use (853 + 960 Hz),
-    /// as no country in particular has it (see Audio::play_alert).
-    Alert,
 }
 
 /// The tone as a WAV in the runtime directory, written on first use.
 fn tone_file(tone: Tone) -> Option<PathBuf> {
-    if matches!(tone, Tone::Alert) {
-        return alert_file("");
-    }
     let dir = runtime_dir()?;
     let path = dir.join(match tone {
         Tone::Ring => "ring.wav",
         Tone::Waiting => "waiting.wav",
         Tone::Text => "text.wav",
-        Tone::Alert => "alert.wav",
     });
     if !path.exists() {
         std::fs::write(&path, wav(&synth(tone))).ok()?;
@@ -1904,7 +1892,6 @@ fn synth(tone: Tone) -> Vec<i16> {
             burst(ms(60), &[0.0], 0.0);
             burst(ms(140), &[1760.0], 0.45);
         }
-        Tone::Alert => return synth_cadence(tones::alert_attention(""), 1, 0.9),
     }
     out
 }
@@ -2187,7 +2174,7 @@ mod tests {
     fn alerts_have_their_length() {
         let us = synth_cadence(tones::alert_attention("US"), 1, 0.9);
         assert_eq!(us.len(), RATE as usize * 21 / 2, "47 CFR 10.520: 10.5 s");
-        let other = synth(Tone::Alert);
+        let other = synth_cadence(tones::alert_attention(""), 1, 0.9);
         assert_eq!(other.len(), RATE as usize * 42 / 10);
         assert!(other.iter().any(|&s| s > i16::MAX / 2), "loud: it is an alarm");
     }
