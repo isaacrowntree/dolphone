@@ -8,7 +8,7 @@
 //!
 //! A front end is recognised by the executable behind its connection, by full
 //! path: `/usr/bin/dolphone-*` owned by root (the Debian package), or the same name
-//! inside an AppImage's mount or extraction (the panel apps, from `~/Apps`). This is
+//! inside an AppImage's FUSE mount (the panel apps, from `~/Apps`). This is
 //! a speed bump, not a wall: code running as the same user can still read the store
 //! file, ptrace the apps or call ModemManager itself. What it stops is the common
 //! case, a script or tool doing it quietly, and SECURITY.md says so.
@@ -54,6 +54,10 @@ pub fn is_front_end(exe: &Path) -> bool {
 
 /// The same, with the trust_appimages setting given rather than read.
 fn front_end_with(exe: &Path, trust_appimages: bool) -> bool {
+    front_end_where(exe, trust_appimages, fuse_mount)
+}
+
+fn front_end_where(exe: &Path, trust_appimages: bool, is_fuse_mount: impl Fn(&Path) -> bool) -> bool {
     let Some(name) = exe.file_name().and_then(|n| n.to_str()) else { return false };
     if !FRONT_ENDS.contains(&name) {
         return false;
@@ -69,16 +73,28 @@ fn front_end_with(exe: &Path, trust_appimages: bool) -> bool {
     if !trust_appimages {
         return false;
     }
-    // An AppImage runs from its squashfs, mounted at /tmp/.mount_<random>, or from a
-    // directory it was extracted to when FUSE is missing.
-    let in_mount = dir.ancestors().any(|a| a.file_name().is_some_and(|n| n.to_string_lossy().starts_with(".mount_")));
-    let extracted = dir.ancestors().any(|a| {
-        a.file_name().is_some_and(|n| {
-            let n = n.to_string_lossy();
-            n.starts_with("appimage_extracted_") || n == "squashfs-root"
-        })
-    });
-    in_mount || extracted
+    // An AppImage runs from its squashfs, which its runtime mounts with FUSE at
+    // $TMPDIR/.mount_<random>. The directory must really be that mount: a plain
+    // directory of that name is one mkdir away for any program. (Extracted
+    // AppImages, squashfs-root and the like, are plain directories, so they do not
+    // count.) A program that mounts a FUSE filesystem of its own still gets past
+    // this; SECURITY.md says so.
+    dir.ancestors().any(|a| {
+        a.file_name().is_some_and(|n| n.to_string_lossy().starts_with(".mount_")) && is_fuse_mount(a)
+    })
+}
+
+/// Whether `dir` is a mount point of a FUSE filesystem, from /proc/self/mountinfo
+/// (proc(5): the mount point is the fifth field, the type follows " - ").
+fn fuse_mount(dir: &Path) -> bool {
+    let Ok(info) = std::fs::read_to_string("/proc/self/mountinfo") else { return false };
+    let want = dir.to_string_lossy();
+    info.lines().any(|l| {
+        let (fields, rest) = l.split_once(" - ").unwrap_or((l, ""));
+        // Spaces in a mount point are written \040.
+        let point = fields.split(' ').nth(4).map(|p| p.replace("\\040", " "));
+        point.as_deref() == Some(&*want) && rest.split(' ').next().is_some_and(|t| t.starts_with("fuse"))
+    })
 }
 
 /// A program installed with the system: under /usr and owned by root.
@@ -161,21 +177,33 @@ mod tests {
 
     #[test]
     fn front_ends_by_path() {
-        assert!(is_front_end(Path::new("/tmp/.mount_dolphoXYZ/usr/bin/dolphone-dialer")));
-        assert!(is_front_end(Path::new("/tmp/appimage_extracted_ab12/usr/bin/dolphone-messages")));
-        assert!(!is_front_end(Path::new("/home/me/dolphone-dialer")), "a copy in home is not ours");
-        assert!(!is_front_end(Path::new("/home/me/usr/bin/dolphone-dialer")));
-        assert!(!is_front_end(Path::new("/tmp/.mount_x/usr/bin/python3")));
-        // /usr/bin must be root-owned; a missing file is not.
-        assert!(!is_front_end(Path::new("/usr/bin/dolphone-nonexistent")));
+        let mounted = |d: &Path| d.starts_with("/tmp") && d.to_string_lossy().contains(".mount_");
+        let at = |p: &str| super::front_end_where(Path::new(p), true, mounted);
+        assert!(at("/tmp/.mount_dolphoXYZ/usr/bin/dolphone-dialer"));
+        assert!(!at("/tmp/appimage_extracted_ab12/usr/bin/dolphone-messages"), "extracted is a plain directory");
+        assert!(!at("/home/me/dolphone-dialer"), "a copy in home is not ours");
+        assert!(!at("/home/me/usr/bin/dolphone-dialer"));
+        assert!(!at("/tmp/.mount_x/usr/bin/python3"), "only our names");
+        // /usr/bin must be root-owned; a file that is not there is not.
+        assert!(!is_front_end(Path::new("/usr/bin/dolphone-dialer-missing")));
+    }
+
+    #[test]
+    fn an_appimage_must_be_a_real_mount() {
+        let mount = Path::new("/tmp/.mount_dolphoXYZ/usr/bin/dolphone-dialer");
+        assert!(super::front_end_where(mount, true, |d| d == Path::new("/tmp/.mount_dolphoXYZ")));
+        assert!(!super::front_end_where(mount, true, |_| false), "a directory named like a mount is not one");
+        let home = Path::new("/home/me/squashfs-root/usr/bin/dolphone-dialer");
+        assert!(!super::front_end_where(home, true, |_| true), "extracted AppImages are plain directories");
     }
 
     #[test]
     fn appimages_can_be_left_untrusted() {
         // The setting is given, not set: the global it lives in is shared with
-        // the test above, which runs alongside.
+        // the tests alongside.
         let mount = Path::new("/tmp/.mount_dolphoXYZ/usr/bin/dolphone-dialer");
-        assert!(!super::front_end_with(mount, false), "with AppImages off, only /usr/bin counts");
-        assert!(super::front_end_with(mount, true));
+        let mounted = |_: &Path| true;
+        assert!(!super::front_end_where(mount, false, mounted), "with AppImages off, only /usr/bin counts");
+        assert!(super::front_end_where(mount, true, mounted));
     }
 }

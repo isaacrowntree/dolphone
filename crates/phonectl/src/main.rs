@@ -228,10 +228,14 @@ async fn run(conn: &zbus::Connection, w: &[&str], json: bool) -> Result<()> {
                 print_steps(&steps, json);
             }
         }
-        ["send", "--wait", rest @ ..] => {
-            let (secs, rest) = match rest {
-                [n, more @ ..] if n.parse::<u64>().is_ok() && more.len() >= 2 => (n.parse()?, more),
-                _ => (60, rest),
+        ["send", flag, rest @ ..] if *flag == "--wait" || flag.starts_with("--wait=") => {
+            // Seconds come as --wait=N, or as a short plain number after --wait: a
+            // phone number (0491…, +61…) is never read as a timeout.
+            let short = |n: &str| n.len() <= 5 && !n.starts_with(['0', '+']) && n.parse::<u64>().is_ok();
+            let (secs, rest) = match (flag.strip_prefix("--wait="), rest) {
+                (Some(n), rest) => (n.parse().context("--wait=<seconds>")?, rest),
+                (None, [n, more @ ..]) if short(n) && more.len() >= 2 => (n.parse()?, more),
+                (None, rest) => (60, rest),
             };
             let [to, text @ ..] = rest else { bail!("send --wait [seconds] <to> <text...>") };
             if text.is_empty() {
@@ -680,17 +684,20 @@ async fn send_and_wait(conn: &zbus::Connection, to: &str, text: &str, secs: u64,
             let a = s.args()?;
             if a.id == placed.pending {
                 if !a.confirmed {
-                    bail!("denied on the device");
+                    bail!("not sent: denied on the device, expired, or refused (phonectl audit, from the device)");
                 }
                 break;
             }
         }
-        // Confirmed: the text is stored and announced, then sent.
+        // Allowed: the text was stored and announced before that. Ours is the one to
+        // this number (the announcements carry no text to match on).
+        let region = SettingsProxy::new(conn).await?.get("region").await.unwrap_or_default();
+        let peer = phone_core::number::canonical_peer(to, if region.is_empty() { "AU" } else { &region });
         loop {
             let s =
                 tokio::time::timeout_at(deadline, added.next()).await.context("timed out")?.context("bus closed")?;
             let m = s.args()?.message;
-            if m.direction == 1 {
+            if m.direction == 1 && phone_core::number::same_party(&m.peer, &peer) {
                 id = m.id;
                 break;
             }
@@ -711,14 +718,12 @@ async fn send_and_wait(conn: &zbus::Connection, to: &str, text: &str, secs: u64,
                 }
                 return Ok(());
             }
-            MessageState::Failed => bail!("sending failed (phonectl retry {id})"),
+            MessageState::Failed => bail!("sending failed (Messages can send it again)"),
             _ => {}
         }
     }
 }
 
-/// Wait for a one-time code. Reading the code needs a read grant, as reading any
-/// text does.
 /// A setting: at once for Dolphone's own apps, otherwise waiting for a press on
 /// the device.
 async fn set_setting(conn: &zbus::Connection, key: &str, value: &str, json: bool) -> Result<()> {
@@ -737,6 +742,8 @@ async fn set_setting(conn: &zbus::Connection, key: &str, value: &str, json: bool
 /// connecting is the one asked for.
 static STARTED: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
 
+/// Wait for a one-time code. Reading the code needs a read grant, as reading any
+/// text does.
 async fn otp(conn: &zbus::Connection, w: &[&str], region: &str, json: bool) -> Result<()> {
     let mut from = None;
     let mut secs = 60u64;

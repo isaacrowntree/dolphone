@@ -22,14 +22,22 @@ pub fn dialer() {
         tracing::debug!("no Dialer bundle in ~/Apps");
         return;
     };
-    match Command::new("flipctl").arg("open").arg(&bundle).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
-        Ok(mut child) => {
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
+    std::thread::spawn(move || {
+        // flipctl open: 0 on the panel, 1 refused, 2 nothing listening (flipctl
+        // restarting). A ring must reach the screen, so try once more after a pause.
+        for attempt in 0..2 {
+            let run = Command::new("flipctl").arg("open").arg(&bundle).stdout(Stdio::null()).stderr(Stdio::null()).status();
+            match run.map(|s| s.code()) {
+                Ok(Some(0)) => return,
+                Ok(code) if attempt == 0 => {
+                    tracing::warn!(?code, "flipctl open did not bring the Dialer up; trying again");
+                    std::thread::sleep(Duration::from_secs(2));
+                }
+                Ok(code) => tracing::warn!(?code, "flipctl open did not bring the Dialer up"),
+                Err(e) => return tracing::debug!("flipctl open: {e}"),
+            }
         }
-        Err(e) => tracing::debug!("flipctl open: {e}"),
-    }
+    });
 }
 
 /// Start the desktop app with arguments, when it is installed.

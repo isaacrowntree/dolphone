@@ -68,11 +68,24 @@ pub struct Phone {
     pub sip_changed: Arc<tokio::sync::Notify>,
     /// Whether the SIP call's microphone is muted, as baresip has it (its mute
     /// command toggles).
-    sip_muted: std::sync::Mutex<bool>,
+    sip_muted: Mutex<bool>,
     /// Laptops paired over KDE Connect.
     pub kdeconnect: crate::kdeconnect::KdeConnect,
     /// The device profile in use, and why it was chosen.
     pub device: std::sync::Mutex<(crate::devices::Profile, String)>,
+    /// The contacts, read once and again only when their directory changes: a
+    /// ringing call or an arriving text should not wait on reading every card.
+    book: std::sync::Mutex<Option<BookCache>>,
+    /// Held while the modem's status is read, so reads do not overlap.
+    refreshing: Mutex<()>,
+}
+
+/// The contacts as last read: for which region, and the directory's modification
+/// time then (files are replaced by rename, which changes it).
+struct BookCache {
+    region: String,
+    mtime: Option<std::time::SystemTime>,
+    book: Arc<phone_core::contacts::Book>,
 }
 
 pub struct State {
@@ -87,6 +100,16 @@ pub struct State {
     grant_limits: HashMap<i64, RateLimit>,
     pub status: ModemStatus,
     pub muted: bool,
+    /// Calls just ended, by ModemManager path, for a minute: a late signal or a
+    /// resync for one of them must not log it again as missed.
+    finished: HashMap<OwnedObjectPath, Instant>,
+    /// baresip's events for a SIP call not tracked yet, by its id, for a while.
+    sip_early: HashMap<String, (Instant, Vec<sip::CallEvent>)>,
+    /// Texts over SIP come from anyone who can reach baresip: a limit on them.
+    sip_text_limit: RateLimit,
+    /// Texts being read now, by path: the same text reported twice (a resync while
+    /// a multipart one is still arriving) is handled once.
+    texts_in_flight: std::collections::HashSet<OwnedObjectPath>,
 }
 
 /// A call phoned is tracking, and how it is going.
@@ -145,6 +168,10 @@ impl Phone {
                 grant_limits: HashMap::new(),
                 status: no_modem(),
                 muted: false,
+                finished: HashMap::new(),
+                sip_early: HashMap::new(),
+                sip_text_limit: RateLimit::new(30, 3600),
+                texts_in_flight: Default::default(),
             }),
             audio,
             device: std::sync::Mutex::new((profile, why)),
@@ -153,7 +180,9 @@ impl Phone {
             media: Media::default(),
             sim_network: std::sync::Mutex::new(String::new()),
             sip_changed: Arc::new(tokio::sync::Notify::new()),
-            sip_muted: std::sync::Mutex::new(false),
+            sip_muted: Mutex::new(false),
+            book: std::sync::Mutex::new(None),
+            refreshing: Mutex::new(()),
         })
     }
 
@@ -318,18 +347,32 @@ impl Phone {
     }
 
     async fn watch_call(self: Arc<Self>, id: u32, path: OwnedObjectPath) {
-        let Ok(call) = mm::CallProxy::builder(&self.system).path(path.clone()).build().await else { return };
-        let Ok(mut changes) = call.receive_call_state_changed().await else { return };
+        if !self.follow_call(id, &path).await {
+            // The call can no longer be followed (its object is gone, or the bus
+            // dropped): a call left in the list would hold the board awake and
+            // make every later call "waiting" instead of ringing.
+            tracing::warn!(id, "lost track of a call; ending it here");
+            self.finish(id, Some(Outcome::Failed)).await;
+        }
+    }
+
+    /// Follow one call's states. True when it ended normally.
+    async fn follow_call(self: &Arc<Self>, id: u32, path: &OwnedObjectPath) -> bool {
+        let Ok(call) = mm::CallProxy::builder(&self.system).path(path.clone()).build().await else { return false };
+        let Ok(mut changes) = call.receive_call_state_changed().await else { return false };
         // The state may have moved between creating the proxy and subscribing.
         if let Ok(now) = call.state().await {
-            self.on_state(id, now, 0, &call).await;
+            if !self.on_state(id, now, 0, &call).await {
+                return true;
+            }
         }
         while let Some(sig) = changes.next().await {
             let Ok(args) = sig.args() else { continue };
             if !self.on_state(id, args.new, args.reason, &call).await {
-                break;
+                return true;
             }
         }
+        false
     }
 
     /// Apply a ModemManager call state. Returns false once the call is over.
@@ -383,9 +426,17 @@ impl Phone {
             if was == new || (was == CallState::Waiting && new == CallState::RingingIn) {
                 return true;
             }
+            // A connected call never goes back to ringing or dialling: a late or
+            // replayed progress event (SIP's 180 after its 200) must not undo it.
+            if matches!(was, CallState::Active | CallState::Held)
+                && matches!(new, CallState::Dialing | CallState::RingingOut | CallState::RingingIn)
+            {
+                return true;
+            }
             live.info.state = new as u8;
             let became_active = new == CallState::Active && live.info.connected_at == 0;
-            if became_active {
+            // A call first seen on hold (adopted after a restart) was connected.
+            if (became_active || new == CallState::Held) && live.info.connected_at == 0 {
                 live.info.connected_at = phone_core::now();
                 live.connected = Some(Instant::now());
             }
@@ -427,6 +478,8 @@ impl Phone {
         let (live, others_active, any_ringing, none_left) = {
             let mut st = self.state.lock().await;
             let Some(live) = st.calls.remove(&id) else { return };
+            st.finished.retain(|_, at| at.elapsed() < Duration::from_secs(60));
+            st.finished.insert(live.mm_path.clone(), Instant::now());
             let others = st.calls.values().any(|c| CallState::from_u8(c.info.state) == CallState::Active);
             let ringing = st.calls.values().any(|c| CallState::from_u8(c.info.state).ringing_in());
             (live, others, ringing, st.calls.is_empty())
@@ -487,14 +540,17 @@ impl Phone {
             // Outgoing. Usually dial() is tracking it already; if phoned restarted
             // mid-call, adopt it so it stays on screen with its audio.
             let tracked = self.state.lock().await.calls.values().any(|c| c.mm_path == path);
-            if !tracked && mm_state != mcs::TERMINATED {
-                if let Some(state) = call_state_of(mm_state) {
-                    let num = number::canonical(&call.number().await.unwrap_or_default(), &self.region());
-                    tracing::info!("adopting an outgoing call phoned was not watching");
-                    self.track(&path, &num, Direction::Outgoing, state, false, None).await;
-                }
+            if !tracked && mm_state != mcs::TERMINATED && call_state_of(mm_state).is_some() {
+                let num = number::canonical(&call.number().await.unwrap_or_default(), &self.region());
+                tracing::info!("adopting an outgoing call phoned was not watching");
+                // As dialling: its watcher then applies the real state, which starts
+                // the audio and the clock as for any call that connects.
+                self.track(&path, &num, Direction::Outgoing, CallState::Dialing, false, None).await;
             }
             return;
+        }
+        if self.state.lock().await.finished.contains_key(&path) {
+            return; // Ours, just ended and logged.
         }
         if call.state().await.unwrap_or(mcs::TERMINATED) == mcs::TERMINATED {
             // A call that rang and ended while phoned was not watching (restarting,
@@ -530,11 +586,10 @@ impl Phone {
             return;
         }
         if matches!(mm_state, mcs::ACTIVE | mcs::HELD) {
-            // Already answered before phoned saw it (a restart mid-call): adopt it.
-            if let Some(state) = call_state_of(mm_state) {
-                tracing::info!("adopting a live incoming call phoned was not watching");
-                self.track(&path, &num, Direction::Incoming, state, false, None).await;
-            }
+            // Already answered before phoned saw it (a restart mid-call): adopt it
+            // as dialling, so its watcher's first state starts audio and the clock.
+            tracing::info!("adopting a live incoming call phoned was not watching");
+            self.track(&path, &num, Direction::Incoming, CallState::Dialing, false, None).await;
             return;
         }
         // A call during another is waiting, whichever network the other is on (the
@@ -561,10 +616,22 @@ impl Phone {
             return;
         }
         let ringer = self.setting(("ringer", "ring"));
-        self.media.pause_all(&self.session).await;
+        // Ring first, then pause the music: a slow player must not delay the ring.
+        // The caller may have hung up already (finish ran while this was tracking);
+        // then there is nothing to ring for.
+        if !self.state.lock().await.calls.contains_key(&id) {
+            return;
+        }
         // A waiting call beeps in the ear rather than ringing the room. The Dialer
         // vibrates the motor; it reads the same settings.
         self.audio.start_ringing(&ringer, state == CallState::Waiting);
+        self.media.pause_all(&self.session).await;
+        if !self.state.lock().await.calls.contains_key(&id) {
+            // Ended while the music paused: finish has already stopped the ringer
+            // and resumed the music, or will.
+            self.stop_ringing_if_idle().await;
+            return;
+        }
         if self.flag(phone_api::keys::FLASH_ON_RING) {
             crate::leds::flash(&self.ring_leds());
         }
@@ -911,15 +978,19 @@ impl Phone {
         let Ok(sms) = mm::SmsProxy::builder(&self.system).path(path.clone()).build().await else { return };
         let mut changes = sms.receive_delivery_state_changed().await;
         let wait = async {
-            if sms.delivery_state().await.is_ok_and(|d| d == 0) {
+            if sms.delivery_state().await.is_ok_and(|d| d <= 2) {
                 return true;
             }
             while let Some(c) = changes.next().await {
                 match c.get().await {
-                    Ok(0) => return true,
-                    // 0x100 is "not known yet"; anything else under 0x100 is a
-                    // completed state other than delivered, so stop waiting.
-                    Ok(d) if d < 0x100 => return false,
+                    // 0x00 delivered, 0x01 forwarded (not confirmed) and 0x02 replaced
+                    // by the service centre all mean it arrived (TS 23.040 §9.2.3.15).
+                    Ok(0..=2) => return true,
+                    // 0x20-0x2F: a temporary error, and the centre is still trying:
+                    // keep waiting for its next report. 0x100 is "not known yet".
+                    Ok(0x20..=0x2F) | Ok(0x100..) => {}
+                    // Anything else is final, and not delivered.
+                    Ok(_) => return false,
                     _ => {}
                 }
             }
@@ -966,13 +1037,34 @@ impl Phone {
 
     /// Whether a number belongs to a contact.
     pub fn contact_for(&self, num: &str) -> bool {
+        self.book().lookup(num).is_some()
+    }
+
+    /// The contacts, from the cache unless the directory or the region changed.
+    pub fn book(&self) -> Arc<phone_core::contacts::Book> {
         let region = self.region();
-        phone_core::contacts::Book::load(&phone_core::store::contacts_dir(), &region).lookup(num).is_some()
+        let dir = phone_core::store::contacts_dir();
+        let mtime = std::fs::metadata(&dir).and_then(|m| m.modified()).ok();
+        let mut cache = self.book.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(c) = cache.as_ref().filter(|c| c.region == region && c.mtime == mtime && mtime.is_some()) {
+            return c.book.clone();
+        }
+        let book = Arc::new(phone_core::contacts::Book::load(&dir, &region));
+        *cache = Some(BookCache { region, mtime, book: book.clone() });
+        book
     }
 
     /// A text the modem has, from the network. Waits for a multipart message to
     /// finish arriving before reading it.
     pub async fn received(self: &Arc<Self>, path: OwnedObjectPath) {
+        if !self.state.lock().await.texts_in_flight.insert(path.clone()) {
+            return; // Already being read: one copy, one notification, one reply.
+        }
+        self.received_once(path.clone()).await;
+        self.state.lock().await.texts_in_flight.remove(&path);
+    }
+
+    async fn received_once(self: &Arc<Self>, path: OwnedObjectPath) {
         let Ok(sms) = mm::SmsProxy::builder(&self.system).path(path.clone()).build().await else { return };
         let modem = self.state.lock().await.modem.clone();
         let forget = |phone: Arc<Self>, modem: Option<mm::Found>, path: OwnedObjectPath| async move {
@@ -1066,11 +1158,13 @@ impl Phone {
 
     // Confirmations
 
-    async fn park(&self, kind: &str, target: &str, body: &str, caller: &Caller, reason: &str) -> u32 {
+    async fn park(self: &Arc<Self>, kind: &str, target: &str, body: &str, caller: &Caller, reason: &str) -> u32 {
         let request;
         {
             let mut st = self.state.lock().await;
-            let now = phone_core::now();
+            // The monotonic clock: a wall clock set back must not keep a request
+            // alive for longer than its two minutes.
+            let now = mono();
             st.requests.retain(|_, p| now - p.created < REQUEST_TTL);
             let id = st.next_request;
             st.next_request += 1;
@@ -1090,12 +1184,26 @@ impl Phone {
         // and the desktop, when there is one.
         launch::dialer();
         self.notify.confirmation(&request, &self.name_for(target)).await;
+        // When it expires unanswered, say so: a script waiting on it learns it
+        // was not allowed, and the screens stop showing it.
+        let me = self.clone();
+        let id = request.id;
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(REQUEST_TTL as u64 + 1)).await;
+            let gone = me.state.lock().await.requests.remove(&id);
+            if let Some(p) = gone {
+                let who = Caller { name: p.request.requester.clone(), trusted: false, reader: false };
+                me.audit(&who, &p.request.kind, &p.request.target, "expired");
+                api::emit_resolved(&me.session, id, false).await;
+                me.notify.withdraw_request(id).await;
+            }
+        });
         request.id
     }
 
     pub async fn pending(&self) -> Vec<Request> {
         let mut st = self.state.lock().await;
-        let now = phone_core::now();
+        let now = mono();
         st.requests.retain(|_, p| now - p.created < REQUEST_TTL);
         st.requests.values().map(|p| p.request.clone()).collect()
     }
@@ -1106,13 +1214,14 @@ impl Phone {
         }
         let pending = {
             let mut st = self.state.lock().await;
-            st.requests.remove(&id)
+            st.requests.remove(&id).filter(|p| mono() - p.created < REQUEST_TTL)
         }
         .ok_or_else(|| zbus::fdo::Error::InvalidArgs("no such request (it may have expired)".into()))?;
-        api::emit_resolved(&self.session, id, true).await;
         self.notify.withdraw_request(id).await;
         let as_requester = Caller { name: pending.request.requester.clone(), trusted: false, reader: false };
-        match pending.request.kind.as_str() {
+        // Resolved goes out once the action has run, saying whether it worked, so a
+        // script waiting on its request learns the outcome, not just the press.
+        let r = match pending.request.kind.as_str() {
             "call" => self.dial(&pending.request.target, &as_requester, true).await,
             "sms" => match &pending.mms {
                 Some((body, files)) => {
@@ -1181,7 +1290,9 @@ impl Phone {
                 Ok(Placed { id: 1, pending: 0 })
             }
             _ => Err(zbus::fdo::Error::Failed("unknown request kind".into())),
-        }
+        };
+        api::emit_resolved(&self.session, id, r.is_ok()).await;
+        r
     }
 
     pub async fn deny(&self, id: u32) -> zbus::fdo::Result<()> {
@@ -1193,26 +1304,27 @@ impl Phone {
             let who = Caller { name: p.request.requester.clone(), trusted: false, reader: false };
             self.audit(&who, &p.request.kind, &p.request.target, "denied");
         }
-        if removed.is_some() {
-            api::emit_resolved(&self.session, id, false).await;
-            self.notify.withdraw_request(id).await;
+        if removed.is_none() {
+            return Err(zbus::fdo::Error::InvalidArgs("no such request (it may have expired)".into()));
         }
+        api::emit_resolved(&self.session, id, false).await;
+        self.notify.withdraw_request(id).await;
         Ok(())
     }
 
     /// A change to the address book from outside, held for a press. `what` is
     /// what the owner reads ("add Alex Example"); `op` the change, as JSON.
-    pub async fn park_contact(&self, what: &str, op: &str, caller: &Caller) -> Placed {
+    pub async fn park_contact(self: &Arc<Self>, what: &str, op: &str, caller: &Caller) -> Placed {
         Placed { id: 0, pending: self.park("contact", what, op, caller, "contact").await }
     }
 
     /// A laptop asks to pair over KDE Connect: the owner decides, on the device.
-    pub async fn park_kdeconnect_pair(&self, device: &str, name: &str) {
+    pub async fn park_kdeconnect_pair(self: &Arc<Self>, device: &str, name: &str) {
         let who = Caller { name: format!("KDE Connect: {name}"), trusted: false, reader: false };
         self.park("kdeconnect", device, name, &who, "pair").await;
     }
 
-    pub async fn request_wipe(&self, caller: &Caller) -> Placed {
+    pub async fn request_wipe(self: &Arc<Self>, caller: &Caller) -> Placed {
         Placed { id: 0, pending: self.park("wipe", "", "", caller, "wipe").await }
     }
 
@@ -1230,6 +1342,9 @@ impl Phone {
     // Modem
 
     pub async fn refresh_status(self: &Arc<Self>) {
+        // One at a time: an older look finishing after a newer one would put back
+        // what the newer one saw changed.
+        let _one = self.refreshing.lock().await;
         let found = match mm::lookup(&self.system).await {
             Ok(f) => f,
             Err(e) => {
@@ -1261,7 +1376,16 @@ impl Phone {
             // gets the owner's network settings.
             let could = st.modem.as_ref().is_some_and(|m| m.voice || m.messaging);
             let can = found.as_ref().is_some_and(|m| m.voice || m.messaging);
-            let appeared = (can && !could).then(|| found.clone()).flatten();
+            // Also when alerts or texts become possible (after the SIM PIN: Voice
+            // can be there while the SIM is locked, for emergency calls), and for a
+            // ModemManager that restarted, which forgot what it was told.
+            let gained = match (st.modem.as_ref(), found.as_ref()) {
+                (Some(old), Some(new)) => {
+                    (new.broadcast && !old.broadcast) || (new.messaging && !old.messaging) || new.owner != old.owner
+                }
+                _ => false,
+            };
+            let appeared = ((can && !could) || gained).then(|| found.clone()).flatten();
             st.modem = found;
             let changed = st.status != status;
             st.status = status.clone();
@@ -1378,7 +1502,7 @@ impl Phone {
     }
 
     /// An outside program asks to change the modem's setup: the owner decides.
-    pub async fn request_modem_setup(&self, caller: &Caller) -> Placed {
+    pub async fn request_modem_setup(self: &Arc<Self>, caller: &Caller) -> Placed {
         Placed { id: 0, pending: self.park("modem", "", "", caller, "modem").await }
     }
 
@@ -1567,9 +1691,16 @@ impl Phone {
             return forget().await;
         }
         let now = phone_core::now();
-        // A rebroadcast of an alert already shown is stored once and shown once.
-        let Some(Some(id)) = self.with_store(|s| s.add_alert(channel, level as u8, &body, now, serial)) else {
-            return forget().await;
+        // A rebroadcast of an alert already shown is stored once and shown once. An
+        // alert that cannot be stored (a full disk) is still shown and sounded: it
+        // matters more than the record of it.
+        let id = match self.with_store(|s| s.add_alert(channel, level as u8, &body, now, serial)) {
+            Some(Some(id)) => id,
+            Some(None) => return forget().await,
+            None => {
+                tracing::error!(channel, "an emergency alert could not be stored; showing it anyway");
+                0
+            }
         };
         tracing::warn!(channel, level = level.label(), "emergency alert");
         let info = AlertInfo { id, channel, level: level as u8, text: body.clone(), at: now };
@@ -1594,7 +1725,7 @@ impl Phone {
     /// long and how often, and confirms on the device. Premium, short and emergency
     /// numbers can never be granted.
     pub async fn request_grant(
-        &self,
+        self: &Arc<Self>,
         numbers: &str,
         per_hour: u32,
         days: u32,
@@ -1667,6 +1798,21 @@ impl Phone {
     pub fn stop_ringing(&self) {
         self.audio.stop_ringing();
         crate::leds::stop(&self.ring_leds());
+    }
+
+    /// Stop the ringer and give the music back when no call needs them any more:
+    /// for a ring that raced its call's end.
+    async fn stop_ringing_if_idle(self: &Arc<Self>) {
+        let (ringing, none) = {
+            let st = self.state.lock().await;
+            (st.calls.values().any(|c| CallState::from_u8(c.info.state).ringing_in()), st.calls.is_empty())
+        };
+        if !ringing {
+            self.stop_ringing();
+        }
+        if none {
+            self.media.resume(&self.session).await;
+        }
     }
 
     /// The LEDs this machine flashes for a ringing call.
@@ -1753,9 +1899,14 @@ impl Phone {
                 Direction::Outgoing,
                 CallState::Dialing,
                 false,
-                Some(sid),
+                Some(sid.clone()),
             )
             .await;
+        // Whatever baresip said about the call before it was tracked.
+        let early = self.state.lock().await.sip_early.remove(&sid).map(|(_, v)| v).unwrap_or_default();
+        for e in early {
+            self.sip_event(e).await;
+        }
         self.media.pause_all(&self.session).await;
         tracing::info!(id, "dialling over SIP");
         Ok(Placed { id: i64::from(id), pending: 0 })
@@ -1766,7 +1917,19 @@ impl Phone {
         if e.id.is_empty() {
             return;
         }
-        let id = self.state.lock().await.calls.iter().find(|(_, c)| c.sip.as_deref() == Some(&e.id)).map(|(i, _)| *i);
+        let id = {
+            let mut st = self.state.lock().await;
+            let id = st.calls.iter().find(|(_, c)| c.sip.as_deref() == Some(&e.id)).map(|(i, _)| *i);
+            if id.is_none() && matches!(e.kind.as_str(), "CALL_RINGING" | "CALL_PROGRESS" | "CALL_ESTABLISHED" | "CALL_CLOSED")
+            {
+                // About a call dial_sip has not tracked yet (baresip answered its
+                // dial command after sending this): kept for it to replay.
+                st.sip_early.retain(|_, (at, _)| at.elapsed() < Duration::from_secs(30));
+                st.sip_early.entry(e.id.clone()).or_insert_with(|| (Instant::now(), Vec::new())).1.push(e);
+                return;
+            }
+            id
+        };
         match (e.kind.as_str(), id) {
             ("CALL_INCOMING", None) => self.sip_incoming(e).await,
             ("CALL_RINGING" | "CALL_PROGRESS", Some(id)) => {
@@ -1783,7 +1946,11 @@ impl Phone {
     }
 
     async fn sip_incoming(self: &Arc<Self>, e: sip::CallEvent) {
-        let raw = sip::number_of(&e.peer);
+        let raw = sip::number_from(
+            &e.peer,
+            &self.setting(phone_api::keys::SIP_ACCOUNT),
+            &self.setting(phone_api::keys::SIP_PROXY),
+        );
         let num = if raw.starts_with("sip:") {
             text::clean(&raw, text::MAX_SENDER)
         } else {
@@ -1914,7 +2081,12 @@ impl Phone {
         let region = self.region();
         let canon = |n: &str| number::canonical(&text::clean(n, text::MAX_SENDER), &region);
         let sender = canon(&r.sender);
-        let peer = crate::mms::peer_of(&r.sender, &r.recipients, &r.own, canon);
+        // This phone's own number, to leave it out of the thread: mmsd-tng's, or the
+        // modem's when the SIM does not say. Unknown, a message to one recipient
+        // (this phone) is between the sender and us.
+        let own = if r.own.trim().is_empty() { self.state.lock().await.status.own_number.clone() } else { r.own.clone() };
+        let recipients: &[String] = if own.trim().is_empty() && r.recipients.len() <= 1 { &[] } else { &r.recipients };
+        let peer = crate::mms::peer_of(&r.sender, recipients, &own, canon);
         let (text_part, parts) = crate::mms::read_parts(&file, &r.attachments);
         let mut body = text::clean(&text_part, text::MAX_BODY);
         if !r.subject.trim().is_empty() && !body.contains(r.subject.trim()) {
@@ -1934,9 +2106,20 @@ impl Phone {
         else {
             return; // Not stored: mmsd-tng keeps it, and phoned tries again next start.
         };
-        let saved = save_parts(id, parts.iter().map(|(m, b)| (m.as_str(), b.as_slice())));
+        // Without a store that lasts, the parts are not written (they would outlive
+        // the row that names them); mmsd-tng keeps the message for next time.
+        let saved = if crate::storekey::locked() {
+            Vec::new()
+        } else {
+            save_parts(id, parts.iter().map(|(m, b)| (m.as_str(), b.as_slice())))
+        };
         self.with_store(|s| s.set_parts(id, &saved));
-        crate::mms::forget(&self.session, &path).await;
+        // mmsd-tng's copy goes only once every part is safely ours.
+        if saved.len() == parts.len() {
+            crate::mms::forget(&self.session, &path).await;
+        } else {
+            tracing::warn!(saved = saved.len(), of = parts.len(), "not all of an MMS's parts were saved; mmsd-tng keeps it");
+        }
         tracing::info!(from = %number::mask(&sender), parts = saved.len(), "MMS received");
         let shown = if body.is_empty() {
             saved.first().map(|p| format!("[{}]", p.kind())).unwrap_or_default()
@@ -2063,7 +2246,15 @@ impl Phone {
     }
 
     pub async fn sip_text(self: &Arc<Self>, peer: &str, body: &str) {
-        let raw = sip::number_of(peer);
+        let raw = sip::number_from(
+            peer,
+            &self.setting(phone_api::keys::SIP_ACCOUNT),
+            &self.setting(phone_api::keys::SIP_PROXY),
+        );
+        if let Err(wait) = self.state.lock().await.sip_text_limit.take(mono()) {
+            tracing::warn!(wait, "too many texts over SIP; dropping one");
+            return;
+        }
         let from = if raw.starts_with("sip:") {
             text::clean(&raw, text::MAX_SENDER)
         } else {
@@ -2090,7 +2281,9 @@ impl Phone {
         if self.flag(phone_api::keys::TEXT_TONE) && self.setting(("ringer", "ring")) == "ring" {
             self.audio.play(Tone::Text);
         }
-        self.run_rules(&from, &body, at);
+        // No rules: a SIP sender is not authenticated the way a mobile network's
+        // is, and a rule's reply goes out as an SMS on the owner's account.
+        let _ = at;
     }
 
     /// baresip went away: its calls are over.
@@ -2100,9 +2293,7 @@ impl Phone {
         for id in ids {
             self.finish(id, None).await;
         }
-        if let Ok(mut m) = self.sip_muted.lock() {
-            *m = false;
-        }
+        *self.sip_muted.lock().await = false;
     }
 
     /// The audio module's requests for a SIP call.
@@ -2115,11 +2306,11 @@ impl Phone {
                 let _ = self.sip.on_call(&sid, &format!("ausrc pulse,{mic}")).await;
             }
             SipAudio::Mute(m) => {
-                let now = self.sip_muted.lock().map(|x| *x).unwrap_or(false);
-                if now != m && self.sip.on_call(&sid, "mute").await.is_ok() {
-                    if let Ok(mut x) = self.sip_muted.lock() {
-                        *x = m;
-                    }
+                // baresip's mute toggles: read, toggle and record under one lock,
+                // or two requests at once would both toggle and invert it.
+                let mut muted = self.sip_muted.lock().await;
+                if *muted != m && self.sip.on_call(&sid, "mute").await.is_ok() {
+                    *muted = m;
                 }
             }
         }
@@ -2134,7 +2325,7 @@ impl Phone {
 
     pub fn name_for(&self, num: &str) -> String {
         let region = self.region();
-        phone_core::contacts::Book::load(&phone_core::store::contacts_dir(), &region).name_for(num, &region)
+        self.book().name_for(num, &region)
     }
 
     pub fn store_read<T>(&self, f: impl FnOnce(&Store) -> phone_core::store::Result<T>) -> zbus::fdo::Result<T> {
@@ -2236,14 +2427,25 @@ fn save_parts<'a>(id: i64, parts: impl Iterator<Item = (&'a str, &'a [u8])>) -> 
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
+    // A random part in each name: ids start again in a store opened fresh (or in
+    // memory), and must never overwrite a picture another store still points to.
+    let tag = random_hex(4);
     let mut out = Vec::new();
     for (n, (mime, bytes)) in parts.enumerate() {
-        let path = dir.join(format!("{id}-{n}.{}", crate::mms::extension(mime)));
+        let path = dir.join(format!("{id}-{n}-{tag}.{}", crate::mms::extension(mime)));
         if write_file_private(&path, bytes).is_ok() {
             out.push(phone_core::model::Part { mime: mime.to_string(), path: path.display().to_string() });
         }
     }
     out
+}
+
+/// `n` random bytes as hex, from the kernel.
+fn random_hex(n: usize) -> String {
+    use std::io::Read;
+    let mut b = vec![0u8; n];
+    let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b));
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
 /// A file only the owner can read.

@@ -32,6 +32,9 @@ pub trait Login {
 #[derive(Default)]
 pub struct Awake {
     held: Mutex<Option<zbus::wire::OwnedFd>>,
+    /// Bumped by every release, so a hold still waiting for logind when the last
+    /// call ends does not keep the inhibitor it then gets.
+    released: std::sync::atomic::AtomicU64,
 }
 
 impl Awake {
@@ -39,9 +42,14 @@ impl Awake {
         if self.held.lock().map(|h| h.is_some()).unwrap_or(true) {
             return;
         }
+        let before = self.released.load(std::sync::atomic::Ordering::SeqCst);
         let Ok(login) = LoginProxy::new(system).await else { return };
         match login.inhibit("sleep:idle", "Dolphone", "A call is ringing or in progress", "block").await {
             Ok(fd) => {
+                if self.released.load(std::sync::atomic::Ordering::SeqCst) != before {
+                    // The call ended meanwhile: dropping the descriptor lets go.
+                    return;
+                }
                 if let Ok(mut h) = self.held.lock() {
                     *h = Some(fd);
                 }
@@ -52,6 +60,7 @@ impl Awake {
     }
 
     pub fn release(&self) {
+        self.released.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if let Ok(mut h) = self.held.lock() {
             if h.take().is_some() {
                 tracing::debug!("sleep allowed again");

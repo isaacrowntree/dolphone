@@ -168,6 +168,29 @@ fn xml_attr(s: &str) -> String {
 
 pub use crate::paths::{contacts_dir, data_dir, default_path};
 
+/// Whether an open failed because the file is damaged (or not a database at
+/// all), as opposed to the disk being full, the file busy or unreadable: only
+/// then is moving it aside the right thing.
+pub fn is_corrupt(e: &Error) -> bool {
+    use rusqlite::ErrorCode::{DatabaseCorrupt, NotADatabase};
+    matches!(e, Error::Db(rusqlite::Error::SqliteFailure(f, _)) if matches!(f.code, DatabaseCorrupt | NotADatabase))
+}
+
+/// Move a damaged store aside with its write-ahead log and shared memory, so the
+/// copy kept for recovery has its latest commits and a fresh store does not open
+/// against a log that is not its own. Returns where it went.
+pub fn move_aside(path: &Path, stamp: i64) -> std::io::Result<PathBuf> {
+    let aside = path.with_extension(format!("db.broken-{stamp}"));
+    std::fs::rename(path, &aside)?;
+    for side in ["wal", "shm"] {
+        let from = PathBuf::from(format!("{}-{side}", path.display()));
+        if from.exists() {
+            std::fs::rename(&from, format!("{}-{side}", aside.display()))?;
+        }
+    }
+    Ok(aside)
+}
+
 /// Whether a store file is encrypted: a plain SQLite file starts with its format
 /// string, and an SQLCipher one with random bytes.
 pub fn is_encrypted(path: &Path) -> bool {
@@ -302,6 +325,15 @@ impl Store {
             .collect();
         self.db.execute("UPDATE messages SET parts = ?1 WHERE id = ?2", params![encode_parts(&clean), id])?;
         Ok(())
+    }
+
+    /// Texts still "sending" from before phoned last stopped: they never went, or
+    /// nobody saw them go. Marked failed, so they can be sent again.
+    pub fn fail_unsent(&self) -> Result<usize> {
+        Ok(self.db.execute(
+            "UPDATE messages SET state = ?1 WHERE state = ?2",
+            params![MessageState::Failed as u8, MessageState::Sending as u8],
+        )?)
     }
 
     pub fn set_message_state(&self, id: i64, state: MessageState) -> Result<()> {

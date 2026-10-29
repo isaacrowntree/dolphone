@@ -231,6 +231,10 @@ pub use cb::{CbmProxy, CellBroadcastProxy};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Found {
     pub path: OwnedObjectPath,
+    /// ModemManager's connection on the bus. A ModemManager that restarted and
+    /// probed the modem again under the same path is a new owner: the calls the
+    /// old one had are gone.
+    pub owner: String,
     pub voice: bool,
     pub messaging: bool,
     pub ussd: bool,
@@ -248,6 +252,11 @@ pub async fn find(system: &zbus::Connection) -> Option<Found> {
 /// the modem and must not be taken as it leaving: that would end its calls.
 pub async fn lookup(system: &zbus::Connection) -> zbus::Result<Option<Found>> {
     let om = zbus::fdo::ObjectManagerProxy::builder(system).destination(SERVICE).path(ROOT).build().await?;
+    let owner = match zbus::fdo::DBusProxy::new(system).await?.get_name_owner(SERVICE.try_into().expect("name")).await {
+        Ok(o) => o.to_string(),
+        Err(zbus::fdo::Error::NameHasNoOwner(_)) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
     let objects = match om.get_managed_objects().await {
         Ok(o) => o,
         Err(zbus::fdo::Error::ServiceUnknown(_) | zbus::fdo::Error::NameHasNoOwner(_)) => return Ok(None),
@@ -260,6 +269,7 @@ pub async fn lookup(system: &zbus::Connection) -> zbus::Result<Option<Found>> {
             let has = |name: &str| ifaces.keys().any(|k| k.as_str() == name);
             Found {
                 path,
+                owner: owner.clone(),
                 voice: has(iface::VOICE),
                 messaging: has(iface::MESSAGING),
                 ussd: has(iface::USSD),

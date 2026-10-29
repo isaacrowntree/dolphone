@@ -125,6 +125,30 @@ pub fn number_of(uri: &str) -> String {
     }
 }
 
+/// The host of a SIP address, without user, port or parameters.
+pub fn host_of(uri: &str) -> String {
+    let rest = uri.trim_start_matches('<').trim_end_matches('>');
+    let rest = rest.strip_prefix("sip:").or_else(|| rest.strip_prefix("sips:")).unwrap_or(rest);
+    let host = rest.split(';').next().unwrap_or("").rsplit('@').next().unwrap_or("");
+    host.split(':').next().unwrap_or("").to_ascii_lowercase()
+}
+
+/// A peer's number, but only when it comes from the account's own provider (its
+/// domain or proxy): the user part of a From header is whatever the sender wrote,
+/// and anyone who can reach baresip directly could claim a contact's number. From
+/// anywhere else the peer keeps its full SIP address, so it never lands in a
+/// contact's thread or under their name.
+pub fn number_from(uri: &str, account: &str, proxy: &str) -> String {
+    let host = host_of(uri);
+    let ours = !host.is_empty() && (host == host_of(account) || (!proxy.is_empty() && host == host_of(proxy)));
+    let n = number_of(uri);
+    if ours || n.starts_with("sip:") {
+        n
+    } else {
+        format!("sip:{}", uri.trim_start_matches('<').trim_end_matches('>').trim_start_matches("sip:").split(';').next().unwrap_or(""))
+    }
+}
+
 /// What a SIP address dialled from the keypad or a contact should be.
 pub fn uri_for(target: &str, account: &str) -> String {
     if target.starts_with("sip:") || target.starts_with("sips:") {
@@ -310,6 +334,7 @@ impl Sip {
 /// Run baresip while SIP is on, restart it when it stops or the account changes,
 /// and pass its events to the phone. Runs for phoned's lifetime.
 pub async fn run(phone: Arc<Phone>, changed: Arc<tokio::sync::Notify>) {
+    let mut failures: u32 = 0;
     loop {
         let enabled = phone.flag(phone_api::keys::SIP_ENABLED);
         let account = phone.setting(phone_api::keys::SIP_ACCOUNT);
@@ -342,6 +367,7 @@ pub async fn run(phone: Arc<Phone>, changed: Arc<tokio::sync::Notify>) {
                 // one that had been running fine; only one that keeps dying at
                 // once waits below.
                 if settings_changed || started.elapsed() > Duration::from_secs(30) {
+                    failures = 0;
                     continue;
                 }
             }
@@ -351,8 +377,10 @@ pub async fn run(phone: Arc<Phone>, changed: Arc<tokio::sync::Notify>) {
                 phone.status_changed().await;
             }
         }
-        // Do not spin when it keeps failing.
-        let _ = tokio::time::timeout(Duration::from_secs(10), changed.notified()).await;
+        // Do not spin when it keeps failing: 10 s, then doubling to ten minutes.
+        failures += 1;
+        let wait = Duration::from_secs((10u64 << failures.min(6).saturating_sub(1)).min(600));
+        let _ = tokio::time::timeout(wait, changed.notified()).await;
     }
 }
 
@@ -454,7 +482,16 @@ async fn follow(phone: &Arc<Phone>, pid: u32) {
                 }
             }
             _ = alive.tick() => {
-                if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                // Reap it to know: a crashed baresip that nobody waits on is a
+                // zombie, and a zombie still has its /proc entry.
+                let gone = match phone.sip.child.lock() {
+                    Ok(mut c) => match c.as_mut() {
+                        Some(child) => !matches!(child.try_wait(), Ok(None)),
+                        None => true,
+                    },
+                    Err(_) => !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+                };
+                if gone {
                     return;
                 }
             }
@@ -485,6 +522,14 @@ mod tests {
         assert_eq!(number_of("sip:+61491570156@voip.example.net"), "+61491570156");
         assert_eq!(number_of("<sip:0491570156@10.0.0.1;user=phone>"), "0491570156");
         assert_eq!(number_of("sip:alex@example.com"), "sip:alex@example.com");
+        let acct = "sip:me@voip.example.net";
+        assert_eq!(number_from("<sip:+61491570156@voip.example.net:5060>", acct, ""), "+61491570156");
+        assert_eq!(
+            number_from("sip:+61491570156@203.0.113.9", acct, ""),
+            "sip:+61491570156@203.0.113.9",
+            "a number claimed from elsewhere stays an address"
+        );
+        assert_eq!(number_from("sip:+61491570156@proxy.example", acct, "sip:proxy.example;transport=tls"), "+61491570156");
         assert_eq!(
             uri_for("+61491570156", "sip:me@voip.example.net;transport=tls"),
             "sip:+61491570156@voip.example.net"

@@ -11,6 +11,8 @@ use zbus::message::Header;
 use zbus::object_server::SignalEmitter;
 use zbus::{interface, Connection};
 
+use phone_core::number;
+
 use crate::caller::{self, Caller};
 use crate::phone::{to_info, Phone};
 
@@ -31,7 +33,7 @@ async fn reader(conn: &Connection, hdr: &Header<'_>) -> zbus::fdo::Result<Caller
         Ok(c)
     } else {
         Err(zbus::fdo::Error::AccessDenied(format!(
-            "{} may not read messages or calls; grant it in Phone Settings (read_grants)",
+            "{} may not read messages or calls; ask with phonectl set read_grants {0} (allowed on the device)",
             c.name
         )))
     }
@@ -129,8 +131,17 @@ impl Calls {
         self.0.stop_ringing();
     }
 
-    async fn calls(&self) -> Vec<CallInfo> {
-        self.0.calls().await
+    /// The calls now. Who is calling is a contact's number: shown only to callers
+    /// that may read the call log; others see that there is a call, and its state.
+    async fn calls(&self, #[zbus(header)] hdr: Header<'_>, #[zbus(connection)] conn: &Connection) -> Vec<CallInfo> {
+        let c = caller::identify(conn, &hdr).await;
+        let mut calls = self.0.calls().await;
+        if !c.may_read() {
+            for call in &mut calls {
+                call.number = number::mask(&call.number);
+            }
+        }
+        calls
     }
 
     async fn recents(
@@ -343,6 +354,11 @@ impl Confirm {
         if !c.trusted {
             for r in &mut p {
                 r.body.clear();
+                // Who is being called or texted is the owner's business; a program
+                // sees its own requests in full.
+                if r.requester != c.name && !c.may_read() {
+                    r.target = number::mask(&r.target);
+                }
             }
         }
         p
@@ -618,7 +634,24 @@ pub struct Settings(pub Arc<Phone>);
 
 #[interface(name = "io.github.isaacrowntree.Dolphone1.Settings")]
 impl Settings {
-    async fn get(&self, key: &str) -> zbus::fdo::Result<String> {
+    async fn get(
+        &self,
+        key: &str,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> zbus::fdo::Result<String> {
+        use phone_api::keys;
+        // Settings that name people (speed dial, who uplink alerts go to) or say
+        // who may read: for callers that may read, as messages are.
+        let personal = key == keys::READ_GRANTS.0 || key == keys::UPLINK_ALERT_TO.0 || keys::SPEED.iter().any(|k| k.0 == key);
+        if personal {
+            reader(conn, &hdr).await?;
+        }
+        if key == keys::REGION.0 {
+            // The region phoned reads numbers in (the owner's, or the SIM's), so a
+            // front end reads them the same way.
+            return Ok(self.0.region());
+        }
         let default = phone_api::keys::ALL
             .iter()
             .find(|(k, _)| *k == key)

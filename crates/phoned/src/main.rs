@@ -80,17 +80,37 @@ async fn main() -> anyhow::Result<()> {
     } else {
         phone_core::store::Store::open(&store_path)
     };
+    // A store that cannot be opened must not keep the phone from ringing. A damaged
+    // plain one is moved aside (kept for recovery) and a fresh one started; anything
+    // else (a full disk, a busy file, an encrypted store that will not open) is left
+    // exactly as it is, and phoned runs on a store in memory, keeping what it cannot
+    // store where it came from (texts on the SIM, MMS in mmsd-tng).
+    let in_memory = |why: String| {
+        tracing::error!("{why}; running without the store until phoned restarts");
+        storekey::set_locked();
+        phone_core::store::Store::in_memory()
+    };
     let store = match opened {
         Ok(s) => s,
-        Err(e) => {
-            // A store that cannot be opened must not keep the phone from ringing.
-            // Move it aside, keep it for recovery, and start a fresh one.
-            let aside = store_path.with_extension(format!("db.broken-{}", phone_core::now()));
-            tracing::error!("store {} unusable ({e}); moved to {}", store_path.display(), aside.display());
-            let _ = std::fs::rename(&store_path, &aside);
-            phone_core::store::Store::open(&store_path).with_context(|| format!("opening {}", store_path.display()))?
+        Err(e) if phone_core::store::is_corrupt(&e) && !phone_core::store::is_encrypted(&store_path) => {
+            match phone_core::store::move_aside(&store_path, phone_core::now()) {
+                Ok(aside) => {
+                    tracing::error!("store {} damaged ({e}); moved to {}", store_path.display(), aside.display());
+                    match phone_core::store::Store::open(&store_path) {
+                        Ok(s) => s,
+                        Err(e) => in_memory(format!("a fresh store could not be made either ({e})"))?,
+                    }
+                }
+                Err(err) => in_memory(format!("store damaged ({e}) and could not be moved aside ({err})"))?,
+            }
         }
+        Err(e) => in_memory(format!("store {} could not be opened ({e})", store_path.display()))?,
     };
+    if let Ok(n) = store.fail_unsent() {
+        if n > 0 {
+            tracing::warn!(n, "texts left sending when phoned stopped are marked failed");
+        }
+    }
     if let Ok(Some(g)) = store.setting(phone_api::keys::READ_GRANTS.0) {
         caller::set_grants(&g);
     }
@@ -125,13 +145,24 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             p.notify
                 .warning(
-                    "Messages are locked",
-                    "The message store's key could not be unsealed. New texts stay on the SIM until it is.",
+                    "Messages are not being kept",
+                    "The message store could not be opened (its key, or the disk). New texts stay on the SIM \
+                     until it can; see journalctl --user -u phoned.",
                 )
                 .await
         });
     }
 
+    // A bus that drops leaves every stream dead and phoned deaf; exiting lets
+    // systemd start it again (Restart=on-failure) on buses that work.
+    for (name, conn) in [("session", session.clone()), ("system", system.clone())] {
+        tokio::spawn(async move {
+            let mut all = zbus::MessageStream::from(&conn);
+            while all.next().await.is_some() {}
+            tracing::error!(bus = name, "the bus connection closed; exiting so phoned is started again");
+            std::process::exit(1);
+        });
+    }
     tokio::spawn(follow_modem(phone.clone()));
     tokio::spawn(power::follow_sleep(phone.clone()));
     tokio::spawn(sip::run(phone.clone(), phone.sip_changed.clone()));
@@ -179,10 +210,31 @@ async fn modem_events(system: zbus::Connection, poke: Arc<tokio::sync::Notify>) 
             .member(member)
             .build()
     }
+    // The modem's own properties only: a call's or a text's changing (many a
+    // second while ringing) says nothing about the modem. ModemManager coming and
+    // going is watched by name, since a crashed one sends no InterfacesRemoved.
+    let modem_props = (|| -> zbus::Result<zbus::MatchRule<'static>> {
+        Ok(zbus::MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .sender(mm::SERVICE)
+            .interface("org.freedesktop.DBus.Properties")
+            .member("PropertiesChanged")
+            .path_namespace("/org/freedesktop/ModemManager1/Modem")
+            .build()?)
+    })();
+    let owner = (|| -> zbus::Result<zbus::MatchRule<'static>> {
+        Ok(zbus::MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .sender("org.freedesktop.DBus")
+            .member("NameOwnerChanged")
+            .arg(0, mm::SERVICE)
+            .build()?)
+    })();
     let rules = [
         rule("InterfacesAdded", "org.freedesktop.DBus.ObjectManager"),
         rule("InterfacesRemoved", "org.freedesktop.DBus.ObjectManager"),
-        rule("PropertiesChanged", "org.freedesktop.DBus.Properties"),
+        modem_props,
+        owner,
     ];
     let mut streams = Vec::new();
     for r in rules.into_iter().flatten() {
@@ -215,7 +267,11 @@ async fn follow_modem(phone: Arc<Phone>) {
             for w in watchers.drain(..) {
                 w.abort();
             }
-            let lost = current.as_ref().is_some_and(|c| found.as_ref().is_none_or(|f| f.path != c.path));
+            // Gone, under a new path, under a restarted ModemManager, or without
+            // Voice any more (a SIM pulled): its calls are over.
+            let lost = current.as_ref().is_some_and(|c| {
+                found.as_ref().is_none_or(|f| f.path != c.path || f.owner != c.owner || (c.voice && !f.voice))
+            });
             if lost {
                 phone.lost_modem().await;
             }

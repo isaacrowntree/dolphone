@@ -22,6 +22,9 @@ RestartSec=2
 # Numbers in the journal are masked by phoned itself; keep its output there.
 StandardOutput=journal
 StandardError=journal
+# No core dumps: phoned's memory holds message text and, with the store encrypted,
+# its key. (A resource limit, not a sandboxing option: no user namespace.)
+LimitCORE=0
 # No sandboxing options, deliberately. In a *user* unit every one of them
 # (ProtectSystem=, NoNewPrivileges=, even PrivateTmp=) runs phoned in a user
 # namespace, and PipeWire's tools then stall for seconds or a full 25 s D-Bus

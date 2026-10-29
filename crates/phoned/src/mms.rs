@@ -63,11 +63,24 @@ pub trait Message {
 /// about 1 MB (mmsd-tng's TotalMaxAttachmentSize), so this is only a guard.
 pub const MAX_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Whether mmsd-tng is on the session bus.
+/// Whether mmsd-tng is on the session bus, and is mmsd-tng: any program can claim
+/// its name, and would then be handed every outgoing MMS (recipients, text and
+/// files) and could feed in fake ones. So the name's owner must be a system program
+/// (installed under /usr, owned by root), as for the notification server. A debug
+/// build testing against fake-mmsd (DOLPHONE_MMS_DIR set) skips that check.
 pub async fn available(session: &zbus::Connection) -> bool {
-    match zbus::fdo::DBusProxy::new(session).await {
-        Ok(d) => d.name_has_owner(SERVICE.try_into().expect("name")).await.unwrap_or(false),
-        Err(_) => false,
+    let Ok(d) = zbus::fdo::DBusProxy::new(session).await else { return false };
+    let Ok(owner) = d.get_name_owner(SERVICE.try_into().expect("name")).await else { return false };
+    if cfg!(debug_assertions) && std::env::var_os("DOLPHONE_MMS_DIR").is_some() {
+        return true;
+    }
+    match crate::caller::exe_of(session, owner.as_str()).await {
+        Some(exe) if crate::caller::system_program(&exe) => true,
+        Some(exe) => {
+            tracing::warn!(program = %exe.display(), "the MMS service is not a system program; not using it");
+            false
+        }
+        None => false,
     }
 }
 
