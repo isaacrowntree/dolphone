@@ -495,6 +495,12 @@ export component AppWindow inherits Window {
     in property <[Bubble]> bubbles;
     in-out property <string> draft;
     in property <string> draft-cost;
+    // The pictures going with the next text, by name.
+    in property <string> attached;
+    // The Messages PIN: locked shows the lock screen instead of texts.
+    in property <bool> messages-locked;
+    in property <bool> messages-pin-set;
+    in-out property <string> unlock-pin;
 
     // Contacts.
     in property <[Row]> contacts;
@@ -534,6 +540,9 @@ export component AppWindow inherits Window {
     in property <[Row]> bt-devices;
     in property <[Row]> blocked;
     in property <string> modem-text;
+    in-out property <string> new-pin;
+    in-out property <string> new-pin-again;
+    in property <int> open-for-index: 1;
 
     // The call card.
     in property <bool> call-visible;
@@ -558,6 +567,9 @@ export component AppWindow inherits Window {
     in property <string> alert-title;
     in property <string> alert-text;
     in property <string> alert-time;
+    // "1 of 3" when more are waiting, and whether Dismiss shows the next.
+    in property <string> alert-count;
+    in property <bool> alert-more;
 
     // A passing message.
     in property <string> toast;
@@ -608,6 +620,13 @@ export component AppWindow inherits Window {
     callback add-contact(string, string);
     callback remove-contact(int);
     callback import-from-phone(int);
+    callback attach();
+    callback clear-attachments();
+    callback unlock(string);
+    callback lock-messages();
+    callback set-messages-pin(string, string);
+    callback remove-messages-pin();
+    callback set-open-for(int);
 
     // Keyboard shortcuts, for whatever has focus that does not use the key itself:
     // Ctrl+1..4 the pages, Ctrl+N a new message, and for a call Ctrl+Enter answers,
@@ -688,7 +707,33 @@ export component AppWindow inherits Window {
                 }
             }
 
-            if page == 1: HorizontalLayout {
+            // Locked: only the PIN, and nothing of the texts.
+            if page == 1 && root.messages-locked: Rectangle {
+                accessible-role: groupbox;
+                accessible-label: "Messages is locked";
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 12px;
+                    Text { text: "Messages is locked"; font-size: 20px; font-weight: 700; horizontal-alignment: center; color: Palette.foreground; }
+                    Text { text: "Type the Messages PIN to read and send texts."; horizontal-alignment: center; color: Brand.muted; }
+                    HorizontalLayout {
+                        alignment: center;
+                        spacing: 8px;
+                        LineEdit {
+                            width: 200px;
+                            text <=> root.unlock-pin;
+                            input-type: InputType.password;
+                            accessible-label: "Messages PIN";
+                            placeholder-text: "PIN";
+                            init => { self.focus(); }
+                            accepted => { root.unlock(self.text); }
+                        }
+                        Button { text: "Unlock"; primary: true; enabled: root.unlock-pin != ""; clicked => { root.unlock(root.unlock-pin); } }
+                    }
+                }
+            }
+
+            if page == 1 && !root.messages-locked: HorizontalLayout {
                 Rectangle {
                     width: 300px;
                     border-width: 0px;
@@ -697,6 +742,7 @@ export component AppWindow inherits Window {
                         spacing: 8px;
                         HorizontalLayout {
                             Text { text: "Messages"; font-size: 18px; font-weight: 700; horizontal-stretch: 1; color: Palette.foreground; }
+                            if root.messages-pin-set: Button { text: "Lock"; accessible-label: "Lock Messages"; clicked => { root.lock-messages(); } }
                             Button { text: "New"; clicked => { root.new-message(root.contact-filter); } }
                         }
                         LineEdit {
@@ -794,8 +840,20 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
+                    if root.thread-title != "" && root.attached != "": HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: "Attached: " + root.attached;
+                            color: Brand.muted;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                        Button { text: "Remove"; accessible-label: "Remove the attached pictures"; clicked => { root.clear-attachments(); } }
+                    }
                     if root.thread-title != "": HorizontalLayout {
                         spacing: 8px;
+                        Button { text: "Attach"; accessible-label: "Attach a picture"; clicked => { root.attach(); } }
                         LineEdit {
                             text <=> root.draft;
                             accessible-label: "Text message";
@@ -804,7 +862,7 @@ export component AppWindow inherits Window {
                             accepted => { root.send(root.draft); }
                         }
                         Text { text: root.draft-cost; color: Brand.muted; font-size: 12px; vertical-alignment: center; }
-                        Button { text: "Send"; primary: true; enabled: root.draft != ""; clicked => { root.send(root.draft); } }
+                        Button { text: "Send"; primary: true; enabled: root.draft != "" || root.attached != ""; clicked => { root.send(root.draft); } }
                     }
                 }
             }
@@ -934,6 +992,51 @@ export component AppWindow inherits Window {
 
                     Text { text: "Texts"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
                     for t in root.text-toggles: CheckBox { text: t.label; checked: t.on; toggled => { root.set-flag(t.key, self.checked); } }
+
+                    Text { text: "Messages PIN"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
+                    Text {
+                        text: root.messages-pin-set
+                            ? "On: texts stay closed, here and on the panel, until the PIN is typed."
+                            : "Off: anyone at the phone or this computer can read your texts.";
+                        color: Brand.muted;
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        LineEdit {
+                            width: 180px;
+                            text <=> root.new-pin;
+                            input-type: InputType.password;
+                            accessible-label: root.messages-pin-set ? "New Messages PIN, 4 to 12 digits" : "Messages PIN, 4 to 12 digits";
+                            placeholder-text: "New PIN (4 to 12 digits)";
+                        }
+                        LineEdit {
+                            width: 180px;
+                            text <=> root.new-pin-again;
+                            input-type: InputType.password;
+                            accessible-label: "The new PIN again";
+                            placeholder-text: "The new PIN again";
+                            accepted => { root.set-messages-pin(root.new-pin, root.new-pin-again); }
+                        }
+                        Button {
+                            text: root.messages-pin-set ? "Change PIN" : "Set PIN";
+                            enabled: root.new-pin != "" && root.new-pin-again != "";
+                            clicked => { root.set-messages-pin(root.new-pin, root.new-pin-again); }
+                        }
+                        if root.messages-pin-set: Button { text: "Remove PIN"; accessible-label: "Remove the Messages PIN"; clicked => { root.remove-messages-pin(); } }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Text { text: "Stay open for"; width: 180px; vertical-alignment: center; color: Palette.foreground; }
+                        ComboBox {
+                            accessible-label: "Messages stay open after the PIN for";
+                            model: ["1 min", "5 min", "15 min"];
+                            current-index: root.open-for-index;
+                            selected => { root.set-open-for(self.current-index); }
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
 
                     Text { text: "Uplink watch"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
                     Text { text: "Text a number when the network link drops, and when it comes back."; color: Brand.muted; }
@@ -1101,7 +1204,7 @@ export component AppWindow inherits Window {
         drop-shadow-blur: 24px;
         drop-shadow-color: #0008;
         accessible-role: groupbox;
-        accessible-label: root.alert-title;
+        accessible-label: root.alert-count == "" ? root.alert-title : root.alert-title + ", " + root.alert-count;
         // Dismiss has the focus, and keeps it.
         init => { dismiss-button.focus(); }
         FocusWrap { wrap => { dismiss-button.focus(); } }
@@ -1109,13 +1212,15 @@ export component AppWindow inherits Window {
             padding: 24px;
             spacing: 12px;
             HorizontalLayout {
+                spacing: 12px;
                 Text { text: root.alert-title; font-size: 22px; font-weight: 800; color: white; horizontal-stretch: 1; }
+                if root.alert-count != "": Text { text: root.alert-count; color: white; font-weight: 700; vertical-alignment: center; }
                 Text { text: root.alert-time; color: white; vertical-alignment: center; }
             }
             Text { text: root.alert-text; font-size: 16px; wrap: word-wrap; color: white; }
             HorizontalLayout {
                 alignment: end;
-                dismiss-button := Button { text: "Dismiss"; primary: true; clicked => { root.dismiss-alert(); } }
+                dismiss-button := Button { text: root.alert-more ? "Next alert" : "Dismiss"; primary: true; clicked => { root.dismiss-alert(); } }
             }
         }
         FocusWrap { wrap => { dismiss-button.focus(); } }

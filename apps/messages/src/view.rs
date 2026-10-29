@@ -223,6 +223,15 @@ pub fn view(m: &Model, now: i64) -> View {
                 b(["Back", "", "", "Edit", "Use"]),
             )
         }
+        Screen::Locked => {
+            let rows = vec![
+                Row { kind: 5, label: "Messages is locked".into(), value: String::new(), dim: false },
+                Row { kind: 1, label: String::new(), value: String::new(), dim: false },
+                Row { kind: 3, label: "Unlock and type the PIN set".into(), value: String::new(), dim: false },
+                Row { kind: 3, label: "in Settings > Privacy.".into(), value: String::new(), dim: false },
+            ];
+            (Body::Detail { rows, offset: 0, breadcrumb: "> Locked".into() }, b(["Exit", "", "", "", "Unlock"]))
+        }
         Screen::Preview => {
             let seg = text::segments(&m.draft);
             let mut rows = vec![Row { kind: 0, label: "To".into(), value: fit(&m.name_for(&m.peer), 160), dim: false }];

@@ -14,6 +14,7 @@
 //!
 //! A second start hands its arguments to the window already open and exits.
 
+mod portal;
 mod state;
 mod tray;
 
@@ -205,13 +206,42 @@ mod tests {
         });
         shot("alert", |a| {
             state::sample(a, 0);
-            a.alert = Some(phone_api::AlertInfo {
+            a.waiting_alerts.push(phone_api::AlertInfo {
                 id: 1,
                 channel: 4371,
                 level: phone_core::model::AlertLevel::Extreme as u8,
                 text: "Emergency Alert: Bushfire. Leave now if you are in Example Valley. Follow police and fire service directions. Monitor ABC radio.".into(),
                 at: phone_core::now() - 120,
             });
+        });
+        shot("alert-queue", |a| {
+            state::sample(a, 0);
+            for (id, level, text) in [
+                (1, phone_core::model::AlertLevel::Amber, "Amber Alert: a child is missing from Example Valley."),
+                (
+                    2,
+                    phone_core::model::AlertLevel::Extreme,
+                    "Emergency Alert: Bushfire. Leave now if you are in Example Valley.",
+                ),
+                (3, phone_core::model::AlertLevel::Test, "This is a test of the alert system."),
+            ] {
+                a.event(phone_bus::Event::Alert(phone_api::AlertInfo {
+                    id,
+                    channel: 4371,
+                    level: level as u8,
+                    text: text.into(),
+                    at: phone_core::now() - 120,
+                }));
+            }
+        });
+        shot("locked", |a| {
+            state::sample(a, 1);
+            a.pin_set = true;
+            a.event(phone_bus::Event::Locked(true));
+        });
+        shot("attached", |a| {
+            state::sample(a, 1);
+            a.attachments = vec!["/home/me/Pictures/Beach day.jpg".into(), "/home/me/Pictures/Sunset.png".into()];
         });
         shot("settings-grants", |a| {
             state::sample(a, 3);
@@ -232,6 +262,52 @@ mod tests {
                 result: "sent under a grant".into(),
             }];
         });
+    }
+
+    #[test]
+    fn alerts_queue_and_dismiss_in_turn() {
+        use phone_core::model::AlertLevel;
+        let _w = window();
+        let ui = AppWindow::new().expect("window");
+        let mut app = state::App::headless(ui.clone_strong());
+        for (id, level) in [(1, AlertLevel::Severe), (2, AlertLevel::Test), (3, AlertLevel::National)] {
+            let a = phone_api::AlertInfo { id, channel: 4370, level: level as u8, text: format!("{id}"), at: 1 };
+            app.event(phone_bus::Event::Alert(a.clone()));
+            // Heard twice, it is still one.
+            app.event(phone_bus::Event::Alert(a));
+        }
+        assert_eq!(app.alerts.len(), 3, "listed in Settings once each");
+        let mut seen = Vec::new();
+        while ui.get_alert_visible() {
+            seen.push((ui.get_alert_title().to_string(), ui.get_alert_count().to_string(), ui.get_alert_more()));
+            // As Dismiss does (the callbacks are not wired up in a headless test).
+            app.waiting_alerts.dismiss();
+            app.render();
+        }
+        assert_eq!(
+            seen,
+            [
+                ("NATIONAL ALERT".into(), "1 of 3".into(), true),
+                ("SEVERE ALERT".into(), "2 of 3".into(), true),
+                ("TEST ALERT".into(), "3 of 3".into(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn locked_messages_hide_the_texts() {
+        let _w = window();
+        let ui = AppWindow::new().expect("window");
+        let mut app = state::App::headless(ui.clone_strong());
+        state::sample(&mut app, 1);
+        app.event(phone_bus::Event::Error("Messages is locked: enter the PIN".into()));
+        assert!(ui.get_messages_locked());
+        assert!(app.threads.is_empty() && app.messages.is_empty(), "nothing of the texts is kept");
+        assert_eq!(ui.get_toast().as_str(), "", "the lock is not an error");
+        use slint::Model;
+        assert_eq!(ui.get_bubbles().row_count(), 0);
+        app.event(phone_bus::Event::Locked(false));
+        assert!(!ui.get_messages_locked());
     }
 
     #[test]

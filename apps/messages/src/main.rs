@@ -194,6 +194,8 @@ impl App {
     }
 
     fn reload(&mut self) {
+        // The lock first: a list refused for it says so too, and either locks.
+        self.bus.refresh_lock();
         self.bus.refresh_threads();
         self.bus.run(|c| async move {
             Ok(vec![
@@ -248,11 +250,14 @@ impl App {
     fn key(&mut self, key: Option<Key>, text: &str, down: bool) {
         if let Some((what, field)) = self.kb.as_mut() {
             let what = what.clone();
+            let pin = what == Writing::Pin;
+            // Done takes a PIN only once it is one phoned could take.
+            let valid = !pin || Model::valid_pin(&field.text);
             match key {
                 Some(k) if !down => {
                     field.release(k.flipper());
                 }
-                Some(k) => match field.key(k.flipper(), true) {
+                Some(k) => match field.key(k.flipper(), valid) {
                     Some(Exit::Save(t)) => {
                         self.kb = None;
                         let a = self.model.written(what, Some(t));
@@ -267,7 +272,12 @@ impl App {
                 },
                 // A real keyboard (USB, Bluetooth, the remote view) types straight in.
                 None if down => {
-                    if let Some(c) = text.chars().next().filter(|c| text.chars().count() == 1 && !c.is_control()) {
+                    if let Some(c) = text
+                        .chars()
+                        .next()
+                        .filter(|c| text.chars().count() == 1 && !c.is_control())
+                        .filter(|c| !pin || (c.is_ascii_digit() && field.text.len() < 12))
+                    {
                         let at =
                             field.text.char_indices().nth(field.cursor).map(|(i, _)| i).unwrap_or(field.text.len());
                         field.text.insert(at, c);
@@ -334,7 +344,16 @@ impl App {
             Event::Placed { kind: "sms", placed } if placed.pending != 0 => {
                 self.model.notice = Some(vec!["Waiting for you to confirm".into(), "on the Phone screen.".into()]);
             }
-            Event::Error(text) => self.model.notice = Some(wrap_notice(&text)),
+            Event::Locked(locked) => {
+                if !locked && self.kb.as_ref().is_some_and(|(w, _)| *w == Writing::Pin) {
+                    // Opened elsewhere (the desktop): the PIN is not wanted now.
+                    self.kb = None;
+                }
+                actions = self.model.set_locked(locked);
+            }
+            // A list refused for the lock is the PIN screen, not an error.
+            Event::Error(text) if Model::is_lock_error(&text) => actions = self.model.set_locked(true),
+            Event::Notice(text) | Event::Error(text) => self.model.notice = Some(wrap_notice(&text)),
             _ => {}
         }
         self.act(actions);
@@ -355,9 +374,15 @@ impl App {
                         Writing::To => "To (number or name)".to_string(),
                         Writing::Search => "Search texts".to_string(),
                         Writing::Body => format!("To {}", self.model.name_for(&self.model.peer)),
+                        Writing::Pin => "Messages PIN".to_string(),
                     };
-                    self.kb = Some((what, TextInput::new(&flipctl_app::font::fit(&title, 200), &text)));
+                    let mut field = TextInput::new(&flipctl_app::font::fit(&title, 200), &text);
+                    if what == Writing::Pin {
+                        numeric(&mut field);
+                    }
+                    self.kb = Some((what, field));
                 }
+                Action::Unlock(pin) => self.bus.unlock(pin),
                 Action::Call(peer) => call(&peer, &self.bus),
                 Action::Block(peer) => self.bus.run(move |c| async move {
                     c.settings.block(&peer).await?;
@@ -403,7 +428,7 @@ impl App {
         apply(
             &self.ui,
             &view::view(&self.model, phone_core::now()),
-            self.kb.as_ref().map(|(_, f)| f),
+            self.kb.as_ref().map(|(w, f)| (f, *w == Writing::Pin)),
             cursor,
             self.frame,
         );
@@ -416,18 +441,42 @@ fn call(peer: &str, bus: &Bus) {
     bus.dial(peer.to_string());
 }
 
+/// FlipCTL's keyboard has no number pad; its 123 layout, with the digits on top
+/// and the highlight on 1, is the nearest.
+fn numeric(field: &mut TextInput) {
+    use flipctl_app::FlipperKey;
+    field.key(FlipperKey::View, true);
+    field.key(FlipperKey::Up, true);
+}
+
+/// The field as drawn for a secret: a star for each character, laid out as the
+/// keyboard lays out text, so the caret sits where it should.
+fn masked(field: &TextInput, v: &mut flipctl_app::keyboard::View) {
+    use flipctl_app::keyboard::{field_w, fit_input};
+    let stars = "*".repeat(field.text.chars().count());
+    let w = field_w(i32::from(flipctl_app::font::TITLE.text_width(&stars)));
+    let fitted = fit_input(&stars, field.cursor, w - 2 * flipctl_app::theme::metric::KB_INPUT_PAD);
+    v.text = fitted.visible;
+    v.field_w = w as f32;
+    v.cursor_dx = fitted.cursor_dx as f32;
+}
+
 fn wrap_notice(text: &str) -> Vec<String> {
     view::wrap(text, 200).into_iter().take(3).collect()
 }
 
-fn apply(ui: &AppWindow, v: &view::View, kb: Option<&TextInput>, cursor_on: bool, frame: u32) {
+/// Draw. `kb` is the keyboard when it is up, and whether what it takes is secret.
+fn apply(ui: &AppWindow, v: &view::View, kb: Option<(&TextInput, bool)>, cursor_on: bool, frame: u32) {
     let strings = |s: &[String]| {
         ModelRc::new(VecModel::from(s.iter().map(|x| SharedString::from(x.as_str())).collect::<Vec<_>>()))
     };
     ui.set_tick(frame as i32);
-    if let Some(field) = kb {
+    if let Some((field, secret)) = kb {
         ui.set_mode(3);
-        let k = field.view("", cursor_on);
+        let mut k = field.view("", cursor_on);
+        if secret {
+            masked(field, &mut k);
+        }
         ui.set_kb_title(k.title.as_str().into());
         ui.set_kb_text(k.text.as_str().into());
         ui.set_kb_field_w(k.field_w);
@@ -532,7 +581,7 @@ mod tests {
         WINDOW.with(Rc::clone)
     }
 
-    fn shot(name: &str, m: &Model, kb: Option<&TextInput>) {
+    fn shot(name: &str, m: &Model, kb: Option<(&TextInput, bool)>) {
         let window = panel();
         let ui = AppWindow::new().expect("window");
         apply(&ui, &view::view(m, 1_793_000_000), kb, true, 0);
@@ -631,7 +680,7 @@ mod tests {
         m.written(Writing::Body, Some("No worries, see you soon. I'll grab us a table by the window.".into()));
         shot("preview", &m, None);
         let field = TextInput::new("To Alex Example", "On my way");
-        shot("compose", &m, Some(&field));
+        shot("compose", &m, Some((&field, false)));
         m.screen = model::Screen::Options;
         shot("options", &m, None);
         m.screen = model::Screen::QuickReply;
@@ -657,6 +706,18 @@ mod tests {
         m.screen = model::Screen::Threads;
         m.missed = 1;
         shot("threads-missed", &m, None);
+
+        // Locked: the PIN on the 123 keyboard, starred, over nothing of the texts.
+        m.set_locked(true);
+        let mut pin = TextInput::new("Messages PIN", "");
+        numeric(&mut pin);
+        for _ in 0..4 {
+            pin.key(flipctl_app::FlipperKey::Right, true);
+            pin.key(flipctl_app::FlipperKey::Ok, true);
+        }
+        assert_eq!(pin.text, "2345", "the digits are where the highlight starts");
+        shot("locked", &m, Some((&pin, true)));
+        shot("locked-behind", &m, None);
     }
 
     // Live: the real app against a running phoned and fake-mm (scripts/ui-e2e.sh).
