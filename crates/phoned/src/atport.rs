@@ -253,6 +253,12 @@ fn exchange(f: &mut File, cmd: &str, timeout: Duration) -> std::io::Result<Resul
     let mut buf = [0u8; 512];
     while Instant::now() < end {
         let n = f.read(&mut buf)?;
+        if n == 0 {
+            // Nothing in 0.1 s, or a port that hung up and returns at once: either
+            // way, no spinning.
+            std::thread::sleep(Duration::from_millis(20));
+            continue;
+        }
         if let Some(done) = answer.feed(&buf[..n]) {
             return Ok(done);
         }
@@ -483,11 +489,14 @@ mod tests {
                     seen.push(cmd);
                 }
             }
-            seen
+            // The master goes back with the commands, so it stays open (and the last
+            // answer readable) until the test is done with it.
+            (seen, master)
         });
         let mut s = State::default();
         assert_eq!(on_port(&mut s, &slave, "AT+QCFG=\"ims\""), Ok("+QCFG: \"ims\",1,1".into()));
         assert_eq!(on_port(&mut s, &slave, "AT+NOPE"), Err("the modem answered ERROR".into()));
-        assert_eq!(responder.join().unwrap(), ["ATE0", "AT+QCFG=\"ims\"", "AT+NOPE"]);
+        let (seen, _master) = responder.join().unwrap();
+        assert_eq!(seen, ["ATE0", "AT+QCFG=\"ims\"", "AT+NOPE"]);
     }
 }
