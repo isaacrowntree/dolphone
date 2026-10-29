@@ -127,6 +127,17 @@ pub struct AuditEntry {
     pub result: String,
 }
 
+/// What a grant request asks for, in words: "4 an hour, for 30 days" or "4 an
+/// hour, with no end", from its body ("4/h|30").
+pub fn grant_terms(body: &str) -> String {
+    let (rate, days) = body.split_once("/h|").unwrap_or((body, ""));
+    match days.trim() {
+        "0" => format!("{rate} an hour, with no end"),
+        "1" => format!("{rate} an hour, for a day"),
+        d => format!("{rate} an hour, for {d} days"),
+    }
+}
+
 /// A stored message.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[zbus(crate = "zbus::wire")]

@@ -2328,7 +2328,17 @@ impl Phone {
         let peer = members.join(",");
         if !confirmed {
             // Grants name single numbers: an MMS from a program is always asked about.
-            if let Some(reason) = classes.iter().find_map(|c| needs_confirmation(*c, caller)) {
+            // The costliest member decides what the owner is warned of: a premium
+            // number in a group must not hide behind an ordinary one.
+            let rank = |r: &str| match r {
+                "emergency" => 0,
+                "premium" => 1,
+                "short" => 2,
+                "international" => 3,
+                _ => 4,
+            };
+            let worst = classes.iter().filter_map(|c| needs_confirmation(*c, caller)).min_by_key(|r| rank(r));
+            if let Some(reason) = worst {
                 let names: Vec<&str> = files.iter().map(|f| f.rsplit('/').next().unwrap_or(f)).collect();
                 let shown = if names.is_empty() { body.clone() } else { format!("{body}\n+ {}", names.join(", ")) };
                 let id = self.park("sms", &peer, shown.trim(), caller, reason).await;

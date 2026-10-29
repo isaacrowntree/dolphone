@@ -77,7 +77,7 @@ reading messages and calls needs a grant: phonectl set read_grants +phonectl
 (allowed on the device; -name removes one; a grant goes by program name, so it
 covers every script that uses phonectl)
 
-anything that waits for the device prints "waiting for confirmation (request N)"
+anything that waits for the device prints 'waiting for confirmation (request N)'
 and exits 0; phonectl wait N then exits 0 once allowed and done, 1 if not
   wait <request> [seconds]   (default 130: requests expire after two minutes)
 

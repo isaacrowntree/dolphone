@@ -951,20 +951,26 @@ impl App {
                 );
                 // Only a text's body is for reading; others carry the change itself.
                 ui.set_confirm_body(if r.kind == "sms" { r.body.as_str().into() } else { SharedString::new() });
-                ui.set_confirm_reason(
-                    match r.reason.as_str() {
-                        "premium" => "Premium number: charges apply",
-                        "short" => "Short code: may cost money",
-                        "emergency" => "This is an emergency number",
-                        "wipe" => "This cannot be undone",
-                        "modem" => "Saved in the modem, which restarts",
-                        "grant" => "You can revoke it in Settings",
-                        "contact" => "A contact decides who a caller shows as",
-                        "setting" => "Change it back in Settings",
-                        _ => "Asked by another program",
-                    }
-                    .into(),
-                );
+                if r.kind == "grant" {
+                    ui.set_confirm_reason(
+                        format!("{}. You can revoke it in Settings.", phone_api::grant_terms(&r.body)).into(),
+                    );
+                } else {
+                    ui.set_confirm_reason(
+                        match r.reason.as_str() {
+                            "premium" => "Premium number: charges apply",
+                            "short" => "Short code: may cost money",
+                            "emergency" => "This is an emergency number",
+                            "wipe" => "This cannot be undone",
+                            "modem" => "Saved in the modem, which restarts",
+                            "grant" => "",
+                            "contact" => "A contact decides who a caller shows as",
+                            "setting" => "Change it back in Settings",
+                            _ => "Asked by another program",
+                        }
+                        .into(),
+                    );
+                }
             }
             None => ui.set_confirm_visible(false),
         }

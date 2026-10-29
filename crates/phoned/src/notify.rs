@@ -281,7 +281,12 @@ impl Notifier {
             "sms" => format!("{} wants to text {name}", r.requester),
             "wipe" => "Delete all messages and calls?".to_string(),
             "modem" => format!("{} wants to set up the modem", r.requester),
-            "grant" => format!("{} wants to text {} without asking", r.requester, r.target),
+            "grant" => format!(
+                "{} wants to text {} without asking: {}",
+                r.requester,
+                r.target,
+                phone_api::grant_terms(&r.body)
+            ),
             "contact" => format!("{} wants to {} in your contacts", r.requester, r.target),
             "setting" => format!("{} wants to set {}", r.requester, r.target),
             _ => format!("{} wants to use the phone", r.requester),
