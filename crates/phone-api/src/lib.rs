@@ -326,6 +326,16 @@ pub trait Calls {
     default_path = "/io/github/isaacrowntree/Dolphone"
 )]
 pub trait Messages {
+    /// Open Messages with its PIN (Dolphone's own apps only): true when right. While
+    /// a PIN is set and Messages is not open, threads, conversations, search and
+    /// export are refused to Dolphone's own apps too.
+    fn unlock(&self, pin: &str) -> zbus::Result<bool>;
+    /// Close Messages again, before its time is up.
+    fn lock(&self) -> zbus::Result<()>;
+    /// Whether Messages needs the PIN now.
+    fn locked(&self) -> zbus::Result<bool>;
+    #[zbus(signal)]
+    fn lock_changed(&self, locked: bool) -> zbus::Result<()>;
     /// A text. Several numbers joined with commas make a group text, sent as MMS.
     fn send(&self, to: &str, body: &str) -> zbus::Result<Placed>;
     /// An MMS (through mmsd-tng): to one or more numbers, with a text, files, or
@@ -491,6 +501,12 @@ pub trait Settings {
     fn block(&self, number: &str) -> zbus::Result<()>;
     fn unblock(&self, number: &str) -> zbus::Result<()>;
     fn blocked(&self) -> zbus::Result<Vec<String>>;
+    /// Ask for signals in full. Who is calling or texting (and the phone's own
+    /// number) goes only to the connections that registered and may read: every
+    /// other program on the bus gets the same signals with the numbers masked. True
+    /// when this connection now gets them in full; it receives both copies, and
+    /// keeps the ones addressed to it.
+    fn register(&self) -> zbus::Result<bool>;
     /// Delete every message, call and setting. Asks for confirmation on the device
     /// unless it came from Dolphone's own Settings app.
     fn wipe(&self) -> zbus::Result<Placed>;
@@ -542,6 +558,11 @@ pub mod keys {
     /// default, "1" hidden, "2" shown (AT+CLIR's n). Applied when the modem starts,
     /// which forgets it.
     pub const CLIR: (&str, &str) = ("clir", "0");
+    /// The Messages PIN, as a salted hash (Set takes the PIN, "" clears it; Get
+    /// answers "set" or ""). Only Dolphone's own apps may set it.
+    pub const MESSAGES_PIN: (&str, &str) = ("messages_pin", "");
+    /// How long Messages stays open after the PIN, in seconds.
+    pub const MESSAGES_OPEN_FOR: (&str, &str) = ("messages_open_for", "300");
     /// Ask the network to report when a text is delivered.
     pub const DELIVERY_REPORTS: (&str, &str) = ("delivery_reports", "false");
     /// Speak the caller's name when a call rings (needs espeak-ng).
@@ -626,6 +647,8 @@ pub mod keys {
         VOICEMAIL,
         CALL_WAITING,
         CLIR,
+        MESSAGES_PIN,
+        MESSAGES_OPEN_FOR,
         DELIVERY_REPORTS,
         SPEAK_CALLER,
         SILENCE_UNKNOWN,

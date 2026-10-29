@@ -24,6 +24,7 @@ mod mm;
 mod mms;
 mod notify;
 mod phone;
+mod pin;
 mod power;
 mod quectel;
 mod rules;
@@ -161,6 +162,21 @@ async fn main() -> anyhow::Result<()> {
             while all.next().await.is_some() {}
             tracing::error!(bus = name, "the bus connection closed; exiting so phoned is started again");
             std::process::exit(1);
+        });
+    }
+    // A listener that leaves the bus stops getting signals in full.
+    {
+        let session = session.clone();
+        tokio::spawn(async move {
+            let Ok(bus) = zbus::fdo::DBusProxy::new(&session).await else { return };
+            let Ok(mut owners) = bus.receive_name_owner_changed().await else { return };
+            while let Some(s) = owners.next().await {
+                if let Ok(a) = s.args() {
+                    if a.new_owner().is_none() {
+                        api::forget_listener(a.name().as_str());
+                    }
+                }
+            }
         });
     }
     tokio::spawn(follow_modem(phone.clone()));

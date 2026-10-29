@@ -41,6 +41,8 @@ messages
   alerts [n]                  emergency alerts received
   search <words...>           texts with all of those words
   export > texts.xml          every text, as an SMS Backup & Restore file (Android)
+  messages locked | lock (apps) | unlock <pin> (apps)
+                              the Messages PIN (set it: set messages_pin, from the apps)
 
 contacts (vCard files in ~/.local/share/dolphone/contacts; changes from here
           wait for a press on the device, like calls and texts)
@@ -441,6 +443,13 @@ async fn run(conn: &zbus::Connection, w: &[&str], json: bool) -> Result<()> {
         }
         ["confirm", id] => placed("request", ConfirmProxy::new(conn).await?.confirm(id.parse()?).await?),
         ["deny", id] => ConfirmProxy::new(conn).await?.deny(id.parse()?).await?,
+        ["messages", "unlock", pin] => {
+            if !messages.unlock(pin).await? {
+                bail!("wrong PIN");
+            }
+        }
+        ["messages", "lock"] => messages.lock().await?,
+        ["messages", "locked"] => println!("{}", if messages.locked().await? { "locked" } else { "open" }),
         ["wait", id, rest @ ..] if rest.len() <= 1 => {
             let id: u32 = id.parse().context("wait <request> [seconds]")?;
             let secs: u64 = rest.first().map(|s| s.parse()).transpose()?.unwrap_or(130);
@@ -624,25 +633,44 @@ async fn watch(conn: &zbus::Connection, json: bool) -> Result<()> {
     let mut requested = confirm.receive_requested().await?;
     let mut resolved = confirm.receive_resolved().await?;
     let mut status = modem.receive_status_changed().await?;
+    // With a read grant phoned sends numbers in full too, addressed to us, beside
+    // the masked copy everyone gets: then only ours count.
+    let registered = SettingsProxy::new(conn).await?.register().await.unwrap_or(false);
+    let other = |m: &zbus::Message| registered && m.header().destination().is_none();
     if !json {
         println!("watching; ctrl-c to stop");
     }
     loop {
         // Each event as a line of text, and as a JSON object for --json.
         let (line, obj) = tokio::select! {
-            Some(s) = added.next() => s.args().map(|a| (
+            Some(s) = added.next() => {
+                if other(s.message()) {
+                    continue;
+                }
+                s.args().map(|a| (
                 format!("call+ {} {} {}", a.call.id, CallState::from_u8(a.call.state).label(), a.call.number),
                 json!({"event": "call_added", "call": a.call}),
-            ))?,
-            Some(s) = changed.next() => s.args().map(|a| (
+            ))?
+            },
+            Some(s) = changed.next() => {
+                if other(s.message()) {
+                    continue;
+                }
+                s.args().map(|a| (
                 format!("call~ {} {}", a.call.id, CallState::from_u8(a.call.state).label()),
                 json!({"event": "call_changed", "call": a.call}),
-            ))?,
+            ))?
+            },
             Some(s) = removed.next() => s.args().map(|a| (format!("call- {}", a.id), json!({"event": "call_removed", "id": a.id})))?,
-            Some(s) = texts.next() => s.args().map(|a| (
+            Some(s) = texts.next() => {
+                if other(s.message()) {
+                    continue;
+                }
+                s.args().map(|a| (
                 format!("text{} {} #{}", if a.message.direction == 0 { "<" } else { ">" }, a.message.peer, a.message.id),
                 json!({"event": "message_added", "message": a.message}),
-            ))?,
+            ))?
+            },
             Some(s) = text_state.next() => s.args().map(|a| (
                 format!("text~ {} {:?}", a.id, MessageState::from_u8(a.state)),
                 json!({"event": "message_changed", "id": a.id, "state": state_word(MessageState::from_u8(a.state))}),
@@ -651,18 +679,28 @@ async fn watch(conn: &zbus::Connection, json: bool) -> Result<()> {
                 format!("alert! {} {}", phone_core::model::AlertLevel::from_u8(a.alert.level).label(), a.alert.text),
                 json!({"event": "alert", "alert": a.alert}),
             ))?,
-            Some(s) = requested.next() => s.args().map(|a| (
+            Some(s) = requested.next() => {
+                if other(s.message()) {
+                    continue;
+                }
+                s.args().map(|a| (
                 format!("confirm? {} {} {} by {}", a.request.id, a.request.kind, a.request.target, a.request.requester),
                 json!({"event": "requested", "request": a.request}),
-            ))?,
+            ))?
+            },
             Some(s) = resolved.next() => s.args().map(|a| (
                 format!("confirm{} {}", if a.confirmed { "+" } else { "-" }, a.id),
                 json!({"event": "resolved", "id": a.id, "confirmed": a.confirmed}),
             ))?,
-            Some(s) = status.next() => s.args().map(|a| (
+            Some(s) = status.next() => {
+                if other(s.message()) {
+                    continue;
+                }
+                s.args().map(|a| (
                 format!("modem {} {} {}%", a.status.operator, a.status.tech, a.status.quality),
                 json!({"event": "status", "status": a.status}),
-            ))?,
+            ))?
+            },
             _ = tokio::signal::ctrl_c() => return Ok(()),
         };
         if json {
@@ -708,7 +746,9 @@ async fn send_and_wait(conn: &zbus::Connection, to: &str, text: &str, secs: u64,
             let s =
                 tokio::time::timeout_at(deadline, added.next()).await.context("timed out")?.context("bus closed")?;
             let m = s.args()?.message;
-            if m.direction == 1 && phone_core::number::same_party(&m.peer, &peer) {
+            // Without a read grant the announcement's number is masked: match that.
+            let masked = peer.split(',').map(phone_core::number::mask).collect::<Vec<_>>().join(",");
+            if m.direction == 1 && (phone_core::number::same_party(&m.peer, &peer) || m.peer == masked) {
                 id = m.id;
                 break;
             }
@@ -799,6 +839,9 @@ async fn otp(conn: &zbus::Connection, w: &[&str], region: &str, json: bool) -> R
     let mut added = messages.receive_message_added().await?;
     // Fail now, not after a minute, if this program may not read texts.
     let threads = messages.threads().await?;
+    // A reader gets the new-text signal in full, addressed to it, beside the copy
+    // with the number masked that everyone gets: ask for it, and keep only ours.
+    let registered = SettingsProxy::new(conn).await?.register().await.unwrap_or(false);
     let print = |code: &str, peer: &str, id: i64| -> Result<()> {
         if json {
             out(&serde_json::json!({"code": code, "from": peer, "id": id}))
@@ -824,6 +867,9 @@ async fn otp(conn: &zbus::Connection, w: &[&str], region: &str, json: bool) -> R
     loop {
         let s =
             tokio::time::timeout_at(deadline, added.next()).await.context("no code arrived")?.context("bus closed")?;
+        if registered && s.message().header().destination().is_none() {
+            continue;
+        }
         let m = s.args()?.message;
         if m.direction != 0 || from.as_deref().is_some_and(|f| !phone_core::number::same_party(f, &m.peer)) {
             continue;

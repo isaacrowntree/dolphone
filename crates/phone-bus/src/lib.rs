@@ -88,6 +88,8 @@ pub enum Event {
     },
     /// Something a job finished, to tell the owner in passing.
     Notice(String),
+    /// Whether Messages needs its PIN (true: show the PIN screen, not texts).
+    Locked(bool),
     /// A call the UI made failed; the text is phoned's message.
     Error(String),
 }
@@ -165,6 +167,29 @@ impl Bus {
     pub fn refresh_recents(&self, limit: u32) {
         self.run(move |c| async move {
             Ok(vec![Event::Recents(c.calls.recents(limit).await?), Event::Missed(c.calls.missed().await?)])
+        });
+    }
+
+    /// Whether Messages needs its PIN now.
+    pub fn refresh_lock(&self) {
+        self.run(|c| async move { Ok(vec![Event::Locked(c.messages.locked().await?)]) });
+    }
+
+    /// Open Messages with its PIN: Locked(false) when right, else a Notice to say so.
+    pub fn unlock(&self, pin: String) {
+        self.run(move |c| async move {
+            Ok(if c.messages.unlock(&pin).await? {
+                vec![Event::Locked(false)]
+            } else {
+                vec![Event::Notice("Wrong PIN".into()), Event::Locked(true)]
+            })
+        });
+    }
+
+    pub fn lock(&self) {
+        self.run(|c| async move {
+            c.messages.lock().await?;
+            Ok(vec![Event::Locked(c.messages.locked().await?)])
         });
     }
 
@@ -296,31 +321,57 @@ async fn listen(conn: zbus::Connection, c: Clients, deliver: std::sync::Arc<dyn 
     // The ringer is changed from more than one place (the Dialer's PTT hold, either
     // settings app), and every app that buzzes has to know when it went silent.
     let mut ringer = c.audio.receive_ringer_changed().await;
-    let (Ok(mut alerts), Ok(mut book), Ok(mut imported)) = (
+    let (Ok(mut alerts), Ok(mut book), Ok(mut imported), Ok(mut lock)) = (
         c.messages.receive_alert_received().await,
         c.contacts.receive_changed().await,
         c.contacts.receive_imported().await,
+        c.messages.receive_lock_changed().await,
     ) else {
         deliver(Event::Error("could not subscribe to phoned".into()));
         return;
     };
 
     let up = dbus.name_has_owner(zbus::names::BusName::try_from(SERVICE).expect("name")).await.unwrap_or(false);
+    // Signals that name people come twice: in full to us once registered, and with
+    // the numbers masked to everyone. Registered, only the copy addressed to us
+    // counts; if phoned would not register us (it restarted, or we may not read),
+    // the masked one is what there is.
+    let mut registered = up && c.settings.register().await.unwrap_or(false);
+    let ours = |m: &zbus::Message, registered: bool| !registered || m.header().destination().is_some();
     deliver(Event::Connected(up));
     loop {
         let e = tokio::select! {
             Some(s) = owner.next() => match s.args() {
-                Ok(a) => Event::Connected(a.new_owner().is_some()),
+                Ok(a) => {
+                    let up = a.new_owner().is_some();
+                    registered = up && c.settings.register().await.unwrap_or(false);
+                    Event::Connected(up)
+                }
                 Err(_) => continue,
             },
-            Some(s) = added.next() => match s.args() { Ok(a) => Event::CallAdded(a.call), Err(_) => continue },
-            Some(s) = changed.next() => match s.args() { Ok(a) => Event::CallChanged(a.call), Err(_) => continue },
+            Some(s) = added.next() => match s.args() {
+                Ok(a) if ours(s.message(), registered) => Event::CallAdded(a.call),
+                _ => continue,
+            },
+            Some(s) = changed.next() => match s.args() {
+                Ok(a) if ours(s.message(), registered) => Event::CallChanged(a.call),
+                _ => continue,
+            },
             Some(s) = removed.next() => match s.args() { Ok(a) => Event::CallRemoved(a.id), Err(_) => continue },
-            Some(s) = text.next() => match s.args() { Ok(a) => Event::MessageAdded(a.message), Err(_) => continue },
+            Some(s) = text.next() => match s.args() {
+                Ok(a) if ours(s.message(), registered) => Event::MessageAdded(a.message),
+                _ => continue,
+            },
             Some(s) = text_state.next() => match s.args() { Ok(a) => Event::MessageChanged(a.id, a.state), Err(_) => continue },
-            Some(s) = asked.next() => match s.args() { Ok(a) => Event::Requested(a.request), Err(_) => continue },
+            Some(s) = asked.next() => match s.args() {
+                Ok(a) if ours(s.message(), registered) => Event::Requested(a.request),
+                _ => continue,
+            },
             Some(s) = answered.next() => match s.args() { Ok(a) => Event::Resolved(a.id, a.confirmed), Err(_) => continue },
-            Some(s) = status.next() => match s.args() { Ok(a) => Event::Status(a.status), Err(_) => continue },
+            Some(s) = status.next() => match s.args() {
+                Ok(a) if ours(s.message(), registered) => Event::Status(a.status),
+                _ => continue,
+            },
             Some(_) = routes.next() => match c.audio.routes().await { Ok(r) => Event::Routes(r), Err(_) => continue },
             Some(_) = devices.next() => match c.bluetooth.devices().await { Ok(d) => Event::Devices(d), Err(_) => continue },
             Some(s) = passkey.next() => match s.args() { Ok(a) => Event::Passkey(a.address.to_string(), a.passkey), Err(_) => continue },
@@ -330,6 +381,7 @@ async fn listen(conn: zbus::Connection, c: Clients, deliver: std::sync::Arc<dyn 
             Some(p) = ringer.next() => match p.get().await { Ok(r) => Event::Ringer(r), Err(_) => continue },
             Some(s) = alerts.next() => match s.args() { Ok(a) => Event::Alert(a.alert), Err(_) => continue },
             Some(_) = book.next() => Event::ContactsChanged,
+            Some(s) = lock.next() => match s.args() { Ok(a) => Event::Locked(a.locked), Err(_) => continue },
             Some(s) = imported.next() => match s.args() {
                 Ok(a) => Event::ContactsImported { added: a.added, merged: a.merged, unchanged: a.unchanged, error: a.error.to_string() },
                 Err(_) => continue,

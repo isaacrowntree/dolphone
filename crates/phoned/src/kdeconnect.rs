@@ -607,7 +607,7 @@ pub async fn run(phone: Arc<Phone>) {
 }
 
 fn note_privacy(phone: &Phone) {
-    phone.kdeconnect.show_bodies.store(!phone.flag(phone_api::keys::PRIVATE_NOTIFY), Ordering::Relaxed);
+    phone.kdeconnect.show_bodies.store(!phone.private_notify(), Ordering::Relaxed);
 }
 
 async fn serve(phone: &Arc<Phone>) -> anyhow::Result<()> {

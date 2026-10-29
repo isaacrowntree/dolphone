@@ -638,6 +638,22 @@ sleep 0.4
 out=$("$P" threads)
 refute "with mmsd-tng running, phoned leaves the MMS notice to it" "$out" "0491 570 165"
 
+echo "the Messages PIN"
+"$P" set messages_pin 4821
+out=$("$P" get messages_pin)
+expect "the PIN is kept as a hash and never read back" "$out" "set"
+"$P" messages lock
+out=$("$P" threads 2>&1 || true)
+expect "locked, even Dolphone's own apps cannot read texts" "$out" "Messages is locked"
+out=$("$P" messages unlock 1111 2>&1 || true)
+expect "a wrong PIN does not open it" "$out" "wrong PIN"
+"$P" messages unlock 4821
+out=$("$P" messages locked)
+expect "the right one does" "$out" "open"
+"$P" set messages_pin ""
+out=$("$P" messages locked)
+expect "and with no PIN, Messages is open" "$out" "open"
+
 echo "service codes and the modem's setup"
 out=$("$P" ussd '*#06#')
 expect "*#06# shows the IMEI, on the device" "$out" "IMEI: 350000000000001"
@@ -783,6 +799,8 @@ kill "$WATCH" 2>/dev/null || true
 out=$(cat /tmp/dolphone-e2e-watch2.log)
 expect "the new-message signal still arrives" "$out" "text< "
 refute "but without the text (one-time codes stay private)" "$out" "482913"
+refute "and without the number: a script that may not read sees it masked" "$out" "+61491570172"
+expect "as a masked number" "$out" "+61…172"
 kill "$PHONED"
 wait "$PHONED" 2>/dev/null || true
 

@@ -16,6 +16,8 @@ toml = "0.8"
 # KDE Connect: TLS with self-signed certificates, as its protocol has it.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+# PBKDF2 for the Messages PIN; already here through rustls.
+ring = "0.17"
 rcgen = { version = "0.13", default-features = false, features = ["ring", "crypto"] }
 x509-parser = "0.16"
 time = "0.3"

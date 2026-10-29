@@ -78,6 +78,8 @@ pub struct Phone {
     book: std::sync::Mutex<Option<BookCache>>,
     /// Held while the modem's status is read, so reads do not overlap.
     refreshing: Mutex<()>,
+    /// The Messages PIN's open/closed state.
+    pub pin_lock: crate::pin::Lock,
 }
 
 /// The contacts as last read: for which region, and the directory's modification
@@ -186,6 +188,7 @@ impl Phone {
             sip_muted: Mutex::new(false),
             book: std::sync::Mutex::new(None),
             refreshing: Mutex::new(()),
+            pin_lock: Default::default(),
         })
     }
 
@@ -1182,7 +1185,7 @@ impl Phone {
         }
         // With the store locked, nothing here outlives phoned: the SIM keeps it.
         let delete = self.flag(phone_api::keys::DELETE_FROM_SIM) && !crate::storekey::locked();
-        let private = self.flag(phone_api::keys::PRIVATE_NOTIFY);
+        let private = self.private_notify();
 
         // Australia's Emergency Alert texts come from 0444 444 444, the number the
         // national system sends from (ACT ESA, Queensland's disaster centre: "do
@@ -1936,6 +1939,59 @@ impl Phone {
         crate::leds::stop(&self.ring_leds());
     }
 
+    /// Whether there is a Messages PIN.
+    pub fn has_pin(&self) -> bool {
+        !self.setting(phone_api::keys::MESSAGES_PIN).is_empty()
+    }
+
+    /// Whether Messages needs its PIN now.
+    pub fn messages_locked(&self) -> bool {
+        self.has_pin() && !self.pin_lock.is_open(mono())
+    }
+
+    /// Notifications without the text: when asked for, and always with a PIN.
+    pub fn private_notify(&self) -> bool {
+        self.flag(phone_api::keys::PRIVATE_NOTIFY) || self.has_pin()
+    }
+
+    fn open_for(&self) -> i64 {
+        self.setting(phone_api::keys::MESSAGES_OPEN_FOR).parse::<i64>().unwrap_or(300).clamp(30, 3600)
+    }
+
+    /// Open Messages with its PIN; it closes again by itself after a while.
+    pub async fn unlock_messages(self: &Arc<Self>, pin: &str) -> zbus::fdo::Result<bool> {
+        let stored = self.setting(phone_api::keys::MESSAGES_PIN);
+        if stored.is_empty() {
+            return Ok(true);
+        }
+        let now = mono();
+        if let Some(wait) = self.pin_lock.wait(now) {
+            return Err(zbus::fdo::Error::LimitsExceeded(format!("too many wrong PINs; try again in {wait}s")));
+        }
+        let p = pin.to_string();
+        let right = tokio::task::spawn_blocking(move || crate::pin::verify(&p, &stored)).await.unwrap_or(false);
+        if !right {
+            self.pin_lock.wrong_guess(mono());
+            return Ok(false);
+        }
+        let until = mono() + self.open_for();
+        self.pin_lock.open(until);
+        api::emit_lock_changed(&self.session, false).await;
+        let me = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs((until - mono()).max(0) as u64 + 1)).await;
+            if me.messages_locked() {
+                api::emit_lock_changed(&me.session, true).await;
+            }
+        });
+        Ok(true)
+    }
+
+    pub async fn lock_messages(&self) {
+        self.pin_lock.close();
+        api::emit_lock_changed(&self.session, self.messages_locked()).await;
+    }
+
     /// Stop the ringer and give the music back when no call needs them any more:
     /// for a ring that raced its call's end.
     async fn stop_ringing_if_idle(self: &Arc<Self>) {
@@ -2128,6 +2184,26 @@ impl Phone {
     /// SIP, who may read). For Dolphone's own apps, and for a request the owner
     /// allowed.
     pub async fn apply_setting(self: &Arc<Self>, key: &str, value: &str) -> zbus::fdo::Result<()> {
+        if key == phone_api::keys::MESSAGES_PIN.0 {
+            // Kept as a salted hash; "" clears it.
+            let stored = if value.is_empty() {
+                String::new()
+            } else if crate::pin::valid(value) {
+                let v = value.to_string();
+                tokio::task::spawn_blocking(move || crate::pin::hash(&v)).await.unwrap_or_default()
+            } else {
+                return Err(zbus::fdo::Error::InvalidArgs("a PIN is 4 to 12 digits".into()));
+            };
+            self.store_read(|s| s.set_setting(key, &stored))?;
+            // Just set: open, since the owner is the one setting it.
+            if stored.is_empty() {
+                self.pin_lock.close();
+            } else {
+                self.pin_lock.open(mono() + self.open_for());
+            }
+            api::emit_lock_changed(&self.session, self.messages_locked()).await;
+            return Ok(());
+        }
         // read_grants is a list: "+name" adds one program and "-name" removes one,
         // so asking for a grant cannot drop another program's.
         let edited;
@@ -2217,6 +2293,9 @@ impl Phone {
             self.apply_setting(key, value).await?;
             return Ok(Placed { id: 1, pending: 0 });
         }
+        if key == phone_api::keys::MESSAGES_PIN.0 {
+            return Err(zbus::fdo::Error::AccessDenied("the Messages PIN is only set in Phone Settings".into()));
+        }
         if key == phone_api::keys::SIP_PASSWORD.0 {
             return Err(zbus::fdo::Error::AccessDenied("the SIP password is only set in Phone Settings".into()));
         }
@@ -2299,7 +2378,7 @@ impl Phone {
             self.kdeconnect.message(&m);
         }
         api::emit_unread_changed(self).await;
-        let private = self.flag(phone_api::keys::PRIVATE_NOTIFY);
+        let private = self.private_notify();
         self.notify.message(&self.name_for(peer), peer, shown, private).await;
         if self.flag(phone_api::keys::TEXT_TONE) && self.setting(("ringer", "ring")) == "ring" {
             self.audio.play(Tone::Text);
@@ -2448,7 +2527,7 @@ impl Phone {
         }
         api::emit_unread_changed(self).await;
         tracing::info!(from = %number::mask(&from), "text received over SIP");
-        let private = self.flag(phone_api::keys::PRIVATE_NOTIFY);
+        let private = self.private_notify();
         self.notify.message(&self.name_for(&from), &from, &body, private).await;
         if self.flag(phone_api::keys::TEXT_TONE) && self.setting(("ringer", "ring")) == "ring" {
             self.audio.play(Tone::Text);

@@ -27,6 +27,17 @@ async fn front_end(conn: &Connection, hdr: &Header<'_>, what: &str) -> zbus::fdo
 }
 
 /// The caller, if it may read messages and the call log.
+/// A reader of messages, with the Messages PIN applied: while it is set and
+/// Messages is not open, Dolphone's own apps are refused too (the PIN is about the
+/// person holding the device). Programs granted reading are not asked.
+async fn messages_reader(phone: &Phone, conn: &Connection, hdr: &Header<'_>) -> zbus::fdo::Result<Caller> {
+    let c = reader(conn, hdr).await?;
+    if c.trusted && phone.messages_locked() {
+        return Err(zbus::fdo::Error::AccessDenied("Messages is locked: enter the PIN".into()));
+    }
+    Ok(c)
+}
+
 async fn reader(conn: &Connection, hdr: &Header<'_>) -> zbus::fdo::Result<Caller> {
     let c = caller::identify(conn, hdr).await;
     if c.may_read() {
@@ -245,7 +256,7 @@ impl Messages {
         #[zbus(header)] hdr: Header<'_>,
         #[zbus(connection)] conn: &Connection,
     ) -> zbus::fdo::Result<Vec<MessageInfo>> {
-        let who = reader(conn, &hdr).await?;
+        let who = messages_reader(&self.0, conn, &hdr).await?;
         self.0.audit(&who, "search", "", "allowed");
         Ok(self.0.store_read(|s| s.search(query, limit.clamp(1, 500)))?.iter().map(to_info).collect())
     }
@@ -256,7 +267,7 @@ impl Messages {
         #[zbus(header)] hdr: Header<'_>,
         #[zbus(connection)] conn: &Connection,
     ) -> zbus::fdo::Result<String> {
-        let who = reader(conn, &hdr).await?;
+        let who = messages_reader(&self.0, conn, &hdr).await?;
         self.0.audit(&who, "export", "", "allowed");
         let region = self.0.region();
         let book = phone_core::contacts::Book::load(&phone_core::store::contacts_dir(), &region);
@@ -270,12 +281,39 @@ impl Messages {
         self.0.alerts(limit)
     }
 
+    async fn unlock(
+        &self,
+        pin: &str,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> zbus::fdo::Result<bool> {
+        front_end(conn, &hdr, "open Messages").await?;
+        self.0.unlock_messages(pin).await
+    }
+
+    async fn lock(
+        &self,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> zbus::fdo::Result<()> {
+        front_end(conn, &hdr, "close Messages").await?;
+        self.0.lock_messages().await;
+        Ok(())
+    }
+
+    async fn locked(&self) -> bool {
+        self.0.messages_locked()
+    }
+
+    #[zbus(signal)]
+    async fn lock_changed(em: &SignalEmitter<'_>, locked: bool) -> zbus::Result<()>;
+
     async fn threads(
         &self,
         #[zbus(header)] hdr: Header<'_>,
         #[zbus(connection)] conn: &Connection,
     ) -> zbus::fdo::Result<Vec<ThreadInfo>> {
-        reader(conn, &hdr).await?;
+        messages_reader(&self.0, conn, &hdr).await?;
         let rows = self.0.store_read(|s| s.threads())?;
         Ok(rows
             .into_iter()
@@ -295,7 +333,7 @@ impl Messages {
         #[zbus(header)] hdr: Header<'_>,
         #[zbus(connection)] conn: &Connection,
     ) -> zbus::fdo::Result<Vec<MessageInfo>> {
-        let who = reader(conn, &hdr).await?;
+        let who = messages_reader(&self.0, conn, &hdr).await?;
         self.0.audit(&who, "read", peer, "allowed");
         Ok(self.0.store_read(|s| s.conversation(peer))?.iter().map(to_info).collect())
     }
@@ -662,6 +700,10 @@ impl Settings {
             // The owner's number, or the SIM carrier's well-known one.
             return Ok(self.0.voicemail());
         }
+        if key == phone_api::keys::MESSAGES_PIN.0 {
+            // Never the hash: whether there is a PIN.
+            return Ok(if self.0.setting((key, "")).is_empty() { String::new() } else { "set".into() });
+        }
         if key == phone_api::keys::SIP_PASSWORD.0 {
             // Never the password itself: only whether there is one.
             return Ok(if crate::sip::has_password() { "set".into() } else { String::new() });
@@ -784,6 +826,18 @@ impl Settings {
         self.0.store_read(|s| s.blocked())
     }
 
+    async fn register(&self, #[zbus(header)] hdr: Header<'_>, #[zbus(connection)] conn: &Connection) -> bool {
+        let c = caller::identify(conn, &hdr).await;
+        let Some(sender) = hdr.sender() else { return false };
+        if !c.may_read() {
+            return false;
+        }
+        if let Ok(mut l) = LISTENERS.lock() {
+            l.insert(sender.to_string());
+        }
+        true
+    }
+
     async fn wipe(&self, #[zbus(header)] hdr: Header<'_>, #[zbus(connection)] conn: &Connection) -> Placed {
         // Always confirmed on the device, even from our own Settings app: there is
         // no undo.
@@ -827,20 +881,56 @@ fn outcome<T>(r: &zbus::fdo::Result<T>) -> String {
 
 // Emitting, for the parts of phoned that are not inside a method call.
 
+/// The connections that registered for signals in full (Dolphone's own apps, and
+/// programs that may read): by unique bus name. Pruned when one leaves the bus.
+static LISTENERS: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+pub fn forget_listener(name: &str) {
+    if let Ok(mut l) = LISTENERS.lock() {
+        l.remove(name);
+    }
+}
+
+fn listeners() -> Vec<String> {
+    LISTENERS.lock().map(|l| l.iter().cloned().collect()).unwrap_or_default()
+}
+
 fn emitter(conn: &Connection) -> Option<SignalEmitter<'static>> {
     SignalEmitter::new(conn, PATH).ok().map(|e| e.into_owned())
 }
 
+/// A signal sent twice: in full to each registered listener, and to everyone else
+/// as `masked` makes it.
+macro_rules! private_signal {
+    ($conn:expr, $value:expr, $mask:expr, |$em:ident, $v:ident| $send:expr) => {{
+        let full = $value;
+        for name in listeners() {
+            if let (Some(e), Ok(dest)) = (emitter($conn), zbus::names::BusName::try_from(name.as_str())) {
+                let $em = e.set_destination(dest.into_owned());
+                let $v = full.clone();
+                let _ = $send.await;
+            }
+        }
+        if let Some($em) = emitter($conn) {
+            let mut masked = full;
+            $mask(&mut masked);
+            let $v = masked;
+            let _ = $send.await;
+        }
+    }};
+}
+
 pub async fn emit_call_added(conn: &Connection, call: CallInfo) {
-    if let Some(em) = emitter(conn) {
-        let _ = Calls::call_added(&em, call).await;
-    }
+    private_signal!(conn, call, |c: &mut CallInfo| c.number = number::mask(&c.number), |em, v| Calls::call_added(
+        &em, v
+    ));
 }
 
 pub async fn emit_call_changed(conn: &Connection, call: CallInfo) {
-    if let Some(em) = emitter(conn) {
-        let _ = Calls::call_changed(&em, call).await;
-    }
+    private_signal!(conn, call, |c: &mut CallInfo| c.number = number::mask(&c.number), |em, v| {
+        Calls::call_changed(&em, v)
+    });
 }
 
 pub async fn emit_call_removed(conn: &Connection, id: u32) {
@@ -854,9 +944,15 @@ pub async fn emit_call_removed(conn: &Connection, id: u32) {
 /// conversation, which only readers may.
 pub async fn emit_message_added(conn: &Connection, mut m: MessageInfo) {
     m.body.clear();
-    if let Some(em) = emitter(conn) {
-        let _ = Messages::message_added(&em, m).await;
-    }
+    private_signal!(
+        conn,
+        m,
+        |m: &mut MessageInfo| {
+            m.peer = m.peer.split(',').map(number::mask).collect::<Vec<_>>().join(",");
+            m.parts.iter_mut().for_each(|p| p.1.clear());
+        },
+        |em, v| Messages::message_added(&em, v)
+    );
 }
 
 pub async fn emit_alert_received(conn: &Connection, a: AlertInfo) {
@@ -873,9 +969,7 @@ pub async fn emit_message_changed(conn: &Connection, id: i64, state: u8) {
 
 pub async fn emit_requested(conn: &Connection, mut r: Request) {
     r.body.clear();
-    if let Some(em) = emitter(conn) {
-        let _ = Confirm::requested(&em, r).await;
-    }
+    private_signal!(conn, r, |r: &mut Request| r.target = number::mask(&r.target), |em, v| Confirm::requested(&em, v));
 }
 
 pub async fn emit_resolved(conn: &Connection, id: u32, confirmed: bool) {
@@ -885,8 +979,12 @@ pub async fn emit_resolved(conn: &Connection, id: u32, confirmed: bool) {
 }
 
 pub async fn emit_status_changed(conn: &Connection, s: ModemStatus) {
+    private_signal!(conn, s, |s: &mut ModemStatus| s.own_number.clear(), |em, v| Modem::status_changed(&em, v));
+}
+
+pub async fn emit_lock_changed(conn: &Connection, locked: bool) {
     if let Some(em) = emitter(conn) {
-        let _ = Modem::status_changed(&em, s).await;
+        let _ = Messages::lock_changed(&em, locked).await;
     }
 }
 
