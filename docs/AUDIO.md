@@ -59,7 +59,11 @@ the call connects and whenever the route changes. Mute is baresip's mute.
   on the speaker (and the desktop app's route menu sets one).
 - A headset plugged into the jack takes the call; unplugging it falls back to the
   speaker. phoned reads `SW_HEADPHONE_INSERT` from whichever input device reports it,
-  and notices a device that goes away and comes back.
+  and notices a device that goes away and comes back. It watches `/dev/input` with
+  inotify rather than rescanning it on a timer, so nothing wakes while nothing
+  changes: a new `event*` node (or udev giving it its permissions) brings a rescan
+  at once and another a second later. Underneath that is a rescan once a minute,
+  for when `/dev/input` cannot be watched, and one whenever a watched device goes.
 - A Bluetooth headset connecting takes the call; it disconnecting falls back to the
   jack or the speaker.
 - A route the user picked by hand stays until the call ends, except that a device
@@ -92,6 +96,37 @@ none is reported), one each way, as nodes `dolphone-downlink` and
 `dolphone-uplink`. The port is flushed each time a leg starts, so stale bytes
 never play as noise. The port needs the `dialout` group.
 
+The modem's PCM clock and the sound card's are different clocks, so over a long
+call one runs ahead of the other. With `pw-cat` on the port directly, latency
+would grow without bound in the port's buffer, or the stream would run dry. So
+phoned's own thread sits between the port and both `pw-cat`s:
+
+```
+modem port ─▶ [serial-pcm thread] ─▶ pipe ─▶ pw-cat --playback   (downlink)
+modem port ◀─ [serial-pcm thread] ◀─ buffer ◀─ pw-cat --record   (uplink)
+```
+
+It reads the port 20 ms frame by frame. Each frame goes into the downlink's pipe,
+and for each one, one frame of the uplink goes back to the modem. The uplink so
+runs at the modem's own clock, and its buffer in phoned is the only place the
+drift collects. The downlink's buffer is the pipe itself, whose fill the kernel
+reports (`FIONREAD`), so it counts what `pw-cat` has really taken. Each buffer may
+wander between 20 ms and 200 ms. Past either bound it is brought back to 60 ms,
+a whole frame at a time: frames are dropped, or silence is added. A buffer whose
+low point has stayed over 60 ms for a second is trimmed back to it too, so
+latency picked up once (a stream's start, a stall) does not last the call. At a
+realistic drift that is a 20 ms skip or gap every few minutes. If the modem sends
+nothing for 200 ms, the uplink carries on at phoned's own clock. While muted, the
+modem gets silence.
+
+`pw-cat`'s raw mode goes through stdio, which moves 4096 bytes at a time: 256 ms at
+8 kHz, read ahead of playing and written in bursts. phoned runs both legs under
+coreutils' `stdbuf -i0 -o0` (it then runs `pw-cat` itself, so `ps` shows `pw-cat`),
+which makes `pw-cat` move 5 to 20 ms at a time. Both legs also ask for
+`--latency 20ms`. Without `stdbuf` the bridge allows for the bursts: it estimates
+what `pw-cat` has read but not yet played, and raises the uplink's drop bound by
+the largest burst seen.
+
 The modem's own sound card, where it has one, is given the lowest
 `priority.session` by `dist/wireplumber/51-dolphone-bluetooth.conf`, so it never
 becomes the default sink or source.
@@ -111,8 +146,15 @@ always 0700) and plays them with `pw-play`:
   the speaker if not. The Dialer runs the motor alongside, and PTT silences;
 - the call-waiting pips, in the ear: on the call's output;
 - the **text tone**, when the ringer is on;
-- the **alert tone** for emergency alerts (853 + 960 Hz, the attention signal alert
-  systems use), in the Alarm role, whatever the ringer says;
+- the **alert tone** for emergency alerts, in the Alarm role, whatever the ringer
+  says. It is 853 Hz and 960 Hz together, the attention signal alert systems use.
+  In the United States and its territories it follows Wireless Emergency Alerts'
+  rule (47 CFR 10.520): a 2 s tone, then two 1 s tones, 0.5 s between each,
+  the whole sequence twice with 0.5 s between, 10.5 s in all. EU-Alert (ETSI TS
+  102 900 V1.3.1, clause 6.1.2) asks only for a dedicated attention signal and leaves
+  its form to each country, and no national pattern has been found, so elsewhere
+  it is four 0.9 s bursts, about 4 s (`alert_attention` in
+  `phone-core/src/tones.rs`);
 - the **call-progress tones** of the country the SIM (or the owner's setting) says
   you are in: busy and congestion after the network turns a call away, and, for
   networks that send silence while ringing out, ringback (Phone Settings > Calls >

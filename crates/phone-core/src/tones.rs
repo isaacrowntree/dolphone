@@ -139,6 +139,32 @@ pub fn cadence(region: &str, p: Progress) -> Cadence {
     }
 }
 
+/// The attention signal an emergency alert sounds with, for `region` (ISO 3166
+/// alpha-2): 853 Hz and 960 Hz together, the pair alert systems share, in a
+/// cadence (as above, on first, then off) played once.
+///
+/// The United States and its territories have it in law. Wireless Emergency
+/// Alerts' attention signal (47 CFR 10.520) is "one long tone of two (2) seconds,
+/// followed by two short tones of one (1) second each, with a half (0.5) second
+/// interval between each tone", the whole sequence "repeated twice with a half
+/// (0.5) second interval between each repetition": 10.5 s in all.
+///
+/// Elsewhere there is no pattern to follow. EU-Alert (ETSI TS 102 900 V1.3.1,
+/// clause 6.1.2) asks only for "a dedicated alerting indication (audio attention signal
+/// and a dedicated vibration cadence)", distinct from the phone's other sounds, and
+/// leaves its form to each country, none of which Dolphone has found published; so
+/// the rest of the world gets the same two frequencies in four short bursts, about
+/// four seconds.
+pub fn alert_attention(region: &str) -> Cadence {
+    const WEA: Cadence = c(&[853.0, 960.0], &[2000, 500, 1000, 500, 1000, 500, 2000, 500, 1000, 500, 1000, 0]);
+    const OTHER: Cadence = c(&[853.0, 960.0], &[900, 150, 900, 150, 900, 150, 900, 150]);
+    match region.to_ascii_uppercase().as_str() {
+        // The states and the territories WEA covers.
+        "US" | "PR" | "GU" | "VI" | "AS" | "MP" => WEA,
+        _ => OTHER,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +202,20 @@ mod tests {
                 assert!((400..=6000).contains(&t.cycle_ms()), "{r} {p:?}");
             }
         }
+    }
+
+    #[test]
+    fn us_alerts_follow_47_cfr_10_520() {
+        let us = alert_attention("us");
+        assert_eq!(us.freqs, &[853.0, 960.0]);
+        assert_eq!(us.cycle_ms(), 10_500, "two 5 s sequences and the 0.5 s between them");
+        let on: Vec<u32> = us.steps.iter().step_by(2).copied().collect();
+        assert_eq!(on, [2000, 1000, 1000, 2000, 1000, 1000], "a long tone, then two short ones, twice");
+        assert!(us.steps.iter().skip(1).step_by(2).take(5).all(|&off| off == 500), "half a second between tones");
+        assert_eq!(alert_attention("PR"), us, "and the territories");
+        let au = alert_attention("AU");
+        assert_eq!(au.freqs, us.freqs, "the same pair elsewhere");
+        assert_eq!(au.cycle_ms(), 4200);
+        assert!(au.steps.len().is_multiple_of(2));
     }
 }
