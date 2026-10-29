@@ -113,7 +113,7 @@ drift collects. The downlink's buffer is the pipe itself, whose fill the kernel
 reports (`FIONREAD`), so it counts what `pw-cat` has really taken. Each buffer may
 wander between 20 ms and 200 ms. Past either bound it is brought back to 60 ms,
 a whole frame at a time: frames are dropped, or silence is added. A buffer whose
-low point has stayed over 60 ms for a second is trimmed back to it too, so
+low point has stayed more than a frame (20 ms) above 60 ms for a second is trimmed back to it too, so
 latency picked up once (a stream's start, a stall) does not last the call. At a
 realistic drift that is a 20 ms skip or gap every few minutes. If the modem sends
 nothing for 200 ms, the uplink carries on at phoned's own clock. While muted, the

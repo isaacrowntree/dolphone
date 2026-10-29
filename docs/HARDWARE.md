@@ -53,9 +53,9 @@ Write down the firmware revision: Quectel asks for it.
 
 `mmcli --command` and Dolphone's AT commands (the modem setup, the Flipper One's
 `AT+QPCMV=1,2` at every start, call forwarding codes) need ModemManager in **debug
-mode**, the only mode in which it passes AT commands from a client. Installing the
-package asks whether to turn it on (yes by default on a Flipper One, where call
-audio needs it). To change it later:
+mode**, the only mode in which it passes AT commands from a client, unless Dolphone
+has a spare AT port (below). Installing the package asks whether to turn it on (yes
+by default on a Flipper One, where call audio needs it). To change it later:
 
 ```sh
 sudo dolphone-modem-access on      # or off, or status; dpkg-reconfigure dolphone asks again
@@ -162,7 +162,8 @@ check `AT+QAUDMOD`, and capture `pw-top` during the call. Record what you tried.
 ## Call forwarding and caller ID
 
 ModemManager has no API for these, so the dialer sends them as the standard AT
-commands (3GPP TS 27.007), through the same debug-mode passthrough:
+commands (3GPP TS 27.007), through the spare AT port when there is one, otherwise
+ModemManager's debug-mode passthrough:
 
 | Keypad | Does | Command |
 |---|---|---|

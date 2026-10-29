@@ -10,8 +10,8 @@ device profile from "untested" to "tested", and a new machine is one TOML file:
 ## Ground rules
 
 - **Add to FlipCTL, never replace it.** Screens use FlipCTL's widgets, fonts and
-  soft-key roles ([docs/BUTTONS.md](https://isaacrowntree.com/dolphone/BUTTONS.html)). If something should change in
-  FlipCTL itself, that is a contribution to flipctl-slint, not a workaround here.
+  soft-key roles ([docs/BUTTONS.md](https://isaacrowntree.com/dolphone/BUTTONS.html)). Dolphone does not wait
+  on FlipCTL: anything FlipCTL lacks is Dolphone's own optional work, for later.
 - **The Flipper One comes first.** A feature is designed for its panel and its
   buttons; other machines get it through their device profile and the desktop app.
   Hardware facts in a profile cite where they came from.
@@ -34,9 +34,7 @@ yourself. Pull requests that relay a tool's output unread will be closed.
 
 Dolphone is unofficial. Please do not open issues on Flipper's repositories about
 Dolphone; their contribution rules ask for discussion on Discord and for designs as
-comments on their "help wanted" tasks. Changes we want upstream go there as small,
-self-contained pull requests.
-
+comments on their "help wanted" tasks.
 ## Conduct
 
 Be kind and assume good faith; see [CODE_OF_CONDUCT.md](https://github.com/isaacrowntree/dolphone/blob/main/CODE_OF_CONDUCT.md).

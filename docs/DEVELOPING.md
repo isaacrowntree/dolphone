@@ -39,6 +39,7 @@ phonectl fake answer | hangup | busy   # the far end
 phonectl fake broadcast 4370 "test"    # an emergency alert
 phonectl fake lock on                  # the SIM asks for its PIN (1234)
 phonectl fake signal 30 5G             # FlipCTL's own status bar follows
+phonectl fake atport                   # the modem's spare AT port (a pty), for phonectl set at_port
 phonectl watch                         # every event phoned sends
 journalctl --user -u phoned -f
 ```
@@ -68,7 +69,7 @@ build first, since they run what is in `$CARGO_TARGET_DIR/debug`:
 ```sh
 cargo build --workspace                      # what the scripts run
 cargo test --workspace                       # core, daemon, CLI, desktop
-scripts/e2e.sh                               # 224 checks: fake-mm, fake-mmsd, phoned, a SIP far end, phonectl, on real buses
+scripts/e2e.sh                               # 242 checks: fake-mm, fake-mmsd, phoned, a SIP far end, phonectl, on real buses
 scripts/ui-e2e.sh                            # the four apps driven live against phoned; screenshots in */target/render/live/
 scripts/kdeconnect-e2e.sh                    # 10 checks against the real kdeconnectd (apt install kdeconnect)
 cd apps/dialer && DOLPHONE_RENDER=1 cargo test  # behaviour, and every screen to target/render/
@@ -80,8 +81,8 @@ installed) to be the far end of SIP calls, driven with `phonectl fake sip ...`, 
 runs phoned's own baresip with a test tone for a microphone (`DOLPHONE_SIP_TEST_AUDIO`,
 debug builds only). It plays mmsd-tng with `fake-mmsd` (`phonectl fake mms ...`),
 encrypts and unlocks the store where `systemd-creds --user` works (systemd 256 and
-later; skipped in containers), and bridges serial call audio through a pty and the
-session's real PipeWire when there is one.
+later; skipped in containers), sends AT commands through fake-mm's spare AT port (a pty), and bridges serial call
+audio through a pty and the session's real PipeWire when there is one.
 
 `scripts/ui-e2e.sh` runs each app's `live_*` test (ignored by a plain `cargo test`):
 the app is built as it runs on the device, its bus events are fed through its own

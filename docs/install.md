@@ -56,7 +56,7 @@ sudo dolphone-modem-access on        # or off, or status
 sudo dpkg-reconfigure dolphone       # ask again
 ```
 
-On a Quectel RM520N-GL there is another way, not yet tried on a real modem: a spare
+On a Quectel RM520N-GL or RM500Q there is another way, not yet tried on a real modem: a spare
 AT port that ModemManager is told to leave alone, which phoned uses itself, so debug
 mode can stay off. It is not part of the question, since it depends on the modem:
 

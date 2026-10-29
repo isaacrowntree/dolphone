@@ -7,10 +7,10 @@
 | `phone-core` | library | numbers (canonical form, display, emergency / premium / short classes, prefixes), message text cleaning, SMS segment counting and one-time codes, vCard contacts (import, merge, edit), supplementary-service codes (TS 22.030), the store (SQLite, or SQLCipher when encrypted: messages with their MMS parts, calls, alerts, grants, audit; behind the `db` feature, which the panel apps leave out), the countries' call-progress tones, local time |
 | `phone-api` | library | the D-Bus names, wire types and client proxies; a script author can use it alone |
 | `phone-bus` | library | a front end's worker thread: subscribes to everything phoned says, runs calls off the UI thread, survives phoned restarting |
-| `phoned` | systemd user service | the phone: ModemManager client, call state, texts, MMS through mmsd-tng, emergency alerts, confirmations and grants, call audio (including a serial PCM bridge), ringer, tones and LEDs, Bluetooth and the phonebook copy, jack, SIP through baresip, KDE Connect, device profiles, the modem's AT setup and service codes, rules on texts, uplink alerts, sleep and wake, desktop notifications, the store's sealed key |
+| `phoned` | systemd user service | the phone: ModemManager client, call state, texts, MMS through mmsd-tng, emergency alerts, confirmations and grants, call audio (including a serial PCM bridge), ringer, tones and LEDs, Bluetooth and the phonebook copy, jack, SIP through baresip, KDE Connect, device profiles, the modem's AT setup and service codes (on a spare AT port of its own when there is one), the Messages PIN, rules on texts, uplink alerts, sleep and wake, desktop notifications, the store's sealed key |
 | `dolphone-gateway` | optional user service | an HTTP SMS gateway on phoned's API, localhost only by default |
 | `phonectl` | CLI | everything a front end can do, for scripts; `phonectl fake ...` plays the far end against fake-mm |
-| `fake-mm` | dev service | a ModemManager stand-in with one scriptable modem: calls, texts, delivery reports, cell broadcast, a SIM PIN, call waiting, conferences, AT commands as a Quectel answers them (refused without debug mode); and `fake-mmsd`, an mmsd-tng stand-in on the session bus |
+| `fake-mm` | dev service | a ModemManager stand-in with one scriptable modem: calls, texts, delivery reports, cell broadcast, a SIM PIN, call waiting, conferences, AT commands as a Quectel answers them (refused without debug mode), a spare AT port as a pty; and `fake-mmsd`, an mmsd-tng stand-in on the session bus |
 | `apps/dialer`, `apps/messages`, `apps/settings` | FlipCTL apps | the panel front ends (Wayland clients on flipctl's compositor, drawn with flipctl-app's widgets) |
 | `apps/desktop` | desktop app | the desktop-mode front end |
 
@@ -116,7 +116,7 @@ written to the **audit log** (numbers masked), shown in Phone Settings.
 | What | Where |
 |---|---|
 | Messages, call log, alerts, grants, audit, blocks, settings | `~/.local/share/dolphone/dolphone.db` (0600) |
-| MMS pictures and other parts | `~/.local/share/dolphone/mms/` (0700) |
+| MMS pictures and other parts | `~/.local/share/dolphone/mms/` (0700); in the store itself when it is encrypted |
 | KDE Connect: this device's certificate, paired laptops | `~/.local/share/dolphone/kdeconnect/` |
 | Contacts | `~/.local/share/dolphone/contacts/*.vcf` |
 | The store's sealed key (when encrypted) | `~/.config/dolphone/store-key.cred` |
@@ -125,5 +125,5 @@ written to the **audit log** (numbers masked), shown in Phone Settings.
 | The owner's audio overrides | `~/.config/dolphone/audio.json` |
 | Rules on incoming texts | `~/.config/dolphone/rules.json` |
 | SIP: baresip's config, account and password | `~/.config/dolphone/sip/` (0700; accounts and password 0600) |
-| Ring tones, handoff file, desktop socket | `$XDG_RUNTIME_DIR/dolphone/` |
+| Ring tones, handoff file, desktop socket, MMS parts being shown from an encrypted store | `$XDG_RUNTIME_DIR/dolphone/` |
 | Panel apps | `~/Apps/Phone/dolphone-*-aarch64.fap.AppImage` |

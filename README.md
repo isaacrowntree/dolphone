@@ -29,7 +29,7 @@ Flipper's own buttons; in desktop mode it is a proper desktop app; from a shell 
 | **Calls** | Dial, answer, decline, hold, swap and merge (conference), call waiting, keypad tones, mute; speed dial (hold 2–9) and voicemail (hold 1); T9 name matching; the country's own busy and ringback tones; a call log with missed calls |
 | **Calls over the internet** | A SIP account (through baresip) for when there is no signal, or always, receiving texts over SIP too; same screens, buttons and headsets; a SIP call and a mobile call can be held and swapped. Emergency calls always go over the mobile network |
 | **Texts** | Conversations, multipart texts with a live segment counter, quick replies, delivery reports, resend for a failed text, search, export to Android (SMS Backup & Restore) |
-| **Picture messages and group texts** | MMS through mmsd-tng: pictures shown in the desktop app, group conversations as one thread, replies to everyone |
+| **Picture messages and group texts** | MMS through mmsd-tng: pictures attached from the panel or the desktop and shown in the desktop app, group conversations as one thread, replies to everyone |
 | **Carrier services** | Call forwarding (`**21*n#`, `*#21#`, `##002#`), caller ID (`#31#`), call waiting, and USSD balance codes from the keypad; a check of the modem's own setup for calls (USB audio, VoLTE, the carrier profile) that sets it right with one press |
 | **Emergency alerts** | Cell broadcast (national, extreme, severe, Amber, test), full screen over everything, sounding through silent mode |
 | **Audio** | Built-in speaker (with echo cancellation), 3.5 mm headsets and speakers, Bluetooth headsets (HFP) and speakers (A2DP), an earpiece where the machine has one; calls follow a headset in and out; music pauses for a call; the LEDs flash for a ringing call if you like |
@@ -38,7 +38,7 @@ Flipper's own buttons; in desktop mode it is a proper desktop app; from a shell 
 | **Desktop mode** | A full desktop app with keyboard shortcuts, notifications with Answer / Decline / Reply, a tray icon, `tel:` and `sms:` links, and Copy for one-time codes |
 | **Your laptop** | KDE Connect (GSConnect on GNOME): texts and call alerts on a laptop on the same network, and replies from it, paired on the device |
 | **Scripts** | `phonectl` (with `--json`), a D-Bus API, standing grants ("this program may text these numbers, 4 an hour"), rules that run a command when a matching text arrives, an optional local SMS gateway (HTTP), texts when the uplink goes down, and an audit log of what programs asked for |
-| **Safety** | Premium numbers and short codes always need a press on the device; outside programs wait for one to dial, text, or change contacts, and cannot read messages, answer, or change settings unless you allow it; rate limits; blocked numbers; silence for unknown callers; a warning when the network forces 2G, and a switch to refuse it; the message store can be encrypted, its key sealed to the machine |
+| **Safety** | Premium numbers and short codes always need a press on the device; outside programs wait for one to dial, text, or change contacts, and cannot read messages, answer, or change settings unless you allow it; rate limits; blocked numbers; silence for unknown callers; a warning when the network forces 2G, and a switch to refuse it; a PIN for Messages; the message store can be encrypted, its key sealed to the machine |
 | **The phone's state** | SIM PIN on the keypad; a Today screen of missed calls and unread texts; stays awake for calls and catches up after sleep; follows the modem through resets; records which SIM each text and call went through |
 
 ## How it fits together
@@ -67,7 +67,7 @@ disagree about a call. More in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 Everything above works against **fake-mm**, a stand-in ModemManager that `mmcli`
 itself accepts, and a second baresip playing the far end of SIP calls. The tests:
 
-- **224 end-to-end checks** (`scripts/e2e.sh`): phoned, the fake modem, a fake
+- **242 end-to-end checks** (`scripts/e2e.sh`): phoned, the fake modem, a fake
   mmsd-tng and phonectl playing through calls, texts, MMS, alerts, SIM PIN and SIM
   codes, an emergency call with the SIM locked, SIP, service codes, the modem's
   setup, grants, rules, contacts, the encrypted store, serial call audio through
@@ -78,7 +78,7 @@ itself accepts, and a second baresip playing the far end of SIP calls. The tests
   phoned, with a screenshot of each step;
 - **10 KDE Connect checks** (`scripts/kdeconnect-e2e.sh`) against the real
   kdeconnectd: pairing, texts both ways, a ringing call;
-- **184 unit tests**, including every panel screen rendered and checked against the
+- **214 unit tests**, including every panel screen rendered and checked against the
   panel's fonts.
 
 Before release it had thirty reviews: ten for features and fit, then twenty more

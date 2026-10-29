@@ -46,7 +46,7 @@ The roadmap from the reviews, done:
   ignore (`dolphone-modem-access port on`, a udev rule for the RM520N-GL's
   interface 3, the profile's `[at_port]`, the `at_port` setting); `phonectl modem
   setup` says which way they go. Tested against a pty in fake-mm, not a modem.
-- Call audio: a SIM7600's serial PCM bridged to PipeWire at 8 kHz (the uConsole's
+- Call audio: a SIM7600's serial PCM bridged to PipeWire at the call's rate, 8 or 16 kHz (the uConsole's
   4G extension); an earpiece route for the PinePhone and Librem 5; holding and
   swapping between a SIP call and a mobile call.
 - Texts: search (FTS5) and export as SMS Backup & Restore XML; receiving texts over SIP; the
@@ -66,7 +66,7 @@ The roadmap from the reviews, done:
   off. A program asking to change a setting (`phonectl set`, `phonectl device use`)
   waits for a press on the device, as texts and calls do; Delete phone data removes
   contacts too. The panel apps no longer link the database at all.
-- Tests: the end-to-end suite grew to 224 checks, with 10 more against the real KDE
+- Tests: the end-to-end suite grew to 242 checks, with 10 more against the real KDE
   Connect daemon; the four apps are driven live against phoned
   (`scripts/ui-e2e.sh`); CI runs in Debian 13 containers; the suite also passes
   with every CPU core busy.
@@ -128,13 +128,15 @@ The rest of that roadmap:
   every few seconds.
 - A PIN screen in Messages (panel and desktop) and PIN settings in both Settings.
 - Emergency alerts queue, the most severe first ("1 of 3"); the attention tone
-  and its vibration are the 10.5 s pattern of 47 CFR 10.520, everywhere.
+  and its vibration are the 10.5 s pattern of 47 CFR 10.520 and 10.530, everywhere.
 - Pictures can be attached from the apps: the desktop app through the
   file-chooser portal, panel Messages from a list of the newest in Pictures and
   Downloads. A reply from the panel to a group now reaches everyone in it (it went
   to the first number only).
 - Serial call audio keeps the modem's clock and PipeWire's apart with a small
   buffer that drops or pads whole frames, so a long call does not drift.
+
+The first version:
 
 - phoned: calls (dial, answer, decline, hold/swap, waiting, DTMF, mute), texts
   (multipart, cleaning, deletion from the modem once stored), confirmations for

@@ -118,7 +118,8 @@ same name and change its ids and interface, and add `[at_port]` to the profile.
 phoned uses a profile's port only when udev reports `ID_MM_PORT_IGNORE` on it,
 since two programs on one AT port garble each other's answers. The `at_port`
 setting overrides: `phonectl set at_port /dev/ttyUSB3` uses that port whatever udev
-says, and `modemmanager` never uses one.
+says, `modemmanager` never uses one, and `auto` (the default) uses the profile's
+port once udev has tagged it.
 
 ### Flashing LEDs for a ringing call
 
