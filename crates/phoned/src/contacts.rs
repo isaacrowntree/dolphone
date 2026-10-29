@@ -51,6 +51,14 @@ trait Transfer {
     fn filename(&self) -> zbus::Result<String>;
 }
 
+/// The most a phonebook copied over Bluetooth may be, as for an import over the
+/// bus: the file is the other phone's to write, as large as it likes.
+const MAX_PHONEBOOK: u64 = 8 * 1024 * 1024;
+
+/// Changes to the book are made one at a time: each reads the files, checks the
+/// card is still the one asked about, and writes, with nothing in between.
+static APPLYING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// A Bluetooth address, as BlueZ writes it.
 fn valid_address(a: &str) -> bool {
     let parts: Vec<&str> = a.split(':').collect();
@@ -92,13 +100,26 @@ async fn pull_phonebook(session_bus: &Connection, address: &str) -> Result<Strin
             .get("Filename")
             .and_then(|v| String::try_from(v.clone()).ok())
             .ok_or_else(|| zbus::Error::Failure("no file from the transfer".into()))?;
-        let text = std::fs::read_to_string(&file).map_err(|e| zbus::Error::Failure(e.to_string()))?;
+        let text = read_capped(std::path::Path::new(&file), MAX_PHONEBOOK);
         let _ = std::fs::remove_file(&file);
-        Ok(text)
+        text.map_err(zbus::Error::Failure)
     }
     .await;
     let _ = client.remove_session(&session.as_ref()).await;
     result.map_err(|e| crate::api::short(&e))
+}
+
+/// A file's text, refusing one over `max` bytes (checked as it is read, so a file
+/// still growing cannot slip past).
+fn read_capped(path: &std::path::Path, max: u64) -> Result<String, String> {
+    use std::io::Read;
+    let f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    f.take(max + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > max {
+        return Err(format!("the phonebook is more than {} MB", max / (1024 * 1024)));
+    }
+    String::from_utf8(bytes).map_err(|_| "the phonebook is not text".to_string())
 }
 
 fn to_info(c: &Contact) -> ContactInfo {
@@ -155,16 +176,61 @@ impl Contacts {
 }
 
 /// A change to the book, as it waits in a confirmation.
+///
+/// An id is a file and a place in it, and places move when a card before it goes,
+/// so a change to one contact also carries what that contact was when asked
+/// (`was`): once confirmed it is made only if the id still names that contact,
+/// never to whichever card has come to hold the place.
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 pub enum Op {
-    Add { name: String, numbers: Vec<(String, String)> },
-    Update { id: String, name: String, numbers: Vec<(String, String)> },
-    Remove { id: String },
-    Import { vcards: String },
+    Add {
+        name: String,
+        numbers: Vec<(String, String)>,
+    },
+    Update {
+        id: String,
+        name: String,
+        numbers: Vec<(String, String)>,
+        #[serde(default)]
+        was: Option<Was>,
+    },
+    Remove {
+        id: String,
+        #[serde(default)]
+        was: Option<Was>,
+    },
+    Import {
+        vcards: String,
+    },
+}
+
+/// A contact as it was when a change to it was asked for.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Was {
+    name: String,
+    numbers: Vec<(String, String)>,
+}
+
+impl Was {
+    fn of(c: &Contact) -> Self {
+        Self { name: c.name.clone(), numbers: to_info(c).numbers }
+    }
+}
+
+/// The contact `id` names, checked against what it was when asked about.
+fn still<'a>(book: &'a Book, id: &str, was: &Option<Was>) -> zbus::fdo::Result<&'a Contact> {
+    let c = book.get(id).ok_or_else(no_such)?;
+    if was.as_ref().is_some_and(|w| *w != Was::of(c)) {
+        return Err(zbus::fdo::Error::Failed(
+            "that contact has changed since this was asked for; nothing was done, ask again".into(),
+        ));
+    }
+    Ok(c)
 }
 
 /// Carry out a change, now or once confirmed.
 pub async fn apply(phone: &Arc<Phone>, op: Op) -> zbus::fdo::Result<Placed> {
+    let _one_at_a_time = APPLYING.lock().await;
     let dir = phone_core::store::contacts_dir();
     let region = phone.region();
     let mut book = Book::load(&dir, &region);
@@ -175,17 +241,19 @@ pub async fn apply(phone: &Arc<Phone>, op: Op) -> zbus::fdo::Result<Placed> {
             book.add(&dir, Contact { name, numbers, source: None, card: 0 }).map_err(io)?;
             Placed { id: 1, pending: 0 }
         }
-        Op::Update { id, name, numbers } => {
+        Op::Update { id, name, numbers, was } => {
             let (name, numbers) = checked(&name, &numbers, &region)?;
-            book.update(&id, &name, numbers).map_err(io)?;
+            still(&book, &id, &was)?;
+            book.update(&id, &name, numbers, &region).map_err(io)?;
             Placed { id: 1, pending: 0 }
         }
-        Op::Remove { id } => {
-            book.remove(&id).map_err(io)?;
+        Op::Remove { id, was } => {
+            still(&book, &id, &was)?;
+            book.remove(&id, &region).map_err(io)?;
             Placed { id: 1, pending: 0 }
         }
         Op::Import { vcards } => {
-            let r = book.import(&dir, contacts::parse(&vcards, &region)).map_err(io)?;
+            let r = book.import(&dir, contacts::parse(&vcards, &region), &region).map_err(io)?;
             emit_imported(&phone.session, r, "").await;
             Placed { id: i64::from(r.added + r.merged), pending: 0 }
         }
@@ -234,8 +302,9 @@ impl Contacts {
     ) -> zbus::fdo::Result<Placed> {
         let who = caller::identify(conn, &hdr).await;
         checked(name, &numbers, &self.0.region())?;
-        let was = self.book().get(id).map(|c| c.name.clone()).ok_or_else(no_such)?;
-        self.change(&who, &format!("change {was}"), Op::Update { id: id.into(), name: name.into(), numbers }).await
+        let was = self.book().get(id).map(Was::of).ok_or_else(no_such)?;
+        let what = format!("change {}", was.name);
+        self.change(&who, &what, Op::Update { id: id.into(), name: name.into(), numbers, was: Some(was) }).await
     }
 
     async fn remove(
@@ -245,8 +314,9 @@ impl Contacts {
         #[zbus(connection)] conn: &Connection,
     ) -> zbus::fdo::Result<Placed> {
         let who = caller::identify(conn, &hdr).await;
-        let was = self.book().get(id).map(|c| c.name.clone()).ok_or_else(no_such)?;
-        self.change(&who, &format!("delete {was}"), Op::Remove { id: id.into() }).await
+        let was = self.book().get(id).map(Was::of).ok_or_else(no_such)?;
+        let what = format!("delete {}", was.name);
+        self.change(&who, &what, Op::Remove { id: id.into(), was: Some(was) }).await
     }
 
     async fn import(
@@ -342,5 +412,34 @@ mod tests {
         assert!(checked("x", &[("".into(), "hi".into())], "AU").is_err());
         let (_, n) = checked("x", &[("<script>".into(), "0491570156".into())], "AU").unwrap();
         assert_eq!(n[0].kind, "mobile", "odd kinds become mobile");
+    }
+
+    #[test]
+    fn a_confirmed_change_is_for_the_contact_that_was_asked_about() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("all.vcf"),
+            "BEGIN:VCARD\nFN:Alex\nTEL:0491570156\nEND:VCARD\nBEGIN:VCARD\nFN:Sam\nTEL:0491570157\nEND:VCARD\n",
+        )
+        .unwrap();
+        let book = Book::load(dir.path(), "AU");
+        let sam = Some(Was::of(book.get("all#1").unwrap()));
+        assert!(still(&book, "all#1", &sam).is_ok());
+        // Alex goes; the place Sam was asked about is gone, and "all" is Sam now.
+        std::fs::write(dir.path().join("all.vcf"), "BEGIN:VCARD\nFN:Sam\nTEL:0491570157\nEND:VCARD\n").unwrap();
+        let book = Book::load(dir.path(), "AU");
+        assert!(still(&book, "all#1", &sam).is_err());
+        let alex = Some(Was { name: "Alex".into(), numbers: vec![("phone".into(), "+61491570156".into())] });
+        assert!(still(&book, "all", &alex).is_err(), "Sam is not changed in Alex's place");
+        assert!(still(&book, "all", &None).is_ok(), "an older request with nothing to check");
+    }
+
+    #[test]
+    fn copied_phonebooks_are_capped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pb.vcf");
+        std::fs::write(&path, vec![b'x'; 2048]).unwrap();
+        assert!(read_capped(&path, 1024).is_err());
+        assert_eq!(read_capped(&path, 4096).unwrap().len(), 2048);
     }
 }

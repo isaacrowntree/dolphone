@@ -7,7 +7,9 @@
 //! no-op, so nothing else in phoned has to know which mode it is in.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use tokio::sync::Mutex;
@@ -61,6 +63,46 @@ pub struct Notifier {
 
 const APP: &str = "Dolphone";
 
+/// Text for a notification, with markup's three characters escaped. Servers that
+/// render markup (most render it in the body, several in the summary too) would
+/// otherwise take a contact's name or a text's body as markup: a link, an image,
+/// or text styled to pass for the phone's own.
+pub fn escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Where the ids of the call notifications showing now are kept, with the server
+/// that holds them, so a phoned started again (after a crash, or an upgrade) can
+/// take down an "Incoming call" its last run left up. In the runtime directory:
+/// gone with the session, as the server's notifications are.
+fn calls_file() -> Option<PathBuf> {
+    Some(PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR")?).join("dolphone/call-notifications"))
+}
+
+/// The file's text: the server's unique bus name, then one id a line.
+fn calls_text(server: &str, ids: &[u32]) -> String {
+    let mut t = format!("{server}\n");
+    for id in ids {
+        t.push_str(&format!("{id}\n"));
+    }
+    t
+}
+
+fn parse_calls(text: &str) -> Option<(String, Vec<u32>)> {
+    let mut lines = text.lines();
+    let server = lines.next()?.trim().to_string();
+    (!server.is_empty()).then(|| (server, lines.filter_map(|l| l.trim().parse().ok()).collect()))
+}
+
 /// The notification server's unique bus name, if it is a program installed with the
 /// system (under /usr, owned by root).
 ///
@@ -93,7 +135,10 @@ struct Style {
 
 // Categories are the Desktop Notifications spec's own, so desktops style them as
 // calls and messages; the confirmation has none, so it gets a vendor one.
-const RINGING: Style = Style { urgency: 2, category: "call.incoming", timeout: 0, icon: "call-start" };
+// A ringing call's notification also expires on its own, well after any network
+// has stopped ringing: should phoned stop and not come back, it is not left up
+// for good (when phoned does come back, it takes it down itself, see calls_file).
+const RINGING: Style = Style { urgency: 2, category: "call.incoming", timeout: 120_000, icon: "call-start" };
 const MISSED: Style = Style { urgency: 1, category: "call.unanswered", timeout: -1, icon: "call-missed" };
 const MESSAGE: Style = Style { urgency: 1, category: "im.received", timeout: -1, icon: "mail-message-new" };
 const ALERT: Style = Style { urgency: 2, category: "x-dolphone.alert", timeout: 0, icon: "dialog-warning" };
@@ -109,9 +154,49 @@ impl Notifier {
         NotificationsProxy::builder(&self.conn).destination(owner).build().await.ok()
     }
 
+    /// Note the call notifications up now (see [`calls_file`]).
+    fn save_calls(posted: &HashMap<u32, About>, server: &str) {
+        let Some(path) = calls_file() else { return };
+        let mut ids: Vec<u32> = posted.iter().filter(|(_, a)| matches!(a, About::Call(_))).map(|(id, _)| *id).collect();
+        if ids.is_empty() {
+            let _ = std::fs::remove_file(&path);
+            return;
+        }
+        ids.sort_unstable();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&path, calls_text(server, &ids));
+    }
+
+    /// Take down the call notifications a previous run of phoned left up, if the
+    /// server that holds them is still the one running (a unique bus name is never
+    /// given out twice, so ids from another server are left alone).
+    async fn close_orphans(&self) {
+        let Some(path) = calls_file() else { return };
+        let Some((server, ids)) = std::fs::read_to_string(&path).ok().as_deref().and_then(parse_calls) else {
+            return;
+        };
+        let _ = std::fs::remove_file(&path);
+        let Some(p) = self.proxy().await else { return };
+        if p.inner().destination().as_str() != server {
+            return;
+        }
+        let ours: Vec<u32> = self.posted.lock().await.keys().copied().collect();
+        for id in ids.into_iter().filter(|id| !ours.contains(id)) {
+            let _ = p.close_notification(id).await;
+        }
+    }
+
     async fn post(&self, about: About, style: Style, summary: &str, body: &str, actions: &[&str]) {
         let Style { urgency, category, timeout, icon } = style;
         let Some(p) = self.proxy().await else { return };
+        // The summary is escaped always (servers that take markup there do not say
+        // so); the body when the server says it renders markup in it, as one that
+        // does not shows the body as it is.
+        let markup = p.get_capabilities().await.unwrap_or_default().iter().any(|c| c == "body-markup");
+        let summary = escape(summary);
+        let body = if markup { escape(body) } else { body.to_string() };
         let replaces = self.posted.lock().await.iter().find(|(_, a)| **a == about).map(|(id, _)| *id).unwrap_or(0);
         let hints = HashMap::from([
             ("urgency", Variant::from(urgency)),
@@ -120,9 +205,14 @@ impl Notifier {
             // A ringing call stays until it is dealt with.
             ("resident", Variant::from(urgency == 2)),
         ]);
-        match p.notify(APP, replaces, icon, summary, body, actions, hints, timeout).await {
+        let call = matches!(about, About::Call(_));
+        match p.notify(APP, replaces, icon, &summary, &body, actions, hints, timeout).await {
             Ok(id) => {
-                self.posted.lock().await.insert(id, about);
+                let mut posted = self.posted.lock().await;
+                posted.insert(id, about);
+                if call {
+                    Self::save_calls(&posted, p.inner().destination().as_str());
+                }
             }
             Err(e) => tracing::debug!("notify: {e}"),
         }
@@ -141,6 +231,19 @@ impl Notifier {
             for id in ids {
                 let _ = p.close_notification(id).await;
             }
+            if matches!(about, About::Call(_)) {
+                let posted = self.posted.lock().await;
+                Self::save_calls(&posted, p.inner().destination().as_str());
+            }
+        }
+    }
+
+    /// The server went away or changed: the ids phoned holds are its old ones, and
+    /// a new server may give the same numbers to other notifications.
+    async fn forget_all(&self) {
+        self.posted.lock().await.clear();
+        if let Some(path) = calls_file() {
+            let _ = std::fs::remove_file(path);
         }
     }
 
@@ -216,17 +319,31 @@ impl Notifier {
 
 /// Act on notification buttons. Runs for phoned's lifetime; a desktop that starts
 /// later is picked up because the match is on the signal, not on a proxy to a
-/// particular owner.
+/// particular owner. Subscribing can fail (the bus busy at boot) and the streams
+/// can end: either way it subscribes again, waiting longer each time it fails.
 pub async fn listen(phone: Arc<Phone>) {
-    let Ok(p) =
-        NotificationsProxy::builder(&phone.session).cache_properties(zbus::proxy::CacheProperties::No).build().await
-    else {
-        return;
-    };
-    let (Ok(mut actions), Ok(mut replies)) = (p.receive_action_invoked().await, p.receive_notification_replied().await)
-    else {
-        return;
-    };
+    phone.notify.close_orphans().await;
+    let mut wait = Duration::from_secs(1);
+    loop {
+        let started = Instant::now();
+        if let Err(e) = serve(&phone).await {
+            tracing::debug!("notification actions: {e}");
+        }
+        if started.elapsed() > Duration::from_secs(60) {
+            wait = Duration::from_secs(1);
+        }
+        tokio::time::sleep(wait).await;
+        wait = (wait * 2).min(Duration::from_secs(60));
+    }
+}
+
+async fn serve(phone: &Arc<Phone>) -> zbus::Result<()> {
+    let p =
+        NotificationsProxy::builder(&phone.session).cache_properties(zbus::proxy::CacheProperties::No).build().await?;
+    let mut actions = p.receive_action_invoked().await?;
+    let mut replies = p.receive_notification_replied().await?;
+    let dbus = zbus::fdo::DBusProxy::new(&phone.session).await?;
+    let mut owners = dbus.receive_name_owner_changed_with_args(&[(0, "org.freedesktop.Notifications")]).await?;
     // The owner pressing a button in their own desktop session is the owner
     // confirming, so it carries our own front end's trust.
     let owner = Caller { name: "dolphone-desktop".into(), trusted: true, reader: true };
@@ -243,7 +360,11 @@ pub async fn listen(phone: Arc<Phone>) {
                 }
                 let Ok(a) = sig.args() else { continue };
                 let Some(about) = phone.notify.about(a.id).await else { continue };
-                act(&phone, about, &a.action_key, &owner).await;
+                act(phone, about, &a.action_key, &owner).await;
+            }
+            Some(_) = owners.next() => {
+                // The server restarted, or another took over.
+                phone.notify.forget_all().await;
             }
             Some(sig) = replies.next() => {
                 let sender = sig.message().header().sender().map(|s| s.to_string());
@@ -257,7 +378,7 @@ pub async fn listen(phone: Arc<Phone>) {
                     }
                 }
             }
-            else => break,
+            else => return Ok(()),
         }
     }
 }
@@ -284,5 +405,26 @@ async fn act(phone: &Arc<Phone>, about: About, action: &str, owner: &Caller) {
         }
         (About::Request(_), _) => crate::launch::desktop(&["--call"]),
         (About::Alert(_), _) => crate::launch::desktop(&["--alerts"]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markup_is_escaped() {
+        assert_eq!(escape("Tom & Jerry <b>hi</b>"), "Tom &amp; Jerry &lt;b&gt;hi&lt;/b&gt;");
+        assert_eq!(escape("<a href=\"x\">pay</a>"), "&lt;a href=\"x\"&gt;pay&lt;/a&gt;");
+        assert_eq!(escape("plain, café"), "plain, café");
+        assert_eq!(escape("&amp;"), "&amp;amp;", "escaped once more, so shown as typed");
+    }
+
+    #[test]
+    fn call_notifications_are_noted_for_the_next_run() {
+        let t = calls_text(":1.42", &[3, 7]);
+        assert_eq!(parse_calls(&t), Some((":1.42".to_string(), vec![3, 7])));
+        assert_eq!(parse_calls(""), None);
+        assert_eq!(parse_calls(":1.9\nnot a number\n5\n"), Some((":1.9".to_string(), vec![5])));
     }
 }
