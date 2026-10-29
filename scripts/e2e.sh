@@ -871,6 +871,15 @@ if echo probe | systemd-creds --user encrypt --name=probe - - >/dev/null 2>&1; t
     DOLPHONE_TRUST_ALL=1 start_phoned
     out=$("$P" thread 0491570190)
     expect "phoned unseals the key and reads it" "$out" "Meet at the usual place"
+    if kill -0 "${MMSD:-0}" 2>/dev/null; then
+        "$P" fake mms +61491570193 --file "$DOLPHONE_MMS_DIR/cat.jpg" "A picture, encrypted" >/dev/null
+        out=$(until_has "Picture" "$P" thread 0491570193)
+        expect "with the store encrypted, a picture is shown from memory" "$out" "[Picture: $XDG_RUNTIME_DIR/dolphone/mms/"
+        [ -z "$(ls -A "$XDG_DATA_HOME/dolphone/mms" 2>/dev/null)" ] && pass "and is not a file on the disk" \
+            || fail "and is not a file on the disk" "$(ls "$XDG_DATA_HOME/dolphone/mms")"
+        grep -qa "A picture, encrypted" "$DB" && fail "and its text is not readable in the store" "found" \
+            || pass "and its text is not readable in the store"
+    fi
     kill "$PHONED"
     wait "$PHONED" 2>/dev/null || true
     mv "$XDG_CONFIG_HOME/dolphone/store-key.cred" "$XDG_CONFIG_HOME/dolphone/key.away"
@@ -887,6 +896,9 @@ if echo probe | systemd-creds --user encrypt --name=probe - - >/dev/null 2>&1; t
     mv "$XDG_CONFIG_HOME/dolphone/key.away" "$XDG_CONFIG_HOME/dolphone/store-key.cred"
     out=$("$BIN/phoned" --decrypt-store 2>&1)
     expect "and --decrypt-store turns it back" "$out" "decrypted "
+    if kill -0 "${MMSD:-0}" 2>/dev/null; then
+        expect "and the pictures come out as files again" "$out" "with 1 MMS parts back as files"
+    fi
     head -c 15 "$DB" | grep -qa "SQLite format" && pass "to plain SQLite" || fail "to plain SQLite" "$(head -c 15 "$DB")"
 else
     echo "  skip  needs systemd-creds --user (systemd 256 or later)"

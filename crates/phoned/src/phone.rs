@@ -80,6 +80,8 @@ pub struct Phone {
     refreshing: Mutex<()>,
     /// The Messages PIN's open/closed state.
     pub pin_lock: crate::pin::Lock,
+    /// The store is encrypted: MMS parts go into it, not into files.
+    pub parts_in_store: std::sync::atomic::AtomicBool,
 }
 
 /// The contacts as last read: for which region, and the directory's modification
@@ -189,6 +191,7 @@ impl Phone {
             book: std::sync::Mutex::new(None),
             refreshing: Mutex::new(()),
             pin_lock: Default::default(),
+            parts_in_store: Default::default(),
         })
     }
 
@@ -1360,6 +1363,9 @@ impl Phone {
             "wipe" => {
                 self.with_store(|s| s.wipe());
                 let _ = std::fs::remove_dir_all(parts_dir());
+                if let Some(d) = shown_parts_dir() {
+                    let _ = std::fs::remove_dir_all(d);
+                }
                 // Contacts are phone data too; and the settings just deleted from
                 // the store stop counting now, not at the next start.
                 let _ = std::fs::remove_dir_all(phone_core::store::contacts_dir());
@@ -1939,6 +1945,45 @@ impl Phone {
         crate::leds::stop(&self.ring_leds());
     }
 
+    /// Keep a message's parts: in the store when it is encrypted (shown from the
+    /// runtime directory), else as files beside it.
+    fn keep_parts<'a>(&self, id: i64, parts: impl Iterator<Item = (&'a str, &'a [u8])>) -> Vec<phone_core::model::Part> {
+        if !self.parts_in_store.load(std::sync::atomic::Ordering::Relaxed) {
+            return save_parts(id, parts);
+        }
+        let Some(dir) = shown_parts_dir() else {
+            tracing::warn!("no runtime directory to show MMS parts from; keeping them unseen");
+            return Vec::new();
+        };
+        let parts: Vec<(&str, &[u8])> = parts.collect();
+        let names = part_names(id, parts.iter().map(|(m, _)| *m));
+        let mut out = Vec::new();
+        for ((mime, bytes), name) in parts.into_iter().zip(names) {
+            if self.with_store(|s| s.put_part(&name, bytes)).is_some() {
+                let path = dir.join(&name);
+                let _ = write_file_private(&path, bytes);
+                out.push(phone_core::model::Part { mime: mime.to_string(), path: path.display().to_string() });
+            }
+        }
+        out
+    }
+
+    /// Put back the shown copies of parts kept in the store (the runtime directory
+    /// empties at logout), before a front end is handed their paths.
+    pub fn show_parts(&self, messages: &[phone_core::model::Message]) {
+        let Some(dir) = shown_parts_dir() else { return };
+        for p in messages.iter().flat_map(|m| &m.parts) {
+            let path = std::path::Path::new(&p.path);
+            if path.parent() != Some(dir.as_path()) || path.exists() {
+                continue;
+            }
+            let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else { continue };
+            if let Some(Some(bytes)) = self.with_store(|s| s.get_part(&name)) {
+                let _ = write_file_private(path, &bytes);
+            }
+        }
+    }
+
     /// Whether there is a Messages PIN.
     pub fn has_pin(&self) -> bool {
         !self.setting(phone_api::keys::MESSAGES_PIN).is_empty()
@@ -2348,7 +2393,7 @@ impl Phone {
         let saved = if crate::storekey::locked() {
             Vec::new()
         } else {
-            save_parts(id, parts.iter().map(|(m, b)| (m.as_str(), b.as_slice())))
+            self.keep_parts(id, parts.iter().map(|(m, b)| (m.as_str(), b.as_slice())))
         };
         self.with_store(|s| s.set_parts(id, &saved));
         // mmsd-tng's copy goes only once every part is safely ours.
@@ -2468,7 +2513,7 @@ impl Phone {
             .iter()
             .filter_map(|f| std::fs::read(f).ok().map(|b| (crate::mms::mime_of(f).to_string(), b)))
             .collect();
-        let saved = save_parts(id, read.iter().map(|(m, b)| (m.as_str(), b.as_slice())));
+        let saved = self.keep_parts(id, read.iter().map(|(m, b)| (m.as_str(), b.as_slice())));
         self.with_store(|s| s.set_parts(id, &saved));
         if let Some(m) = self.with_store(|s| s.message(id)).flatten() {
             api::emit_message_added(&self.session, to_info(&m)).await;
@@ -2667,7 +2712,29 @@ pub fn parts_dir() -> std::path::PathBuf {
     phone_core::store::data_dir().join("mms")
 }
 
-/// Write a message's parts as `<id>-<n>.<ext>` in the parts directory.
+/// Where parts kept in an encrypted store are shown from: the runtime directory,
+/// which is memory (tmpfs) and gone at logout, so a picture is never on the disk
+/// unencrypted. None without one.
+pub fn shown_parts_dir() -> Option<std::path::PathBuf> {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from)?.join("dolphone").join("mms");
+    std::fs::create_dir_all(&dir).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    Some(dir)
+}
+
+/// A part's name in a message: `<id>-<n>-<tag>.<ext>`. A random tag, since ids
+/// start again in a store opened fresh (or in memory), and must never overwrite a
+/// picture another store still points to.
+fn part_names<'a>(id: i64, mimes: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let tag = random_hex(4);
+    mimes.enumerate().map(|(n, mime)| format!("{id}-{n}-{tag}.{}", crate::mms::extension(mime))).collect()
+}
+
+/// Write a message's parts as files in the parts directory (a plain store).
 fn save_parts<'a>(id: i64, parts: impl Iterator<Item = (&'a str, &'a [u8])>) -> Vec<phone_core::model::Part> {
     let dir = parts_dir();
     if std::fs::create_dir_all(&dir).is_err() {
@@ -2678,12 +2745,11 @@ fn save_parts<'a>(id: i64, parts: impl Iterator<Item = (&'a str, &'a [u8])>) -> 
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
-    // A random part in each name: ids start again in a store opened fresh (or in
-    // memory), and must never overwrite a picture another store still points to.
-    let tag = random_hex(4);
+    let parts: Vec<(&str, &[u8])> = parts.collect();
+    let names = part_names(id, parts.iter().map(|(m, _)| *m));
     let mut out = Vec::new();
-    for (n, (mime, bytes)) in parts.enumerate() {
-        let path = dir.join(format!("{id}-{n}-{tag}.{}", crate::mms::extension(mime)));
+    for ((mime, bytes), name) in parts.into_iter().zip(names) {
+        let path = dir.join(name);
         if write_file_private(&path, bytes).is_ok() {
             out.push(phone_core::model::Part { mime: mime.to_string(), path: path.display().to_string() });
         }
@@ -2718,13 +2784,51 @@ fn write_private(name: &str, bytes: &[u8]) -> Option<std::path::PathBuf> {
     Some(path)
 }
 
-/// Remove the files of these messages' parts.
-pub fn remove_parts(messages: &[phone_core::model::Message]) {
-    let dir = parts_dir();
+/// Move MMS parts between files beside the store and the store itself, as the
+/// store is encrypted (`into`) or decrypted. Returns how many moved.
+pub fn move_parts(store: &Store, into: bool) -> anyhow::Result<usize> {
+    let files = parts_dir();
+    let shown = shown_parts_dir().ok_or_else(|| anyhow::anyhow!("no XDG_RUNTIME_DIR to show MMS parts from"))?;
+    let mut moved = 0;
+    for m in store.messages_with_parts()? {
+        let mut parts = m.parts.clone();
+        for p in &mut parts {
+            let path = std::path::PathBuf::from(&p.path);
+            let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) else { continue };
+            if into && path.parent() == Some(files.as_path()) {
+                let bytes = std::fs::read(&path)?;
+                store.put_part(&name, &bytes)?;
+                p.path = shown.join(&name).display().to_string();
+                std::fs::remove_file(&path)?;
+                moved += 1;
+            } else if !into && path.parent() == Some(shown.as_path()) {
+                if let Some(bytes) = store.get_part(&name)? {
+                    std::fs::create_dir_all(&files)?;
+                    let to = files.join(&name);
+                    write_file_private(&to, &bytes)?;
+                    store.delete_part(&name)?;
+                    let _ = std::fs::remove_file(&path);
+                    p.path = to.display().to_string();
+                    moved += 1;
+                }
+            }
+        }
+        store.set_parts(m.id, &parts)?;
+    }
+    Ok(moved)
+}
+
+/// Remove these messages' parts: their files, and their bytes in the store.
+pub fn remove_parts(store: Option<&Store>, messages: &[phone_core::model::Message]) {
+    let dirs = [Some(parts_dir()), shown_parts_dir()];
     for p in messages.iter().flat_map(|m| &m.parts) {
+        let path = std::path::Path::new(&p.path);
         // Only files phoned wrote.
-        if std::path::Path::new(&p.path).parent() == Some(dir.as_path()) {
-            let _ = std::fs::remove_file(&p.path);
+        if dirs.iter().flatten().any(|d| path.parent() == Some(d.as_path())) {
+            let _ = std::fs::remove_file(path);
+        }
+        if let (Some(s), Some(name)) = (store, path.file_name()) {
+            let _ = s.delete_part(&name.to_string_lossy());
         }
     }
 }

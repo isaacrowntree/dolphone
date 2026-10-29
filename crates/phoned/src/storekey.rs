@@ -85,14 +85,18 @@ pub fn convert(store: &std::path::Path, encrypt: bool) -> anyhow::Result<()> {
             let _ = std::fs::remove_file(path());
             anyhow::bail!("encrypting the store: {e}");
         }
-        println!("encrypted {}; its key is sealed in {}", store.display(), path().display());
-        println!("MMS pictures in {} are not; full-disk encryption covers them", crate::phone::parts_dir().display());
+        // The pictures go into the encrypted store with the texts.
+        let s = phone_core::store::Store::open_keyed(store, Some(&key))?;
+        let moved = crate::phone::move_parts(&s, true)?;
+        println!("encrypted {}, with {moved} MMS parts; its key is sealed in {}", store.display(), path().display());
     } else {
         anyhow::ensure!(encrypted, "{} is not encrypted", store.display());
         let key = load()?;
         phone_core::store::rekey_file(store, Some(&key), None)?;
+        let s = phone_core::store::Store::open(store)?;
+        let moved = crate::phone::move_parts(&s, false)?;
         std::fs::remove_file(path())?;
-        println!("decrypted {}", store.display());
+        println!("decrypted {}, with {moved} MMS parts back as files", store.display());
     }
     Ok(())
 }

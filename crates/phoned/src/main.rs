@@ -107,6 +107,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Err(e) => in_memory(format!("store {} could not be opened ({e})", store_path.display()))?,
     };
+    let parts_in_store = phone_core::store::is_encrypted(&store_path) && !storekey::locked();
     if let Ok(n) = store.fail_unsent() {
         if n > 0 {
             tracing::warn!(n, "texts left sending when phoned stopped are marked failed");
@@ -126,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
     let session = zbus::Connection::session().await.context("connecting to the session bus")?;
 
     let phone = Phone::new(session.clone(), system.clone(), store);
+    phone.parts_in_store.store(parts_in_store, std::sync::atomic::Ordering::Relaxed);
     let bt = bt::Bt::new(system.clone(), session.clone());
     let server = session.object_server();
     server.at(PATH, api::Calls(phone.clone())).await?;

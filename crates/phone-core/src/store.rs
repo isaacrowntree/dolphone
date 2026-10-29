@@ -133,6 +133,14 @@ fn migrate(db: &Connection) -> Result<()> {
         }
         db.execute_batch("PRAGMA user_version = 4;")?;
     }
+    if version < 5 {
+        // MMS parts kept in the store itself, for an encrypted one: a picture is
+        // then as private as the text beside it.
+        db.execute_batch(
+            "CREATE TABLE IF NOT EXISTS part_data (name TEXT PRIMARY KEY, data BLOB NOT NULL);
+             PRAGMA user_version = 5;",
+        )?;
+    }
     Ok(())
 }
 
@@ -314,6 +322,30 @@ impl Store {
             params![peer, direction as u8, at, body],
             |r| r.get(0),
         )?)
+    }
+
+    /// An MMS part's bytes, kept in the store by name.
+    pub fn put_part(&self, name: &str, data: &[u8]) -> Result<()> {
+        self.db.execute("INSERT OR REPLACE INTO part_data (name, data) VALUES (?1, ?2)", params![name, data])?;
+        Ok(())
+    }
+
+    pub fn get_part(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self.db.query_row("SELECT data FROM part_data WHERE name = ?1", params![name], |r| r.get(0)).optional()?)
+    }
+
+    pub fn delete_part(&self, name: &str) -> Result<()> {
+        self.db.execute("DELETE FROM part_data WHERE name = ?1", params![name])?;
+        Ok(())
+    }
+
+    /// Every message that has parts, for moving them between files and the store.
+    pub fn messages_with_parts(&self) -> Result<Vec<Message>> {
+        let mut q = self.db.prepare(
+            "SELECT id, peer, direction, body, at, state, read, sim, parts FROM messages WHERE parts != '' ORDER BY id",
+        )?;
+        let rows = q.query_map([], row_message)?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
     /// An MMS's attachments, once its files are in place.
@@ -642,7 +674,8 @@ impl Store {
     pub fn wipe(&self) -> Result<()> {
         self.db.execute_batch(
             "DELETE FROM messages; DELETE FROM calls; DELETE FROM blocked; DELETE FROM settings; \
-             DELETE FROM alerts; DELETE FROM grants; DELETE FROM audit; DELETE FROM cells; VACUUM;",
+             DELETE FROM alerts; DELETE FROM grants; DELETE FROM audit; DELETE FROM cells; \
+             DELETE FROM part_data; VACUUM;",
         )?;
         Ok(())
     }

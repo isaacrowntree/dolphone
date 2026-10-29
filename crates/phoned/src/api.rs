@@ -335,7 +335,9 @@ impl Messages {
     ) -> zbus::fdo::Result<Vec<MessageInfo>> {
         let who = messages_reader(&self.0, conn, &hdr).await?;
         self.0.audit(&who, "read", peer, "allowed");
-        Ok(self.0.store_read(|s| s.conversation(peer))?.iter().map(to_info).collect())
+        let messages = self.0.store_read(|s| s.conversation(peer))?;
+        self.0.show_parts(&messages);
+        Ok(messages.iter().map(to_info).collect())
     }
 
     async fn mark_read(
@@ -361,7 +363,10 @@ impl Messages {
         front_end(conn, &hdr, "delete messages").await?;
         // An MMS's pictures go with it.
         if let Ok(gone) = self.0.store_read(|s| s.conversation(peer)) {
-            crate::phone::remove_parts(&gone);
+            let _ = self.0.store_read(|s| {
+                crate::phone::remove_parts(Some(s), &gone);
+                Ok(())
+            });
         }
         self.0.store_read(|s| s.delete_thread(peer))?;
         let _ = self.unread_changed(&em).await;
