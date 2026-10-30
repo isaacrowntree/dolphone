@@ -108,7 +108,8 @@ conversation is one thread, named after everyone on it; a reply goes to all of t
 | A program allowed to text | | revoke | revoke | | |
 | Privacy > Messages PIN | Right sets | **Set** / **Change**: the new PIN on the keyboard, then again | **Remove** (asks first) | | up a page |
 | Privacy > Messages stay open | step 1, 5, 15 min | step | | | up a page |
-| Modem page | | **Set up** when the modem's setup has changes to make, or **Turn on** when ModemManager's debug mode is off; both ask first | | | up a page |
+| Modem page | | **Set up** when the modem's setup has changes to make, or **Turn on** when ModemManager's debug mode is off; both ask first | | **Network** | up a page |
+| Modem > Network (the serving cell, then its neighbours; asks again every 3 s while open; Up and Down scroll) | | **Refresh** | | | back to Modem |
 
 ## Desktop app
 

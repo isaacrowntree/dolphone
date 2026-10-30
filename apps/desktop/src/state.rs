@@ -109,6 +109,9 @@ pub struct App {
     /// The clock minute of the last draw, so the tick redraws for the dates in
     /// the lists only when they could have changed.
     drawn_minute: i64,
+    /// The cells the modem hears, asked for while Settings is open, and when.
+    pub cells: Option<phone_bus::CellReport>,
+    cells_asked: Instant,
 }
 
 impl App {
@@ -164,6 +167,8 @@ impl App {
             contacts_checked: Instant::now(),
             contacts_stamp: phone_bus::files::stamp(&phone_core::store::contacts_dir()),
             drawn_minute: 0,
+            cells: None,
+            cells_asked: Instant::now(),
         }
     }
 
@@ -284,6 +289,14 @@ impl App {
         }
         if !self.ui.window().is_visible() {
             return;
+        }
+        // Settings shows the cells the modem hears; asked while it is open, as the
+        // panel's Network screen asks.
+        if self.ui.get_page() == 3 && self.cells_asked.elapsed() > Duration::from_secs(5) {
+            self.cells_asked = Instant::now();
+            if let Some(b) = self.bus() {
+                b.refresh_cells();
+            }
         }
         let timing = self.calls.iter().any(|c| CallState::from_u8(c.state) == CallState::Active && c.connected_at > 0);
         if changed || timing || phone_core::now() / 60 != self.drawn_minute {
@@ -450,6 +463,7 @@ impl App {
             }
             Event::Resolved(id, _) => self.pending.retain(|r| r.id != id),
             Event::Status(s) => self.status = Some(s),
+            Event::Cells(r) => self.cells = Some(r),
             Event::Routes(r) => {
                 if let Some(a) = r.iter().find(|r| r.active) {
                     self.route = a.route;
@@ -973,6 +987,7 @@ impl App {
             })
             .collect();
         sync(ui.get_blocked(), blocked, |m| ui.set_blocked(m));
+        ui.set_network_text(cells_text(self.cells.as_ref()).into());
         ui.set_modem_text(
             match &self.status {
                 Some(s) if s.present => format!(
@@ -1090,6 +1105,23 @@ fn sync<T: Clone + PartialEq + 'static>(current: ModelRc<T>, rows: Vec<T>, set: 
     }
 }
 
+/// The cells for Settings > Modem: the serving cell, then the neighbours, a
+/// line each, with what the modem gave for them.
+fn cells_text(cells: Option<&phone_bus::CellReport>) -> String {
+    use phone_bus::CellReport;
+    match cells {
+        None => String::new(),
+        Some(CellReport::Unsupported) => "This modem does not report the cells it hears.".into(),
+        Some(CellReport::Failed(why)) => format!("Cells: {why}"),
+        Some(CellReport::Cells(c)) if c.is_empty() => "No cells heard yet.".into(),
+        Some(CellReport::Cells(c)) => c
+            .iter()
+            .map(|c| format!("{}: {}", if c.serving { "Serving" } else { "Neighbour" }, c.describe()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
 fn clipboard_tool() -> (&'static str, &'static [&'static str], &'static [&'static str]) {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         ("wl-copy", &[], &["--clear"])
@@ -1183,10 +1215,14 @@ pub fn wire(ui: &AppWindow) {
     ui.on_navigate(|p| {
         with_app(|a| {
             a.ui.set_page(p);
+            if p == 3 {
+                a.cells_asked = Instant::now();
+            }
             if let Some(b) = a.bus() {
                 match p {
                     0 => b.run(|c| async move { c.calls.mark_calls_seen().await.map(|_| vec![]) }),
                     1 => b.refresh_threads(),
+                    3 => b.refresh_cells(),
                     _ => {}
                 }
             }
@@ -1744,6 +1780,17 @@ pub fn sample(a: &mut App, page: i32) {
         state: "ready".into(),
         sip: String::new(),
     });
+    let lte = |serving, pci, rsrp| phone_api::CellInfo {
+        operator_id: "50599".into(),
+        pci,
+        channel: 1275,
+        rsrp,
+        ..phone_api::CellInfo::new("lte", serving)
+    };
+    a.cells = Some(phone_bus::CellReport::Cells(vec![
+        phone_api::CellInfo { area: "3010".into(), ci: "8A1C02".into(), rsrq: -11.0, ..lte(true, 416, -95.0) },
+        lte(false, 37, -104.0),
+    ]));
     let now = phone_core::now();
     a.recents = vec![
         CallRecordInfo {

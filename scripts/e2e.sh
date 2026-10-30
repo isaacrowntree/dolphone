@@ -412,6 +412,29 @@ expect "and puts it back" "$("$P" fake dump)" "modes=(14, 8)"
 "$P" fake signal 72 LTE
 sleep 1
 
+echo "the cells the modem hears"
+out=$("$P" cell)
+expect "phonectl cell shows the serving cell" "$out" "serving   LTE 50599 TAC 3010 CI 8A1C02 PCI 416 EARFCN 1275 RSRP -95 dBm RSRQ -11 dB"
+expect "and its neighbours" "$out" "neighbour LTE 50599 PCI 37 EARFCN 1275 RSRP -104 dBm RSRQ -14.5 dB"
+"$P" fake cell 'nr serving operator-id=50599 tac=3011 ci=1B2C3D4E5 physical-ci=3E7 nrarfcn=643334 rsrp=-88 rsrq=-10 sinr=17' \
+    'lte physical-ci=25 earfcn=1275 rsrp=-101'
+out=$("$P" cell)
+expect "a new cell shows on the next ask" "$out" "serving   5G NR 50599 TAC 3011 CI 1B2C3D4E5 PCI 999 NR-ARFCN 643334"
+expect "with what 5G measures" "$out" "SINR 17 dB"
+expect "and a neighbour with only some keys" "$out" "neighbour LTE PCI 37 EARFCN 1275 RSRP -101 dBm"
+out=$("$P" --json cell)
+expect "as JSON" "$out" '"kind":"nr","operator_id":"50599","pci":999'
+refute "leaving out what the modem did not give" "$out" '"psc"'
+"$P" fake cell none
+expect "no cells heard says so" "$("$P" cell)" "no cells reported"
+"$P" fake cell unsupported
+code=0
+out=$("$P" cell 2>&1) || code=$?
+[ "$code" = 3 ] && pass "a modem that does not report cells exits 3 (not something it does)" \
+    || fail "a modem that does not report cells exits 3" "$code $out"
+expect "and says so in a word" "$out" "this modem does not report cells"
+"$P" fake cell default
+
 echo "search, export, and which SIM"
 out=$("$P" search running late)
 expect "search finds a text by its words" "$out" "Hey, running 10 min late"
@@ -798,6 +821,8 @@ out=$("$P" threads 2>&1 || true)
 expect "a script cannot read messages" "$out" "may not read messages"
 out=$("$P" recents 2>&1 || true)
 expect "or the call log" "$out" "may not read messages"
+out=$("$P" cell 2>&1 || true)
+expect "or the cells the modem hears (where the phone is)" "$out" "may not read"
 out=$("$P" block 0491570170 2>&1 || true)
 expect "a script cannot change the block list" "$out" "only Dolphone's own apps"
 "$P" fake ring 0491570171 >/dev/null
@@ -832,6 +857,8 @@ out=$(cat /tmp/dolphone-e2e-otp.log)
 expect "with the code from the sender asked for" "$out" "735102"
 out=$("$P" thread 0491570172)
 expect "a granted script can read" "$out" "Your code is 482913"
+out=$("$P" cell)
+expect "and the cells" "$out" "serving   LTE"
 echo "the HTTP gateway"
 if command -v curl >/dev/null; then
     "$BIN/dolphone-gateway" --listen 127.0.0.1:18475 >/tmp/dolphone-e2e-gateway.log 2>&1 &

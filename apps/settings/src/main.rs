@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use flipctl_app::keyboard::{Exit, TextInput};
 use flipctl_app::{font, Key, StatusSource};
 use model::{
-    Action, Field, Input, MainRow, Model, Page, PrivacyRow, SipRow, ALERT_FLAGS, CALL_FLAGS, MAIN, PRIVACY, SIP,
-    TEXT_FLAGS,
+    Action, Field, Input, MainRow, Model, NetRow, Page, PrivacyRow, SipRow, ALERT_FLAGS, CALL_FLAGS, MAIN, PRIVACY,
+    SIP, TEXT_FLAGS,
 };
 use phone_bus::{Bus, Event};
 use slint::{ModelRc, SharedString, VecModel};
@@ -27,6 +27,8 @@ struct App {
     /// Bluetooth list was last asked for.
     focused: bool,
     bt_asked: Instant,
+    /// When the cells were last asked for, while the Network screen is open.
+    cells_asked: std::cell::Cell<Instant>,
 }
 
 thread_local! {
@@ -76,6 +78,10 @@ fn main() -> Result<(), slint::PlatformError> {
                 app.bt_asked = Instant::now();
                 app.refresh(Page::Bluetooth);
             }
+            // The Network screen follows the modem as it moves between cells.
+            if app.model.page == Page::Network && app.cells_asked.get().elapsed() >= CELLS_EVERY {
+                app.refresh(Page::Network);
+            }
             // Keys and phoned's answers draw as they come; the tick draws only the
             // keyboard, whose caret blinks and whose keys animate, five times a
             // second, and otherwise wakes once a second for the status bar.
@@ -107,6 +113,9 @@ fn main() -> Result<(), slint::PlatformError> {
 /// otherwise.
 const KEYBOARD_TICK: Duration = Duration::from_millis(200);
 const IDLE_TICK: Duration = Duration::from_secs(1);
+/// How often the open Network screen asks for the cells again: often enough to
+/// watch a signal change while walking, and ModemManager asks the modem each time.
+const CELLS_EVERY: Duration = Duration::from_secs(3);
 
 /// Whether this window has the keyboard, which is how flipctl marks the app in
 /// front. Slint's public API does not say; the window's own state does, and the
@@ -127,7 +136,16 @@ fn window_focused(ui: &AppWindow) -> bool {
 
 impl App {
     fn new(ui: AppWindow, bus: Bus) -> Self {
-        Self { ui, model: Model::default(), bus, frame: 0, kb: None, focused: true, bt_asked: Instant::now() }
+        Self {
+            ui,
+            model: Model::default(),
+            bus,
+            frame: 0,
+            kb: None,
+            focused: true,
+            bt_asked: Instant::now(),
+            cells_asked: std::cell::Cell::new(Instant::now()),
+        }
     }
 
     /// A key from the panel (or a real keyboard, which types into the keyboard).
@@ -251,6 +269,10 @@ impl App {
                     Ok(vec![Event::ModemSetup { steps: c.modem.setup().await?, applied: false }])
                 })
             }
+            Page::Network => {
+                self.cells_asked.set(Instant::now());
+                self.bus.refresh_cells();
+            }
             Page::About => self.bus.run(|c| async move { Ok(vec![Event::Device(c.settings.device().await?)]) }),
             Page::Privacy => self.bus.run(|c| async move {
                 let mut out = vec![Event::Blocked(c.settings.blocked().await?)];
@@ -308,6 +330,7 @@ impl App {
             }
             Event::Blocked(b) => m.blocked = b,
             Event::Status(s) => m.status = Some(s),
+            Event::Cells(r) => m.cells = Some(r),
             Event::Placed { kind: "wipe", placed } if placed.pending != 0 => {
                 // Ours to confirm: the owner has just said yes on our own modal.
                 let id = placed.pending;
@@ -571,7 +594,7 @@ pub fn items(m: &Model) -> (Vec<ListItem>, String, [&'static str; 5]) {
             };
             (rows, "> Blocked numbers".into(), ["Back", "", "", "", "Unblock"])
         }
-        Page::Modem | Page::About => (Vec::new(), String::new(), ["Back", "", "", "", ""]),
+        Page::Modem | Page::About | Page::Network => (Vec::new(), String::new(), ["Back", "", "", "", ""]),
         Page::Calls => {
             let vm = if m.voicemail.is_empty() { "Not set".into() } else { font::fit(&m.voicemail, 90) };
             let mut rows = vec![item("Voicemail number", &vm)];
@@ -772,6 +795,21 @@ fn detail(m: &Model) -> Vec<DetailRow> {
             .collect(),
             _ => vec![DetailRow { kind: 3, label: "No modem. Fit one in the M.2 slot.".into(), ..Default::default() }],
         },
+        Page::Network => m
+            .network_rows()
+            .into_iter()
+            .map(|r| match r {
+                NetRow::Head(label, value) => DetailRow {
+                    kind: 5,
+                    label: font::fit(&label, 150).into(),
+                    value: font::fit(&value, 80).into(),
+                    ..Default::default()
+                },
+                NetRow::Value(label, value) => row(&font::fit(&label, 150), &font::fit(&value, 80)),
+                NetRow::Divider => DetailRow { kind: 1, ..Default::default() },
+                NetRow::Text(t) => DetailRow { kind: 3, label: font::fit(&t, 236).into(), ..Default::default() },
+            })
+            .collect(),
         _ => vec![
             row("Dolphone", env!("CARGO_PKG_VERSION")),
             row(
@@ -865,16 +903,28 @@ fn apply(ui: &AppWindow, m: &Model, frame: u32) {
     let strings =
         |s: &[&str]| ModelRc::new(VecModel::from(s.iter().map(|x| SharedString::from(*x)).collect::<Vec<_>>()));
     ui.set_tick(frame as i32);
-    if matches!(m.page, Page::Modem | Page::About) {
+    if matches!(m.page, Page::Modem | Page::About | Page::Network) {
         ui.set_mode(2);
         ui.set_rows(ModelRc::new(VecModel::from(detail(m))));
-        ui.set_breadcrumb(if m.page == Page::Modem { "> Modem" } else { "> About" }.into());
+        // Fewer rows than when it scrolled (the modem lost a neighbour) pull it back.
+        let offset = if m.page == Page::Network { m.sel().min(m.rows() - 1) } else { 0 };
+        ui.set_detail_offset(offset as i32);
+        ui.set_breadcrumb(
+            match m.page {
+                Page::Modem => "> Modem",
+                Page::Network => "> Network",
+                _ => "> About",
+            }
+            .into(),
+        );
         let run = match m.page {
             Page::Modem if m.needs_access() => "Turn on",
             Page::Modem if m.setup_needed() => "Set up",
+            Page::Network => "Refresh",
             _ => "",
         };
-        ui.set_buttons(strings(&["Back", "", "", "", run]));
+        let view = if m.page == Page::Modem { "Network" } else { "" };
+        ui.set_buttons(strings(&["Back", view, "", "", run]));
     } else {
         ui.set_mode(1);
         let (rows, crumb, buttons) = items(m);
@@ -991,6 +1041,13 @@ mod tests {
             ("carrier profile".into(), "change".into(), String::new()),
         ];
         shot("modem", &m);
+        m.page = Page::Network;
+        m.cells = Some(phone_bus::CellReport::Cells(sample_cells()));
+        shot("network", &m);
+        m.sel[Page::Network as usize] = m.rows() - 1;
+        shot("network-neighbours", &m);
+        m.cells = Some(phone_bus::CellReport::Unsupported);
+        shot("network-nosupport", &m);
         m.page = Page::Calls;
         m.voicemail = "101".into();
         shot("calls", &m);
@@ -1048,10 +1105,67 @@ mod tests {
         ];
         shot("audit", &m);
         m.page = Page::Main;
-        m.sel = [0; 14];
+        m.sel = [0; model::PAGES];
         m.sel[0] = MAIN.iter().position(|r| *r == MainRow::Wipe).unwrap();
         m.key(Input::Run);
         shot("wipe", &m);
+    }
+
+    /// fake-mm's own cells, and a 5G one on top: what a field test shows.
+    fn sample_cells() -> Vec<phone_api::CellInfo> {
+        use phone_api::CellInfo;
+        let lte = |pci, rsrp, rsrq| CellInfo {
+            operator_id: "50599".into(),
+            pci,
+            channel: 1275,
+            rsrp,
+            rsrq,
+            ..CellInfo::new("lte", false)
+        };
+        vec![
+            CellInfo {
+                serving: true,
+                area: "3010".into(),
+                ci: "8A1C02".into(),
+                timing_advance: 3,
+                ..lte(416, -95.0, -11.0)
+            },
+            CellInfo {
+                serving: true,
+                operator_id: "50599".into(),
+                area: "3010".into(),
+                ci: "1B2C3D4E5".into(),
+                pci: 999,
+                channel: 643334,
+                rsrp: -88.0,
+                rsrq: -10.0,
+                sinr: 17.5,
+                ..CellInfo::new("nr", true)
+            },
+            lte(37, -104.0, -14.5),
+            lte(270, -112.0, -17.0),
+        ]
+    }
+
+    #[test]
+    fn network_fits_the_panel() {
+        assert_eq!(model::DETAIL_ROWS as i32, theme::count::DETAIL_VISIBLE_ROWS, "scrolls as flipctl draws");
+        let mut m = Model::default();
+        m.page = Page::Network;
+        let width = |f: &flipctl_app::font::BitmapFont, t: &str| i32::from(f.text_width(t));
+        let room = i32::from(theme::PANEL_W) - 2 * 8;
+        for report in [
+            phone_bus::CellReport::Cells(sample_cells()),
+            phone_bus::CellReport::Unsupported,
+            phone_bus::CellReport::Failed("Cannot get cell info: device not yet enabled".into()),
+        ] {
+            m.cells = Some(report);
+            for r in detail(&m) {
+                let (face, gap) = if r.kind == 5 { (&font::ROW_ACTIVE, 8) } else { (&font::ROW, 8) };
+                let w = width(face, &r.label) + if r.value.is_empty() { 0 } else { gap + width(&font::ROW, &r.value) };
+                assert!(w <= room, "{:?} {:?} is {w} wide, the panel has {room}", r.label, r.value);
+            }
+        }
     }
 
     // Live: the real app against a running phoned and fake-mm (scripts/ui-e2e.sh).
@@ -1182,5 +1296,18 @@ mod tests {
         l.press(Input::Run);
         l.until("the device profile arrives", |m| m.device.is_some());
         l.shot("05-about");
+        l.press(Input::Escape);
+
+        // Modem > Network: fake-mm's serving cell, asked of phoned as the screen opens.
+        l.select(MAIN.len(), at(MainRow::Modem));
+        l.press(Input::Run);
+        l.press(Input::View);
+        l.until("the serving cell arrives", |m| {
+            matches!(&m.cells, Some(phone_bus::CellReport::Cells(c)) if c.iter().any(|c| c.serving && c.ci == "8A1C02"))
+        });
+        l.shot("06-network");
+        l.press(Input::Escape);
+        assert_eq!(l.app.model.page, Page::Modem, "Escape goes back to the Modem page");
+        l.press(Input::Escape);
     }
 }

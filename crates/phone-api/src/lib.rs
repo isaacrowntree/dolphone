@@ -21,8 +21,9 @@
 //! What a caller may do depends on who it is: Dolphone's own apps may do
 //! everything; another program may ask to dial, text, change a setting or a
 //! contact (each waits for a press on the device; see [`Request`]), may hang up and
-//! read the modem's status, and may read messages and the call log only with a read
-//! grant (`read_grants`). Refusals come back as the standard
+//! read the modem's status, and may read messages, the call log and where the phone
+//! has been (the network history, the cells it hears) only with a read grant
+//! (`read_grants`). Refusals come back as the standard
 //! `org.freedesktop.DBus.Error.AccessDenied`; bad arguments as `InvalidArgs`; rate
 //! limits as `LimitsExceeded`; what the modem or network refused as `Failed` or
 //! `NotSupported`, with the reason in the message.
@@ -293,6 +294,183 @@ pub struct ModemStatus {
     pub sip: String,
 }
 
+/// A cell the modem hears, serving or a neighbour, as ModemManager's
+/// `Modem.GetCellInfo` reports it (ModemManager 1.20; the keys are listed in
+/// phoned's `mm::parse_cells`). Only what the firmware filled in is set: a string
+/// left out is "", a number [`CellInfo::UNSET`] and a measurement
+/// [`CellInfo::UNSET_DB`], the values libmm-glib itself uses for "not given"
+/// (mm-cell-info-lte.c); `phonectl --json cell` leaves them out. Every field
+/// travels on D-Bus whether set or not: the struct's signature is fixed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[zbus(crate = "zbus::wire")]
+pub struct CellInfo {
+    /// "gsm", "umts", "tdscdma", "lte", "nr" (5G), "cdma", or "unknown" for a type
+    /// newer than this.
+    pub kind: String,
+    /// The cell the modem is on, rather than one it measures nearby.
+    pub serving: bool,
+    /// The network's MCC and MNC, "50501".
+    pub operator_id: String,
+    /// The location area (GSM, UMTS: LAC) or tracking area (LTE, NR: TAC), in
+    /// upper-case hex as ModemManager gives it (3GPP TS 27.007).
+    pub area: String,
+    /// The cell identity, in hex.
+    pub ci: String,
+    /// The physical cell id (LTE, NR), as a number: ModemManager gives it in hex,
+    /// and everything else (3GPP TS 36.211, 38.211; other phones' field tests)
+    /// counts it in decimal.
+    pub pci: u32,
+    /// The primary scrambling code (UMTS).
+    pub psc: u32,
+    /// The channel: ARFCN (GSM), UARFCN (UMTS, TD-SCDMA), EARFCN (LTE) or
+    /// NR-ARFCN (NR).
+    pub channel: u32,
+    /// The received level (GSM), 0..=63.
+    pub rx_level: u32,
+    /// UMTS and TD-SCDMA: received signal code power in dBm, and Ec/Io in dB.
+    pub rscp: f64,
+    pub ecio: f64,
+    /// LTE and NR: reference signal received power in dBm, and quality in dB.
+    pub rsrp: f64,
+    pub rsrq: f64,
+    /// NR only: ModemManager has no SINR for LTE.
+    pub sinr: f64,
+    /// The serving cell's timing advance.
+    pub timing_advance: u32,
+    /// Which serving cell this is (MMServingCellType, ModemManager 1.22): 1 the
+    /// primary, 2 a secondary (carrier aggregation), 3 and 4 the primary and a
+    /// secondary of the secondary group (5G next to LTE).
+    pub serving_cell_type: u32,
+    /// The carrier's downlink bandwidth, as the modem gives it (ModemManager 1.22,
+    /// which does not say in what unit).
+    pub bandwidth: u32,
+}
+
+impl CellInfo {
+    /// A number the modem did not give (libmm-glib's G_MAXUINT).
+    pub const UNSET: u32 = u32::MAX;
+    /// A measurement the modem did not give (libmm-glib's -G_MAXDOUBLE).
+    pub const UNSET_DB: f64 = f64::MIN;
+
+    /// A cell of this kind with nothing measured yet.
+    pub fn new(kind: &str, serving: bool) -> Self {
+        Self {
+            kind: kind.into(),
+            serving,
+            operator_id: String::new(),
+            area: String::new(),
+            ci: String::new(),
+            pci: Self::UNSET,
+            psc: Self::UNSET,
+            channel: Self::UNSET,
+            rx_level: Self::UNSET,
+            rscp: Self::UNSET_DB,
+            ecio: Self::UNSET_DB,
+            rsrp: Self::UNSET_DB,
+            rsrq: Self::UNSET_DB,
+            sinr: Self::UNSET_DB,
+            timing_advance: Self::UNSET,
+            serving_cell_type: Self::UNSET,
+            bandwidth: Self::UNSET,
+        }
+    }
+
+    /// A number, if the modem gave it.
+    pub fn given(v: u32) -> Option<u32> {
+        (v != Self::UNSET).then_some(v)
+    }
+
+    /// A measurement, if the modem gave it, in words: "-95", "-10.5".
+    pub fn db(v: f64) -> Option<String> {
+        (v != Self::UNSET_DB && v.is_finite()).then(|| {
+            if v.fract() == 0.0 {
+                format!("{v:.0}")
+            } else {
+                format!("{v:.1}")
+            }
+        })
+    }
+
+    /// The technology, as a phone shows it: "LTE", "5G NR", "UMTS".
+    pub fn tech(&self) -> &'static str {
+        match self.kind.as_str() {
+            "gsm" => "GSM",
+            "umts" => "UMTS",
+            "tdscdma" => "TD-SCDMA",
+            "lte" => "LTE",
+            "nr" => "5G NR",
+            "cdma" => "CDMA",
+            _ => "Unknown",
+        }
+    }
+
+    /// What its channel number is called: "EARFCN".
+    pub fn channel_name(&self) -> &'static str {
+        match self.kind.as_str() {
+            "gsm" => "ARFCN",
+            "umts" | "tdscdma" => "UARFCN",
+            "lte" => "EARFCN",
+            "nr" => "NR-ARFCN",
+            _ => "Channel",
+        }
+    }
+
+    /// What its area is called: "TAC" (LTE, NR) or "LAC".
+    pub fn area_name(&self) -> &'static str {
+        match self.kind.as_str() {
+            "lte" | "nr" => "TAC",
+            _ => "LAC",
+        }
+    }
+
+    /// All the modem gave, on one line: "LTE 50599 TAC 3010 CI 8A1C02 PCI 416
+    /// EARFCN 1275 RSRP -95 dBm RSRQ -11 dB".
+    pub fn describe(&self) -> String {
+        let mut parts = vec![self.tech().to_string()];
+        for (name, v) in [("", &self.operator_id), (self.area_name(), &self.area), ("CI", &self.ci)] {
+            if !v.is_empty() {
+                parts.push(if name.is_empty() { v.clone() } else { format!("{name} {v}") });
+            }
+        }
+        for (name, v) in
+            [("PCI", self.pci), ("PSC", self.psc), (self.channel_name(), self.channel), ("RX level", self.rx_level)]
+        {
+            if let Some(v) = Self::given(v) {
+                parts.push(format!("{name} {v}"));
+            }
+        }
+        for (name, v, unit) in [
+            ("RSRP", self.rsrp, "dBm"),
+            ("RSRQ", self.rsrq, "dB"),
+            ("SINR", self.sinr, "dB"),
+            ("RSCP", self.rscp, "dBm"),
+            ("Ec/Io", self.ecio, "dB"),
+        ] {
+            if let Some(v) = Self::db(v) {
+                parts.push(format!("{name} {v} {unit}"));
+            }
+        }
+        for (name, v) in [("TA", self.timing_advance), ("bandwidth", self.bandwidth)] {
+            if let Some(v) = Self::given(v) {
+                parts.push(format!("{name} {v}"));
+            }
+        }
+        parts.join(" ")
+    }
+
+    /// Its signal in one short phrase, the way each technology measures it:
+    /// "-95 dBm" (RSRP, RSCP), or "RX 40" (GSM's level). Empty when not measured.
+    pub fn strength(&self) -> String {
+        if let Some(p) = Self::db(self.rsrp).or_else(|| Self::db(self.rscp)) {
+            format!("{p} dBm")
+        } else if let Some(l) = Self::given(self.rx_level) {
+            format!("RX {l}")
+        } else {
+            String::new()
+        }
+    }
+}
+
 #[proxy(
     interface = "io.github.isaacrowntree.Dolphone1.Calls",
     default_service = "io.github.isaacrowntree.Dolphone",
@@ -457,6 +635,12 @@ pub trait Modem {
     /// The networks the modem has been on, newest first: (when, "5G"/"LTE"/"3G"/"2G",
     /// operator, registered). Where you have been, roughly, so it needs a read grant.
     fn cells(&self, limit: u32) -> zbus::Result<Vec<(i64, String, String, bool)>>;
+    /// The cells the modem hears now, the serving one first, then its neighbours,
+    /// asked of ModemManager each time (nothing is polled while nobody asks).
+    /// Cell ids and areas place the phone more closely than the operator does, so
+    /// this needs a read grant too. `NotSupported` when the modem (or a
+    /// ModemManager older than 1.20) does not report cells.
+    fn cell_info(&self) -> zbus::Result<Vec<CellInfo>>;
     /// Unlock the SIM with its PIN. Returns 0 once unlocked, or the tries left after
     /// a wrong PIN. Fails once the SIM is blocked and needs its PUK.
     fn unlock(&self, pin: &str) -> zbus::Result<u32>;

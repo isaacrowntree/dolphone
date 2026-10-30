@@ -87,12 +87,26 @@ pub enum Event {
         steps: Vec<(String, String, String)>,
         applied: bool,
     },
+    /// The cells the modem hears, for a screen that shows them.
+    Cells(CellReport),
     /// Something a job finished, to tell the owner in passing.
     Notice(String),
     /// Whether Messages needs its PIN (true: show the PIN screen, not texts).
     Locked(bool),
     /// A call the UI made failed; the text is phoned's message.
     Error(String),
+}
+
+/// What asking for the cells came to. Polled while a screen is open, so a
+/// failure is something to show on it, not an [`Event::Error`] every few seconds.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CellReport {
+    /// The serving cell first, then its neighbours; empty when none is heard.
+    Cells(Vec<CellInfo>),
+    /// This modem, or its ModemManager, does not report cells.
+    Unsupported,
+    /// Asking failed, in phoned's words (no modem, not enabled yet, no grant).
+    Failed(String),
 }
 
 /// The proxies a job gets, all on the one connection.
@@ -213,6 +227,20 @@ impl Bus {
 
     pub fn refresh_status(&self) {
         self.run(|c| async move { Ok(vec![Event::Status(c.modem.status().await?)]) });
+    }
+
+    /// The cells the modem hears now, as [`Event::Cells`].
+    pub fn refresh_cells(&self) {
+        self.run(|c| async move {
+            let report = match c.modem.cell_info().await {
+                Ok(cells) => CellReport::Cells(cells),
+                Err(zbus::Error::MethodError(name, _, _)) if name.as_str() == error::NOT_SUPPORTED => {
+                    CellReport::Unsupported
+                }
+                Err(e) => CellReport::Failed(message(&e)),
+            };
+            Ok(vec![Event::Cells(report)])
+        });
     }
 
     pub fn refresh_routes(&self) {

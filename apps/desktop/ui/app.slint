@@ -540,6 +540,8 @@ export component AppWindow inherits Window {
     in property <[Row]> bt-devices;
     in property <[Row]> blocked;
     in property <string> modem-text;
+    // The cells the modem hears, a line each (Modem.CellInfo).
+    in property <string> network-text;
     in-out property <string> new-pin;
     in-out property <string> new-pin-again;
     in property <int> open-for-index: 1;
@@ -1104,6 +1106,7 @@ export component AppWindow inherits Window {
 
                     Text { text: "Modem"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
                     Text { text: root.modem-text; color: Brand.muted; wrap: word-wrap; }
+                    if root.network-text != "": Text { text: root.network-text; color: Brand.muted; wrap: word-wrap; }
 
                     Text { text: "Your texts"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
                     HorizontalLayout {

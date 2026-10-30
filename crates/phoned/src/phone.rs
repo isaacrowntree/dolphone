@@ -1654,6 +1654,24 @@ impl Phone {
         Ok(text::clean(&u.respond(reply).await?, text::MAX_BODY))
     }
 
+    /// The cells the modem hears now, asked of ModemManager (Modem.GetCellInfo) on
+    /// each call: a screen that shows them asks every few seconds while it is open,
+    /// and nothing asks otherwise.
+    pub async fn cell_info(&self) -> zbus::fdo::Result<Vec<phone_api::CellInfo>> {
+        let modem = self.modem().await?;
+        let m = mm::ModemProxy::builder(&self.system).path(modem.path).build().await?;
+        match m.get_cell_info().await {
+            Ok(list) => Ok(mm::parse_cells(&list)),
+            Err(e) if mm::no_cell_info(&e) => {
+                Err(zbus::fdo::Error::NotSupported("this modem does not report cells".into()))
+            }
+            // Not enabled yet (Core.WrongState), or the modem did not answer: in
+            // ModemManager's words.
+            Err(zbus::Error::MethodError(_, Some(why), _)) => Err(zbus::fdo::Error::Failed(why)),
+            Err(e) => Err(zbus::fdo::Error::Failed(e.to_string())),
+        }
+    }
+
     pub async fn ussd_cancel(&self) -> zbus::fdo::Result<()> {
         let modem = self.modem().await?;
         let u = mm::UssdProxy::builder(&self.system).path(modem.path).build().await?;

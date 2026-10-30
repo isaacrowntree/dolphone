@@ -6,7 +6,8 @@
 
 use std::collections::HashMap;
 
-use phone_api::{keys, AlertInfo, AuditEntry, BtDevice, Grant, ModemStatus, RouteInfo};
+use phone_api::{keys, AlertInfo, AuditEntry, BtDevice, CellInfo, Grant, ModemStatus, RouteInfo};
+use phone_bus::CellReport;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Input {
@@ -39,9 +40,25 @@ pub enum Page {
     Sip,
     /// Laptops, over KDE Connect.
     Laptops,
+    /// The cells the modem hears, from the Modem page: a field test.
+    Network,
 }
 
-const PAGES: usize = 14;
+pub const PAGES: usize = 15;
+
+/// Rows a detail screen shows below its breadcrumb (flipctl's
+/// detail_visible_rows; a test in main.rs holds the two together).
+pub const DETAIL_ROWS: usize = 8;
+
+/// A line of the Network screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NetRow {
+    /// A cell's heading, in the bold face: "LTE serving", and its network.
+    Head(String, String),
+    Value(String, String),
+    Divider,
+    Text(String),
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
@@ -272,6 +289,8 @@ pub struct Model {
     pub open_for: String,
     /// The new PIN typed once, waiting to be typed again.
     pub new_pin: Option<String>,
+    /// The cells, as last asked for; None until the answer to the first comes.
+    pub cells: Option<CellReport>,
 }
 
 impl Default for Model {
@@ -307,6 +326,7 @@ impl Default for Model {
             messages_pin_set: false,
             open_for: keys::MESSAGES_OPEN_FOR.1.into(),
             new_pin: None,
+            cells: None,
         }
     }
 }
@@ -409,6 +429,8 @@ impl Model {
             Page::Bluetooth => 2 + self.devices.len(),
             Page::Blocked => self.blocked.len().max(1),
             Page::Modem | Page::About => 1,
+            // Up and Down scroll: one step per row past the screen's eight.
+            Page::Network => self.network_rows().len().saturating_sub(DETAIL_ROWS) + 1,
             Page::Calls => 1 + CALL_FLAGS.len(),
             // The flags, then the uplink watch's number and interface.
             Page::Texts => TEXT_FLAGS.len() + 2,
@@ -431,7 +453,7 @@ impl Model {
         let n = self.rows();
         match input {
             Input::Up => {
-                self.set_sel(self.sel().saturating_sub(1));
+                self.set_sel(self.sel().min(n.saturating_sub(1)).saturating_sub(1));
                 return Vec::new();
             }
             Input::Down => {
@@ -442,6 +464,7 @@ impl Model {
                 let up = match self.page {
                     Page::Main => return vec![Action::Quit],
                     Page::Blocked | Page::Grants | Page::Audit => Page::Privacy,
+                    Page::Network => Page::Modem,
                     _ => Page::Main,
                 };
                 self.page = up;
@@ -487,7 +510,15 @@ impl Model {
                 ));
                 Vec::new()
             }
-            Page::Modem | Page::About | Page::Audit => Vec::new(),
+            Page::Modem if input == Input::View => {
+                // What it showed last time may be from somewhere else: ask afresh.
+                self.cells = None;
+                self.page = Page::Network;
+                self.set_sel(0);
+                vec![Action::Refresh(Page::Network)]
+            }
+            Page::Network if matches!(input, Input::Run | Input::Ok) => vec![Action::Refresh(Page::Network)],
+            Page::Modem | Page::About | Page::Audit | Page::Network => Vec::new(),
             Page::Calls => {
                 let toggle = matches!(input, Input::Left | Input::Right | Input::Run | Input::Ok);
                 match self.sel() {
@@ -782,6 +813,74 @@ impl Model {
         }
     }
 
+    /// The Network screen: the serving cell with all the modem gave for it, then
+    /// a line for each neighbour. Firmware fills in what it fills in; what it
+    /// left out is left off.
+    pub fn network_rows(&self) -> Vec<NetRow> {
+        let text = |t: &str| NetRow::Text(t.into());
+        let cells = match &self.cells {
+            None => return vec![text("Asking the modem...")],
+            Some(CellReport::Unsupported) => {
+                return vec![
+                    text("This modem does not report"),
+                    text("its cells: ModemManager 1.20+"),
+                    text("gets them from QMI and MBIM"),
+                    text("modems only."),
+                ]
+            }
+            Some(CellReport::Failed(why)) => {
+                let mut rows = vec![text("No cell information:")];
+                rows.extend(wrap_modal(why).into_iter().take(3).map(NetRow::Text));
+                return rows;
+            }
+            Some(CellReport::Cells(c)) if c.is_empty() => return vec![text("No cells heard yet.")],
+            Some(CellReport::Cells(c)) => c,
+        };
+        let mut rows = Vec::new();
+        for c in cells.iter().filter(|c| c.serving) {
+            rows.push(NetRow::Head(format!("{} serving", c.tech()), c.operator_id.clone()));
+            let mut value = |label: &str, v: String| {
+                if !v.is_empty() {
+                    rows.push(NetRow::Value(label.into(), v));
+                }
+            };
+            let n = |v: u32| CellInfo::given(v).map(|v| v.to_string()).unwrap_or_default();
+            let db = |v: f64, unit: &str| CellInfo::db(v).map(|v| format!("{v} {unit}")).unwrap_or_default();
+            value(c.channel_name(), n(c.channel));
+            value("Cell ID", c.ci.clone());
+            value(c.area_name(), c.area.clone());
+            value("PCI", n(c.pci));
+            value("PSC", n(c.psc));
+            value("RSRP", db(c.rsrp, "dBm"));
+            value("RSRQ", db(c.rsrq, "dB"));
+            value("SINR", db(c.sinr, "dB"));
+            value("RSCP", db(c.rscp, "dBm"));
+            value("Ec/Io", db(c.ecio, "dB"));
+            value("RX level", n(c.rx_level));
+        }
+        let near: Vec<&CellInfo> = cells.iter().filter(|c| !c.serving).collect();
+        if !near.is_empty() {
+            if !rows.is_empty() {
+                rows.push(NetRow::Divider);
+            }
+            rows.push(NetRow::Head("Neighbours".into(), near.len().to_string()));
+            for c in near {
+                // "LTE 1275 PCI 37": the channel and the code that tell it apart.
+                let mut label = c.tech().to_string();
+                if let Some(ch) = CellInfo::given(c.channel) {
+                    label += &format!(" {ch}");
+                }
+                if let Some(p) = CellInfo::given(c.pci) {
+                    label += &format!(" PCI {p}");
+                } else if let Some(p) = CellInfo::given(c.psc) {
+                    label += &format!(" PSC {p}");
+                }
+                rows.push(NetRow::Value(label, c.strength()));
+            }
+        }
+        rows
+    }
+
     pub fn imported(&mut self, added: u32, merged: u32, unchanged: u32, error: &str) {
         self.modal = Some((
             if error.is_empty() {
@@ -1021,5 +1120,67 @@ mod tests {
         assert!(m.needs_access() && !m.setup_needed());
         assert!(m.key(Input::Run).is_empty() && m.modal.is_some());
         assert_eq!(m.key(Input::Run), vec![Action::ModemAccess]);
+    }
+
+    fn lte(serving: bool, pci: u32, rsrp: f64) -> CellInfo {
+        CellInfo { operator_id: "50599".into(), pci, channel: 1275, rsrp, ..CellInfo::new("lte", serving) }
+    }
+
+    #[test]
+    fn network_from_the_modem_page() {
+        let mut m = Model::default();
+        m.page = Page::Modem;
+        m.cells = Some(CellReport::Unsupported);
+        assert_eq!(m.key(Input::View), vec![Action::Refresh(Page::Network)]);
+        assert_eq!((m.page, m.cells.as_ref()), (Page::Network, None), "asked afresh, nothing old shown");
+        assert_eq!(m.network_rows(), vec![NetRow::Text("Asking the modem...".into())]);
+        assert_eq!(m.key(Input::Run), vec![Action::Refresh(Page::Network)], "Run asks again now");
+        assert_eq!(m.key(Input::Escape), vec![Action::Refresh(Page::Modem)], "back to Modem, not Main");
+        assert_eq!(m.page, Page::Modem);
+    }
+
+    #[test]
+    fn network_rows_serving_first_then_neighbours() {
+        let mut m = Model::default();
+        m.page = Page::Network;
+        let serving = CellInfo { ci: "8A1C02".into(), area: "3010".into(), rsrq: -11.0, ..lte(true, 416, -95.0) };
+        m.cells = Some(CellReport::Cells(vec![serving, lte(false, 37, -104.0), lte(false, 270, -112.0)]));
+        let rows = m.network_rows();
+        assert_eq!(rows[0], NetRow::Head("LTE serving".into(), "50599".into()));
+        let value = |l: &str, v: &str| NetRow::Value(l.into(), v.into());
+        assert_eq!(
+            rows[1..7],
+            [
+                value("EARFCN", "1275"),
+                value("Cell ID", "8A1C02"),
+                value("TAC", "3010"),
+                value("PCI", "416"),
+                value("RSRP", "-95 dBm"),
+                value("RSRQ", "-11 dB")
+            ]
+        );
+        assert!(!rows.iter().any(|r| matches!(r, NetRow::Value(l, _) if l == "SINR")), "not given, not shown");
+        assert_eq!(rows[7], NetRow::Divider);
+        assert_eq!(rows[8], NetRow::Head("Neighbours".into(), "2".into()));
+        assert_eq!(rows[9], value("LTE 1275 PCI 37", "-104 dBm"));
+        // Eleven rows on an eight-row screen: four places to scroll to, no more.
+        assert_eq!(m.rows(), 4);
+        for _ in 0..10 {
+            m.key(Input::Down);
+        }
+        assert_eq!(m.sel(), 3);
+    }
+
+    #[test]
+    fn network_without_cells() {
+        let mut m = Model::default();
+        m.cells = Some(CellReport::Cells(Vec::new()));
+        assert_eq!(m.network_rows(), vec![NetRow::Text("No cells heard yet.".into())]);
+        m.cells = Some(CellReport::Cells(vec![lte(false, 37, CellInfo::UNSET_DB)]));
+        let rows = m.network_rows();
+        assert_eq!(rows[0], NetRow::Head("Neighbours".into(), "1".into()), "no divider above nothing");
+        assert_eq!(rows[1], NetRow::Value("LTE 1275 PCI 37".into(), String::new()));
+        m.cells = Some(CellReport::Failed("Cannot get cell info: device not yet enabled".into()));
+        assert_eq!(m.network_rows()[0], NetRow::Text("No cell information:".into()));
     }
 }
