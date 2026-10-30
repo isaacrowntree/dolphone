@@ -569,6 +569,153 @@ mod tests {
         live_shot(&ui, "07-settings");
     }
 
+    /// The buttons live_desktop leaves alone, each pressed as a click would and
+    /// checked where phoned (or the fake modem) can say it happened.
+    #[test]
+    #[ignore = "needs phoned, fake-mm and fake-mmsd: scripts/ui-e2e.sh"]
+    fn live_desktop_actions() {
+        if std::env::var_os("DOLPHONE_LIVE").is_none() {
+            return;
+        }
+        use phone_core::model::CallState;
+        let _w = window();
+        let ui = AppWindow::new().expect("window");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let bus = Bus::start(move |e| {
+            let _ = tx.send(e);
+        });
+        APP.with(|a| *a.borrow_mut() = Some(state::App::new(ui.clone_strong(), bus)));
+        state::wire(&ui);
+        pump(&rx, "phoned connects", |a| a.connected && a.status.is_some());
+        let call = |a: &state::App, n: &str| {
+            a.calls.iter().find(|c| c.number.ends_with(n)).map(|c| CallState::from_u8(c.state))
+        };
+
+        // Dialling from the keypad; the far end answers; mute and a keypad tone.
+        ui.invoke_navigate(0);
+        ui.set_number("0491570170".into());
+        ui.invoke_dial("0491570170".into());
+        pump(&rx, "dialling", |a| call(a, "491570170").is_some());
+        phonectl(&["fake", "answer"]);
+        pump(&rx, "answered by the far end", |a| call(a, "491570170") == Some(CallState::Active));
+        ui.invoke_mute(true);
+        pump(&rx, "muted", |a| a.calls.iter().any(|c| c.muted));
+        ui.invoke_mute(false);
+        pump(&rx, "unmuted", |a| a.calls.iter().all(|c| !c.muted));
+        ui.invoke_dtmf("5".into());
+        pump(&rx, "the tone reaches the modem", |_| phonectl(&["fake", "dump"]).contains("dtmf=5"));
+
+        // A second call waits; answering it holds the first, and Swap turns them round.
+        phonectl(&["fake", "ring", "0491570171"]);
+        pump(&rx, "call waiting", |a| call(a, "491570171").is_some_and(|s| s.ringing_in()));
+        ui.invoke_answer();
+        pump(&rx, "the first is held", |a| {
+            call(a, "491570171") == Some(CallState::Active) && call(a, "491570170") == Some(CallState::Held)
+        });
+        live_shot(&ui, "08-two-calls");
+        ui.invoke_swap();
+        pump(&rx, "swapped", |a| {
+            call(a, "491570170") == Some(CallState::Active) && call(a, "491570171") == Some(CallState::Held)
+        });
+        ui.invoke_hangup();
+        pump(&rx, "one ended", |a| a.calls.len() == 1);
+        ui.invoke_hangup();
+        pump(&rx, "both ended", |a| a.calls.is_empty());
+
+        // Decline.
+        phonectl(&["fake", "ring", "0491570172"]);
+        pump(&rx, "ringing", |a| call(a, "491570172").is_some_and(|s| s.ringing_in()));
+        ui.invoke_decline();
+        pump(&rx, "declined", |a| a.calls.is_empty());
+
+        // Allow: a program's call to a premium number goes through once allowed.
+        let placed = phonectl(&["dial", "1900123456"]);
+        assert!(placed.contains("waiting for confirmation"), "{placed}");
+        pump(&rx, "the confirmation shows", |a| a.ui.get_confirm_visible());
+        ui.invoke_allow();
+        pump(&rx, "allowed and dialled", |a| call(a, "1900123456").is_some());
+        ui.invoke_hangup();
+        pump(&rx, "hung up", |a| a.calls.is_empty());
+
+        // A new conversation from the keypad's number: a text, then a picture.
+        ui.set_number("0491570173".into());
+        ui.invoke_new_message("".into());
+        pump(&rx, "the conversation opens", |a| a.peer.ends_with("491570173") && a.ui.get_page() == 1);
+        ui.invoke_send("Hello from the desktop".into());
+        pump(&rx, "the text is sent", |a| {
+            a.messages.iter().any(|m| m.body == "Hello from the desktop" && m.state == 2)
+        });
+        // The portal's chooser stands aside: the file it would hand back.
+        // fake-mmsd notes an image by its type and size: 19 bytes here.
+        let dir = std::env::var("DOLPHONE_MMS_DIR").expect("DOLPHONE_MMS_DIR, from scripts/ui-e2e.sh");
+        let pic = format!("{dir}/desk.jpg");
+        std::fs::write(&pic, b"\xff\xd8\xff\xe0 a desktop jpeg").unwrap();
+        with_app(|a| a.attachments.push(pic.clone()));
+        ui.invoke_send("".into());
+        pump(&rx, "the picture reaches mmsd", |_| phonectl(&["fake", "mms", "dump"]).contains("image/jpeg=19b"));
+        live_shot(&ui, "09-picture-sent");
+
+        // Search finds the text; block and unblock; delete the conversation.
+        // Results count only while the box still holds their query, as typed.
+        ui.set_search_text("Hello from the desktop".into());
+        ui.invoke_search("Hello from the desktop".into());
+        pump(&rx, "found", |a| a.found.iter().any(|m| m.body == "Hello from the desktop"));
+        ui.set_search_text("".into());
+        ui.invoke_search("".into());
+        ui.invoke_thread_block();
+        pump(&rx, "blocked", |a| a.blocked.iter().any(|n| n.ends_with("491570173")));
+        let i = with_app_ret(|a| a.blocked.iter().position(|n| n.ends_with("491570173")).unwrap());
+        ui.invoke_unblock(i as i32);
+        pump(&rx, "unblocked", |a| !a.blocked.iter().any(|n| n.ends_with("491570173")));
+        ui.invoke_thread_delete();
+        pump(&rx, "deleted", |a| !a.threads.iter().any(|t| t.peer.ends_with("491570173")));
+
+        // The Messages PIN: set, lock, unlock with it, remove.
+        ui.invoke_set_messages_pin("2468".into(), "2468".into());
+        pump(&rx, "the PIN is set", |a| a.pin_set);
+        ui.invoke_lock_messages();
+        pump(&rx, "locked", |a| a.locked);
+        live_shot(&ui, "10-locked");
+        ui.invoke_unlock("2468".into());
+        pump(&rx, "unlocked", |a| !a.locked);
+        ui.invoke_remove_messages_pin();
+        pump(&rx, "the PIN is gone", |a| !a.pin_set);
+
+        // Contacts: add one, find it, remove it.
+        ui.invoke_navigate(2);
+        ui.invoke_add_contact("Sam Desk".into(), "0491570174".into());
+        pump(&rx, "added", |a| a.book.contacts.iter().any(|c| c.name == "Sam Desk"));
+        ui.set_contact_filter("Sam".into());
+        ui.invoke_contacts_filtered("Sam".into());
+        ui.invoke_remove_contact(0);
+        pump(&rx, "removed", |a| !a.book.contacts.iter().any(|c| c.name == "Sam Desk"));
+        ui.set_contact_filter("".into());
+
+        // Settings reach phoned: the ringer, a switch, voicemail.
+        ui.invoke_navigate(3);
+        ui.invoke_set_ringer(1);
+        pump(&rx, "vibrate", |_| phonectl(&["ringer"]).trim() == "vibrate");
+        ui.invoke_set_ringer(0);
+        pump(&rx, "ring", |_| phonectl(&["ringer"]).trim() == "ring");
+        let key = phone_api::keys::TEXT_TONE.0;
+        let was = phonectl(&["get", key]).trim() == "true";
+        ui.invoke_set_flag(key.into(), !was);
+        pump(&rx, "the switch is stored", |_| phonectl(&["get", key]).trim() == (!was).to_string());
+        ui.invoke_set_flag(key.into(), was);
+        pump(&rx, "and back", |_| phonectl(&["get", key]).trim() == was.to_string());
+        let vm = phonectl(&["get", "voicemail"]).trim().to_string();
+        ui.invoke_set_voicemail("0491570175".into());
+        pump(&rx, "voicemail is stored", |_| phonectl(&["get", "voicemail"]).trim() == "0491570175");
+        ui.invoke_set_voicemail(vm.as_str().into());
+        pump(&rx, "and back", |_| phonectl(&["get", "voicemail"]).trim() == vm);
+    }
+
+    fn with_app_ret<T>(f: impl FnOnce(&state::App) -> T) -> T {
+        let mut out = None;
+        with_app(|a| out = Some(f(a)));
+        out.expect("the app")
+    }
+
     /// A stand-in tray host: records who registered.
     struct Watcher(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
 

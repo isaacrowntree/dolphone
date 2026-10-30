@@ -41,10 +41,16 @@ if [ -z "${DOLPHONE_UI_INNER:-}" ]; then
 fi
 
 export PATH="$BIN:$PATH"
+# mmsd-tng's stand-in, for the picture a live test sends.
+DOLPHONE_MMS_DIR=$(mktemp -d)
+export DOLPHONE_MMS_DIR
+"$BIN/fake-mmsd" >/tmp/dolphone-ui-mmsd.log 2>&1 &
+MMSD=$!
+sleep 0.6
 # The apps run as Dolphone's own front ends would (debug builds only).
 DOLPHONE_TRUST_ALL=1 "$BIN/phoned" >/tmp/dolphone-ui-phoned.log 2>&1 &
 PHONED=$!
-trap 'kill $PHONED 2>/dev/null; wait $PHONED 2>/dev/null || true' EXIT
+trap 'kill $PHONED $MMSD 2>/dev/null; wait $PHONED 2>/dev/null || true' EXIT
 for _ in $(seq 1 30); do phonectl status >/dev/null 2>&1 && break; sleep 0.1; done
 sleep 0.6
 

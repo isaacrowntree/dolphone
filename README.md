@@ -73,9 +73,10 @@ itself accepts, and a second baresip playing the far end of SIP calls. The tests
   setup, grants, rules, contacts, the encrypted store, serial call audio through
   real PipeWire, and what an untrusted script is and is not allowed to do; they
   also pass with every CPU core busy, as a stand-in for a slow device;
-- **5 live UI tests** (`scripts/ui-e2e.sh`): the Dialer, Messages, Settings and the
-  desktop app (and its tray icon), driven through their real input against a live
-  phoned, with a screenshot of each step;
+- **6 live UI tests** (`scripts/ui-e2e.sh`): the Dialer, Messages, Settings and the
+  desktop app (its calls, messages, PIN, contacts and settings, and its tray icon),
+  driven through their real input against a live phoned, with a screenshot of each
+  step;
 - **10 KDE Connect checks** (`scripts/kdeconnect-e2e.sh`) against the real
   kdeconnectd: pairing, texts both ways, a ringing call;
 - **223 unit tests**, including every panel screen rendered and checked against the

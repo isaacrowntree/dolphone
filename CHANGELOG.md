@@ -136,6 +136,9 @@ More features:
   file-chooser portal, panel Messages from a list of the newest in Pictures and
   Downloads. A reply from the panel to a group now reaches everyone in it (it went
   to the first number only).
+- A second live test of the desktop app presses the rest of its buttons: dialling,
+  decline, mute, keypad tones, call waiting and swap, Allow, a new conversation, a
+  picture, search, block and delete, the Messages PIN, contacts and settings.
 - Serial call audio keeps the modem's clock and PipeWire's apart with a small
   buffer that drops or pads whole frames, so a long call does not drift.
 
