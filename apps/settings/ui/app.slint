@@ -1,5 +1,5 @@
 // Phone Settings: flipctl's menu (with its toggles and adjustable values), a
-// detail screen for the modem, and a modal for confirmations.
+// detail screen for the modem and its cells, and a modal for confirmations.
 import { Shell, PanelStatus } from "@app/shell.slint";
 import { MenuBody, ListItem } from "@flipctl/list.slint";
 import { DetailBody, DetailRow } from "@flipctl/detail.slint";
@@ -18,6 +18,8 @@ export component AppWindow inherits Shell {
     in property <int> tick;
     in property <int> arrow_pressed;
     in property <[DetailRow]> rows;
+    // The first detail row shown, for a detail screen longer than the panel.
+    in property <int> detail_offset;
 
     // 3: flipctl's keyboard, for the voicemail number.
     in property <string> kb_title;
@@ -63,6 +65,7 @@ export component AppWindow inherits Shell {
 
     if root.mode == 2: DetailBody {
         rows: root.rows;
+        offset: root.detail_offset;
         // The labels are ours, so the signal gauge is sized around them.
         fit_gauges: true;
         breadcrumb: root.breadcrumb;

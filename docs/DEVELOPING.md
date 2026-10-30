@@ -39,6 +39,8 @@ phonectl fake answer | hangup | busy   # the far end
 phonectl fake broadcast 4370 "test"    # an emergency alert
 phonectl fake lock on                  # the SIM asks for its PIN (1234)
 phonectl fake signal 30 5G             # FlipCTL's own status bar follows
+phonectl fake cell 'nr serving tac=3010 ci=1B2C physical-ci=3E7 nrarfcn=643334 rsrp=-88'
+                                       # what GetCellInfo reports (fake cell default | none | unsupported)
 phonectl fake atport                   # the modem's spare AT port (a pty), for phonectl set at_port
 phonectl watch                         # every event phoned sends
 journalctl --user -u phoned -f
@@ -69,7 +71,7 @@ build first, since they run what is in `$CARGO_TARGET_DIR/debug`:
 ```sh
 cargo build --workspace                      # what the scripts run
 cargo test --workspace                       # core, daemon, CLI, desktop
-scripts/e2e.sh                               # 242 checks: fake-mm, fake-mmsd, phoned, a SIP far end, phonectl, on real buses
+scripts/e2e.sh                               # 254 checks: fake-mm, fake-mmsd, phoned, a SIP far end, phonectl, on real buses
 scripts/ui-e2e.sh                            # the four apps driven live against phoned; screenshots in */target/render/live/
 scripts/kdeconnect-e2e.sh                    # 10 checks against the real kdeconnectd (apt install kdeconnect)
 cd apps/dialer && DOLPHONE_RENDER=1 cargo test  # behaviour, and every screen to target/render/

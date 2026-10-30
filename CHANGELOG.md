@@ -56,6 +56,12 @@ Features:
   the `dolphone` group the Flipper One's LEDs).
 - Cell information: a log of the networks the modem was on, a warning when it is
   forced onto 2G, and a switch to refuse 2G.
+- A network field test: the cells the modem hears, the serving cell (channel, cell
+  id, area, PCI, RSRP, RSRQ, SINR) and its neighbours, from ModemManager's own
+  `GetCellInfo` (1.20 and later; no AT commands), in Phone Settings > Modem >
+  Network (refreshed every 3 s while open), the desktop app's Settings, and
+  `phonectl cell` (`--json`); `Modem.CellInfo` for programs with a read grant.
+  A modem that does not report cells says so. Tested against fake-mm only.
 - The laptop: KDE Connect (texts and call alerts in GSConnect, replies from it),
   a tray icon and launcher badges for the desktop app.
 - Scripts: an optional SMS gateway (HTTP, localhost by default); a text when the
@@ -66,7 +72,7 @@ Features:
   off. A program asking to change a setting (`phonectl set`, `phonectl device use`)
   waits for a press on the device, as texts and calls do; Delete phone data removes
   contacts too. The panel apps no longer link the database at all.
-- Tests: the end-to-end suite grew to 242 checks, with 10 more against the real KDE
+- Tests: the end-to-end suite grew to 254 checks, with 10 more against the real KDE
   Connect daemon; the four apps are driven live against phoned
   (`scripts/ui-e2e.sh`); CI runs in Debian 13 containers; the suite also passes
   with every CPU core busy.

@@ -234,6 +234,34 @@ impl Control {
         Ok(p)
     }
 
+    /// The cells GetCellInfo reports from now on, one spec each
+    /// (`world::cell_dict`): "lte serving ci=8A1C02 rsrp=-95". None is a modem
+    /// that hears no cell; a bad spec changes nothing.
+    async fn set_cells(&self, cells: Vec<String>) -> zbus::fdo::Result<()> {
+        for c in &cells {
+            crate::world::cell_dict(c).map_err(zbus::fdo::Error::InvalidArgs)?;
+        }
+        tracing::info!(cells = cells.len(), "cells");
+        self.world.lock().await.cells = Some(cells);
+        Ok(())
+    }
+
+    /// Back to the cells a fresh fake modem hears.
+    async fn reset_cells(&self) {
+        self.world.lock().await.cells = Some(crate::world::default_cells());
+    }
+
+    /// Whether the modem can report cells at all: off answers GetCellInfo as
+    /// ModemManager does for a plugin that cannot ask (Core.Unsupported).
+    async fn set_cell_info_supported(&self, supported: bool) {
+        let mut w = self.world.lock().await;
+        if !supported {
+            w.cells = None;
+        } else if w.cells.is_none() {
+            w.cells = Some(crate::world::default_cells());
+        }
+    }
+
     async fn set_send_fails(&self, fails: bool) {
         self.world.lock().await.send_fails = fails;
     }

@@ -30,7 +30,7 @@ Flipper's own buttons; in desktop mode it is a proper desktop app; from a shell 
 | **Calls over the internet** | A SIP account (through baresip) for when there is no signal, or always, receiving texts over SIP too; same screens, buttons and headsets; a SIP call and a mobile call can be held and swapped. Emergency calls always go over the mobile network |
 | **Texts** | Conversations, multipart texts with a live segment counter, quick replies, delivery reports, resend for a failed text, search, export to Android (SMS Backup & Restore) |
 | **Picture messages and group texts** | MMS through mmsd-tng: pictures attached from the panel or the desktop and shown in the desktop app, group conversations as one thread, replies to everyone |
-| **Carrier services** | Call forwarding (`**21*n#`, `*#21#`, `##002#`), caller ID (`#31#`), call waiting, and USSD balance codes from the keypad; a check of the modem's own setup for calls (USB audio, VoLTE, the carrier profile) that sets it right with one press |
+| **Carrier services** | Call forwarding (`**21*n#`, `*#21#`, `##002#`), caller ID (`#31#`), call waiting, and USSD balance codes from the keypad; a check of the modem's own setup for calls (USB audio, VoLTE, the carrier profile) that sets it right with one press; a field test of the cells the modem hears, serving and neighbours (Phone Settings > Modem > Network, `phonectl cell`) |
 | **Emergency alerts** | Cell broadcast (national, extreme, severe, Amber, test), full screen over everything, sounding through silent mode |
 | **Audio** | Built-in speaker (with echo cancellation), 3.5 mm headsets and speakers, Bluetooth headsets (HFP) and speakers (A2DP), an earpiece where the machine has one; calls follow a headset in and out; music pauses for a call; the LEDs flash for a ringing call if you like |
 | **Contacts** | `.vcf` files; copy your phonebook from your current phone over Bluetooth (no account, no sign-in), or import an export from Google or iCloud; names and numbers only |
@@ -67,7 +67,7 @@ disagree about a call. More in [docs/ARCHITECTURE.md](ARCHITECTURE.md).
 Everything above works against **fake-mm**, a stand-in ModemManager that `mmcli`
 itself accepts, and a second baresip playing the far end of SIP calls. The tests:
 
-- **242 end-to-end checks** (`scripts/e2e.sh`): phoned, the fake modem, a fake
+- **254 end-to-end checks** (`scripts/e2e.sh`): phoned, the fake modem, a fake
   mmsd-tng and phonectl playing through calls, texts, MMS, alerts, SIM PIN and SIM
   codes, an emergency call with the SIM locked, SIP, service codes, the modem's
   setup, grants, rules, contacts, the encrypted store, serial call audio through
@@ -78,7 +78,7 @@ itself accepts, and a second baresip playing the far end of SIP calls. The tests
   phoned, with a screenshot of each step;
 - **10 KDE Connect checks** (`scripts/kdeconnect-e2e.sh`) against the real
   kdeconnectd: pairing, texts both ways, a ringing call;
-- **214 unit tests**, including every panel screen rendered and checked against the
+- **223 unit tests**, including every panel screen rendered and checked against the
   panel's fonts.
 
 The panel apps also run in the real FlipCTL (its browser view, in a VM).

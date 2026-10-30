@@ -65,6 +65,9 @@ KDE Connect (a laptop's KDE Connect or GSConnect sees the phone's calls and text
 
 modem
   cells [n]                   the networks the modem has been on (needs a read grant)
+  cell                        the cells the modem hears now: the serving cell, then
+                              its neighbours (needs a read grant; exits 3 when the
+                              modem does not report cells)
   unlock <pin> (apps)         the SIM's PIN
 
 grants (texting without asking each time, approved once on the device)
@@ -108,6 +111,10 @@ fake modem (the far end, against fake-mm)
   fake mms <from> [--to <n,n>] [--file <f>]... [text...] | fake mms dump | fake mms fails <on|off>
                               (against fake-mmsd, mmsd-tng's stand-in)
   fake uplink <on|off>        the network link (fake-mm stands in for NetworkManager)
+  fake cell default | none | unsupported | <cell>...
+                              what GetCellInfo reports: each <cell> in quotes, its type,
+                              serving if it is, then ModemManager's keys, as in
+                              'lte serving tac=3010 ci=8A1C02 physical-ci=1A0 earfcn=1275 rsrp=-95'
 
 fake SIP far end (a second baresip, with ctrl_tcp on 127.0.0.1:4444; see e2e.sh)
   fake sip ring <your sip address> | fake sip answer | fake sip hangup
@@ -366,6 +373,29 @@ async fn run(conn: &zbus::Connection, w: &[&str], json: bool) -> Result<()> {
             for (at, tech, op, reg) in list {
                 let state = if reg { "" } else { "  (not registered)" };
                 println!("{}  {tech:<4} {op}{state}", phone_core::when::short(at, phone_core::now()));
+            }
+        }
+        ["cell"] => {
+            let list = ModemProxy::new(conn).await?.cell_info().await?;
+            if json {
+                // Only what the modem gave: phoned's "not given" values stay out.
+                let given: Vec<serde_json::Value> = list
+                    .iter()
+                    .map(|c| {
+                        let mut v = serde_json::to_value(c).unwrap_or_default();
+                        if let Some(o) = v.as_object_mut() {
+                            o.retain(|_, x| *x != "" && *x != CellInfo::UNSET && *x != CellInfo::UNSET_DB);
+                        }
+                        v
+                    })
+                    .collect();
+                return out(&given);
+            }
+            if list.is_empty() {
+                println!("no cells reported (not registered, or none measured yet)");
+            }
+            for c in &list {
+                println!("{:<9} {}", if c.serving { "serving" } else { "neighbour" }, c.describe());
             }
         }
         ["kdeconnect", "on"] => set_setting(conn, "kdeconnect", "true", json).await?,
@@ -1049,6 +1079,10 @@ async fn fake(w: &[&str]) -> Result<()> {
         ["autoanswer", ms] => drop(p.call_method("SetAutoAnswer", &(ms.parse::<u64>()?,)).await?),
         ["sendfails", s] => drop(p.call_method("SetSendFails", &(on(s),)).await?),
         ["atdebug", s] => drop(p.call_method("SetAtDebug", &(on(s),)).await?),
+        ["cell", "default"] => drop(p.call_method("ResetCells", &()).await?),
+        ["cell", "none"] => drop(p.call_method("SetCells", &(Vec::<String>::new(),)).await?),
+        ["cell", "unsupported"] => drop(p.call_method("SetCellInfoSupported", &(false,)).await?),
+        ["cell", cells @ ..] if !cells.is_empty() => drop(p.call_method("SetCells", &(cells.to_vec(),)).await?),
         ["atport"] => println!("{}", p.call_method("AtPort", &()).await?.body().deserialize::<String>()?),
         ["ussd", reply @ ..] if !reply.is_empty() => drop(p.call_method("SetUssdReply", &(reply.join(" "),)).await?),
         ["dump"] => print!("{}", p.call_method("Dump", &()).await?.body().deserialize::<String>()?),

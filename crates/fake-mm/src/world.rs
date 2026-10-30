@@ -93,6 +93,64 @@ pub struct World {
     pub channels: Vec<(u32, u32)>,
     /// What AT commands have set.
     pub at: crate::at::At,
+    /// The cells GetCellInfo reports, one `phonectl fake cell` spec each (see
+    /// [`cell_dict`]); None answers as a modem whose plugin cannot ask.
+    pub cells: Option<Vec<String>>,
+}
+
+/// The cells a fresh fake modem hears: Fakecom AU's LTE cell, and two neighbours
+/// on the same channel.
+pub const DEFAULT_CELLS: [&str; 3] = [
+    "lte serving operator-id=50599 tac=3010 ci=8A1C02 physical-ci=1A0 earfcn=1275 rsrp=-95 rsrq=-11 \
+     timing-advance=3 serving-cell-type=1 bandwidth=20000",
+    "lte operator-id=50599 physical-ci=25 earfcn=1275 rsrp=-104 rsrq=-14.5",
+    "lte operator-id=50599 physical-ci=10E earfcn=1275 rsrp=-112 rsrq=-17",
+];
+
+pub fn default_cells() -> Vec<String> {
+    DEFAULT_CELLS.iter().map(|c| c.to_string()).collect()
+}
+
+/// One cell, from its spec: MMCellType as a word (gsm, umts, tdscdma, lte, nr,
+/// or a number), "serving" if it is, and then ModemManager's own keys with
+/// their values, typed as its documentation of GetCellInfo types them: the ids
+/// strings, the measurements doubles, the rest unsigned.
+pub fn cell_dict(spec: &str) -> Result<std::collections::HashMap<String, zbus::wire::OwnedVariant>, String> {
+    use zbus::wire::{OwnedVariant, Variant};
+    let mut words = spec.split_whitespace();
+    let kind = words.next().ok_or("an empty cell")?;
+    let t: u32 = match kind {
+        "cdma" => 1,
+        "gsm" => 2,
+        "umts" => 3,
+        "tdscdma" => 4,
+        "lte" => 5,
+        "nr" | "5g" => 6,
+        n => n.parse().map_err(|_| format!("{n}: not a cell type"))?,
+    };
+    let own = |v: Variant<'_>| OwnedVariant::try_from(v).map_err(|e| e.to_string());
+    let mut d = std::collections::HashMap::from([
+        ("cell-type".to_string(), own(Variant::from(t))?),
+        ("serving".to_string(), own(Variant::from(false))?),
+    ]);
+    for w in words {
+        if w == "serving" {
+            d.insert("serving".into(), own(Variant::from(true))?);
+            continue;
+        }
+        let (k, v) = w.split_once('=').ok_or_else(|| format!("{w}: not key=value"))?;
+        let value = match k {
+            "operator-id" | "lac" | "tac" | "ci" | "physical-ci" | "base-station-id" | "nid" | "sid" | "ref-pn" => {
+                Variant::from(v.to_string())
+            }
+            "rsrp" | "rsrq" | "sinr" | "rscp" | "ecio" => {
+                Variant::from(v.parse::<f64>().map_err(|_| format!("{w}: not a number"))?)
+            }
+            _ => Variant::from(v.parse::<u32>().map_err(|_| format!("{w}: not a whole number"))?),
+        };
+        d.insert(k.to_string(), own(value)?);
+    }
+    Ok(d)
 }
 
 pub type Shared = Arc<Mutex<World>>;
@@ -128,6 +186,7 @@ impl World {
             next_cbm: 1,
             channels: Vec::new(),
             at: crate::at::At::default(),
+            cells: Some(default_cells()),
         }))
     }
 
@@ -162,3 +221,21 @@ pub const CBM_RECEIVED: u32 = 2;
 /// MMSmsDeliveryState: 0 completed and received; 0x100 not known yet.
 pub const DELIVERED: u32 = 0x00;
 pub const DELIVERY_UNKNOWN: u32 = 0x100;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn cell_specs() {
+        for c in super::DEFAULT_CELLS {
+            assert!(super::cell_dict(c).is_ok(), "{c}");
+        }
+        let d = super::cell_dict("nr serving physical-ci=3E7 nrarfcn=643334 sinr=17").unwrap();
+        assert_eq!(u32::try_from(&d["cell-type"]).unwrap(), 6);
+        assert!(bool::try_from(&d["serving"]).unwrap());
+        assert_eq!(String::try_from(d["physical-ci"].clone()).unwrap(), "3E7", "ids are strings");
+        assert_eq!(f64::try_from(&d["sinr"]).unwrap(), 17.0, "measurements are doubles");
+        assert!(super::cell_dict("lte earfcn=-1").is_err());
+        assert!(super::cell_dict("satellite").is_err());
+        assert!(super::cell_dict("lte rsrp").is_err());
+    }
+}

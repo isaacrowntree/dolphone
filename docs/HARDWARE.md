@@ -217,6 +217,10 @@ journalctl --user -u phoned -f           # what phoned makes of the modem
 `scripts/dev-setup.sh` is for a machine without a modem: it refuses to mask
 ModemManager where it finds one.
 
+`phonectl cell` (after `phonectl set read_grants +phonectl`, allowed on the device)
+lists the cells the firmware reports; whether the RM520N-GL fills in the 5G NR
+fields is unconfirmed, so note what it shows.
+
 On the Flipper One, `ls /sys/class/leds` shows the LEDs' real names: if they are
 not the `flipper-one:*` names in the profile's `ring_leds`, note them (and the udev
 rule's match).

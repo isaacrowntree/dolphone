@@ -31,6 +31,8 @@ pub enum CoreError {
     ZBus(zbus::Error),
     Failed(String),
     Unauthorized(String),
+    Unsupported(String),
+    WrongState(String),
 }
 
 /// `org.freedesktop.ModemManager1` itself.
@@ -165,6 +167,21 @@ impl Modem {
             ));
         }
         w.at.answer(cmd).ok_or_else(|| CoreError::Failed("ERROR".into()))
+    }
+
+    /// The cells the modem hears, as ModemManager 1.20+ reports them; refused, as
+    /// ModemManager refuses it (mm-iface-modem.c), when the plugin cannot ask or
+    /// the modem is not enabled yet.
+    async fn get_cell_info(&self) -> Result<Vec<HashMap<String, OwnedVariant>>, CoreError> {
+        let w = self.world.lock().await;
+        let Some(cells) = &w.cells else {
+            return Err(CoreError::Unsupported("Cannot get cell info: operation not supported".into()));
+        };
+        // MMModemState 6, enabled: ModemManager asks for at least that.
+        if modem_state(&w) < 6 {
+            return Err(CoreError::WrongState("Cannot get cell info: device not yet enabled".into()));
+        }
+        cells.iter().map(|c| crate::world::cell_dict(c).map_err(CoreError::Failed)).collect()
     }
 
     #[zbus(property)]

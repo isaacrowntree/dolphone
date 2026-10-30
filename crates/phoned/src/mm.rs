@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use zbus::proxy;
-use zbus::wire::{ObjectPath, OwnedObjectPath, Variant};
+use zbus::wire::{ObjectPath, OwnedObjectPath, OwnedVariant, Variant};
 
 pub const SERVICE: &str = "org.freedesktop.ModemManager1";
 pub const ROOT: &str = "/org/freedesktop/ModemManager1";
@@ -77,6 +77,11 @@ pub trait Modem {
     #[zbus(property)]
     fn current_modes(&self) -> zbus::Result<(u32, u32)>;
     fn set_current_modes(&self, modes: &(u32, u32)) -> zbus::Result<()>;
+    /// The serving and neighbouring cells, one dictionary each (ModemManager 1.20;
+    /// see [`parse_cells`]). It needs the modem enabled, and a plugin that can ask:
+    /// ModemManager's QMI and MBIM modems do (mm-broadband-modem-qmi.c,
+    /// mm-broadband-modem-mbim.c); others answer Core.Unsupported.
+    fn get_cell_info(&self) -> zbus::Result<Vec<HashMap<String, OwnedVariant>>>;
 }
 
 /// MMModemMode bits (ModemManager-enums.h).
@@ -374,6 +379,105 @@ pub fn tech_label(bits: u32) -> &'static str {
     }
 }
 
+/// MMCellType (ModemManager-enums.h, since 1.20), as `CellInfo::kind`.
+pub fn cell_kind(t: u32) -> &'static str {
+    match t {
+        1 => "cdma",
+        2 => "gsm",
+        3 => "umts",
+        4 => "tdscdma",
+        5 => "lte",
+        6 => "nr",
+        _ => "unknown",
+    }
+}
+
+/// `Modem.GetCellInfo`'s dictionaries as Dolphone's cells, the serving ones first.
+///
+/// The keys, from ModemManager's documentation of the method
+/// (org.freedesktop.ModemManager1.Modem.xml; libmm-glib's mm-cell-info-*.c write
+/// them): every cell has "cell-type" (u, MMCellType) and "serving" (b). Then, all
+/// optional, as the firmware fills them:
+///
+/// - GSM: "operator-id" (s), "lac" and "ci" (s, hex), "arfcn" (u), "rx-level" (u,
+///   0..=63), "timing-advance" (u), "base-station-id" (s).
+/// - UMTS: "operator-id", "lac", "ci", "uarfcn" (u), "psc" (u), "rscp" and "ecio"
+///   (d), "path-loss", "frequency-fdd-ul/-dl", "frequency-tdd" (u).
+/// - TD-SCDMA: "operator-id", "lac", "ci", "uarfcn", "cell-parameter-id" (u),
+///   "rscp" (d), "timing-advance", "path-loss" (u).
+/// - LTE: "operator-id", "tac" and "ci" (s, hex), "physical-ci" (s, hex), "earfcn"
+///   (u), "rsrp" and "rsrq" (d), "timing-advance" (u); since 1.22 also
+///   "serving-cell-type" and "bandwidth" (u).
+/// - 5G NR: as LTE, with "nrarfcn" for "earfcn", and "sinr" (d).
+/// - CDMA: "nid", "sid", "base-station-id", "ref-pn" (s), "pilot-strength" (u):
+///   kept only as a cell of its kind; Dolphone's modems have no CDMA.
+///
+/// None of them carries a band. A key of an unexpected type is taken as not
+/// given, and a cell type newer than this list as "unknown".
+pub fn parse_cells(list: &[HashMap<String, OwnedVariant>]) -> Vec<phone_api::CellInfo> {
+    use phone_api::CellInfo;
+    let mut cells: Vec<CellInfo> = list
+        .iter()
+        .map(|d| {
+            let s = |k: &str| d.get(k).and_then(|v| String::try_from(v.clone()).ok()).unwrap_or_default();
+            let u = |k: &str| d.get(k).and_then(|v| u32::try_from(v).ok()).unwrap_or(CellInfo::UNSET);
+            let f = |k: &str| d.get(k).and_then(|v| f64::try_from(v).ok()).unwrap_or(CellInfo::UNSET_DB);
+            let kind = cell_kind(d.get("cell-type").and_then(|v| u32::try_from(v).ok()).unwrap_or(0));
+            let serving = d.get("serving").and_then(|v| bool::try_from(v).ok()).unwrap_or(false);
+            let mut c = CellInfo::new(kind, serving);
+            if kind == "unknown" || kind == "cdma" {
+                return c;
+            }
+            c.operator_id = s("operator-id");
+            c.ci = s("ci");
+            c.timing_advance = u("timing-advance");
+            match kind {
+                "gsm" => {
+                    c.area = s("lac");
+                    c.channel = u("arfcn");
+                    c.rx_level = u("rx-level");
+                }
+                "umts" | "tdscdma" => {
+                    c.area = s("lac");
+                    c.channel = u("uarfcn");
+                    c.psc = u("psc");
+                    c.rscp = f("rscp");
+                    c.ecio = f("ecio");
+                }
+                _ => {
+                    c.area = s("tac");
+                    c.channel = u(if kind == "nr" { "nrarfcn" } else { "earfcn" });
+                    c.pci = u32::from_str_radix(&s("physical-ci"), 16).unwrap_or(CellInfo::UNSET);
+                    c.rsrp = f("rsrp");
+                    c.rsrq = f("rsrq");
+                    c.sinr = f("sinr");
+                    c.serving_cell_type = u("serving-cell-type");
+                    c.bandwidth = u("bandwidth");
+                }
+            }
+            c
+        })
+        .collect();
+    // Stable: ModemManager's own order among serving cells (the primary first, as
+    // the QMI and MBIM code builds the list) and among neighbours is kept.
+    cells.sort_by_key(|c| !c.serving);
+    cells
+}
+
+/// Whether ModemManager said this modem cannot report cells: its plugin has no
+/// way to (Core.Unsupported, mm-iface-modem.c), or it is older than 1.20 and has
+/// no such method.
+pub fn no_cell_info(e: &zbus::Error) -> bool {
+    match e {
+        zbus::Error::MethodError(name, _, _) => matches!(
+            name.as_str(),
+            "org.freedesktop.ModemManager1.Error.Core.Unsupported" | "org.freedesktop.DBus.Error.UnknownMethod"
+        ),
+        zbus::Error::FDO(f) => matches!(**f, zbus::fdo::Error::UnknownMethod(_) | zbus::fdo::Error::NotSupported(_)),
+        _ => false,
+    }
+}
+
 /// Why an AT command did not go through, in words an owner can act on.
 pub fn explain_at(e: &zbus::Error) -> String {
     let s = e.to_string();
@@ -404,12 +508,150 @@ pub async fn at(system: &zbus::Connection, modem: &OwnedObjectPath, cmd: &str) -
 
 #[cfg(test)]
 mod tests {
+    use super::{parse_cells, HashMap, OwnedVariant};
+    use phone_api::CellInfo;
+    use zbus::wire::Variant as V;
+
     #[test]
     fn tech_labels() {
         assert_eq!(super::tech_label((1 << 15) | (1 << 14)), "5G");
         assert_eq!(super::tech_label(1 << 14), "LTE");
         assert_eq!(super::tech_label(1 << 5), "3G");
         assert_eq!(super::tech_label(0), "--");
+    }
+
+    fn dict(pairs: &[(&str, zbus::wire::Variant<'static>)]) -> HashMap<String, OwnedVariant> {
+        pairs.iter().map(|(k, v)| (k.to_string(), OwnedVariant::try_from(v.clone()).expect("owned"))).collect()
+    }
+
+    #[test]
+    fn cells_of_every_kind() {
+        let list = [
+            // A neighbour first: the serving cell still comes out first.
+            dict(&[
+                ("cell-type", V::from(5u32)),
+                ("serving", V::from(false)),
+                ("physical-ci", V::from("25")),
+                ("earfcn", V::from(1275u32)),
+                ("rsrp", V::from(-104.0)),
+                ("rsrq", V::from(-14.5)),
+            ]),
+            dict(&[
+                ("cell-type", V::from(5u32)),
+                ("serving", V::from(true)),
+                ("operator-id", V::from("50501")),
+                ("tac", V::from("3010")),
+                ("ci", V::from("8A1C02")),
+                ("physical-ci", V::from("1A0")),
+                ("earfcn", V::from(1275u32)),
+                ("rsrp", V::from(-95.0)),
+                ("rsrq", V::from(-11.0)),
+                ("timing-advance", V::from(3u32)),
+                ("serving-cell-type", V::from(1u32)),
+                ("bandwidth", V::from(20000u32)),
+            ]),
+            dict(&[
+                ("cell-type", V::from(6u32)),
+                ("serving", V::from(true)),
+                ("tac", V::from("3010")),
+                ("ci", V::from("1B2C3D4E5")),
+                ("physical-ci", V::from("3E7")),
+                ("nrarfcn", V::from(643334u32)),
+                ("rsrp", V::from(-88.0)),
+                ("rsrq", V::from(-10.0)),
+                ("sinr", V::from(17.0)),
+            ]),
+            dict(&[
+                ("cell-type", V::from(3u32)),
+                ("serving", V::from(false)),
+                ("operator-id", V::from("50501")),
+                ("lac", V::from("84CD")),
+                ("ci", V::from("2BAF")),
+                ("uarfcn", V::from(10838u32)),
+                ("psc", V::from(301u32)),
+                ("rscp", V::from(-90.0)),
+                ("ecio", V::from(-7.0)),
+            ]),
+            dict(&[
+                ("cell-type", V::from(2u32)),
+                ("serving", V::from(false)),
+                ("lac", V::from("84CD")),
+                ("ci", V::from("2BAF")),
+                ("arfcn", V::from(62u32)),
+                ("rx-level", V::from(40u32)),
+            ]),
+        ];
+        let cells = parse_cells(&list);
+        let lte = &cells[0];
+        assert!(lte.serving && lte.kind == "lte", "serving first: {cells:?}");
+        assert_eq!((lte.operator_id.as_str(), lte.area.as_str(), lte.ci.as_str()), ("50501", "3010", "8A1C02"));
+        assert_eq!((lte.pci, lte.channel, lte.timing_advance), (416, 1275, 3), "the PCI from hex");
+        assert_eq!((lte.rsrp, lte.rsrq), (-95.0, -11.0));
+        assert_eq!((lte.serving_cell_type, lte.bandwidth), (1, 20000));
+        assert_eq!(lte.sinr, CellInfo::UNSET_DB, "ModemManager has no SINR for LTE");
+        assert_eq!(lte.strength(), "-95 dBm");
+        assert_eq!(
+            lte.describe(),
+            "LTE 50501 TAC 3010 CI 8A1C02 PCI 416 EARFCN 1275 RSRP -95 dBm RSRQ -11 dB TA 3 bandwidth 20000"
+        );
+        let nr = &cells[1];
+        assert_eq!((nr.kind.as_str(), nr.pci, nr.channel, nr.sinr), ("nr", 999, 643334, 17.0));
+        assert_eq!((nr.tech(), nr.channel_name(), nr.area_name()), ("5G NR", "NR-ARFCN", "TAC"));
+        let lte_n = &cells[2];
+        assert!(!lte_n.serving && lte_n.pci == 37 && lte_n.ci.is_empty());
+        assert_eq!(CellInfo::db(lte_n.rsrq).as_deref(), Some("-14.5"));
+        let umts = &cells[3];
+        assert_eq!(
+            (umts.area.as_str(), umts.channel, umts.psc, umts.rscp, umts.ecio),
+            ("84CD", 10838, 301, -90.0, -7.0)
+        );
+        assert_eq!((umts.channel_name(), umts.area_name(), umts.strength().as_str()), ("UARFCN", "LAC", "-90 dBm"));
+        assert_eq!(umts.pci, CellInfo::UNSET);
+        let gsm = &cells[4];
+        assert_eq!((gsm.kind.as_str(), gsm.channel, gsm.rx_level, gsm.strength().as_str()), ("gsm", 62, 40, "RX 40"));
+    }
+
+    #[test]
+    fn cells_with_little_or_nothing() {
+        let cells = parse_cells(&[
+            // Only the two keys ModemManager always gives.
+            dict(&[("cell-type", V::from(5u32)), ("serving", V::from(true))]),
+            // A type newer than Dolphone, with keys it does not know.
+            dict(&[("cell-type", V::from(9u32)), ("serving", V::from(false)), ("ci", V::from("1"))]),
+            // A key of the wrong type, and no serving flag at all.
+            dict(&[("cell-type", V::from(5u32)), ("earfcn", V::from("1275")), ("rsrp", V::from(-95i32))]),
+        ]);
+        assert_eq!(cells.len(), 3);
+        assert_eq!(cells[0], CellInfo::new("lte", true));
+        assert_eq!(cells[0].strength(), "");
+        assert_eq!(cells[1], CellInfo::new("unknown", false), "kept, with nothing guessed");
+        assert_eq!(cells[1].tech(), "Unknown");
+        assert_eq!(cells[2], CellInfo::new("lte", false), "wrong types are not given");
+        assert!(parse_cells(&[]).is_empty());
+    }
+
+    #[test]
+    fn cells_travel_on_dbus_whole() {
+        // Every field goes on the wire, given or not: a struct that left some out
+        // would not match its signature, and the bus would drop phoned for it.
+        let cells = vec![CellInfo { rsrp: -95.0, ..CellInfo::new("lte", true) }, CellInfo::new("nr", false)];
+        let ctx = zbus::wire::serialized::Context::new(zbus::wire::LE, 0);
+        let bytes = zbus::wire::to_bytes(ctx, &cells).unwrap();
+        let (back, _): (Vec<CellInfo>, _) = bytes.deserialize().unwrap();
+        assert_eq!(back, cells);
+    }
+
+    #[test]
+    fn no_cell_info_errors() {
+        use zbus::Error;
+        let named = |n: &'static str| {
+            Error::MethodError(n.try_into().unwrap(), Some("Cannot get cell info: operation not supported".into()), {
+                zbus::message::Message::method_call("/", "X").build(&()).unwrap()
+            })
+        };
+        assert!(super::no_cell_info(&named("org.freedesktop.ModemManager1.Error.Core.Unsupported")));
+        assert!(super::no_cell_info(&named("org.freedesktop.DBus.Error.UnknownMethod")));
+        assert!(!super::no_cell_info(&named("org.freedesktop.ModemManager1.Error.Core.WrongState")));
     }
 
     #[test]

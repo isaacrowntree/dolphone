@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use phone_api::{
-    AlertInfo, AuditEntry, BtDevice, CallInfo, CallRecordInfo, DeviceInfo, Grant, MessageInfo, ModemStatus, Placed,
-    Request, RouteInfo, ThreadInfo, PATH,
+    AlertInfo, AuditEntry, BtDevice, CallInfo, CallRecordInfo, CellInfo, DeviceInfo, Grant, MessageInfo, ModemStatus,
+    Placed, Request, RouteInfo, ThreadInfo, PATH,
 };
 use zbus::message::Header;
 use zbus::object_server::SignalEmitter;
@@ -629,6 +629,19 @@ impl Modem {
         let who = reader(conn, &hdr).await?;
         self.0.audit(&who, "cells", "", "allowed");
         self.0.store_read(|s| s.cells(limit.clamp(1, 2000)))
+    }
+
+    /// The cells the modem hears now. A cell id and its area place the phone
+    /// within a few hundred metres in a town, closer than the network history
+    /// above, so the same rule: Dolphone's own apps, or a program with a read grant.
+    async fn cell_info(
+        &self,
+        #[zbus(header)] hdr: Header<'_>,
+        #[zbus(connection)] conn: &Connection,
+    ) -> zbus::fdo::Result<Vec<CellInfo>> {
+        let who = reader(conn, &hdr).await?;
+        self.0.audit(&who, "cell info", "", "allowed");
+        self.0.cell_info().await
     }
 
     async fn unlock(
