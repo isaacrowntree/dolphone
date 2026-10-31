@@ -13,7 +13,9 @@ use phone_core::model::{CallState, MessageState, Outcome, Route};
 
 const USAGE: &str = "usage: phonectl [--json] <command>
 
---json prints lists and status as JSON, and watch as one JSON object per line.
+--json prints every result as JSON (watch as one object per line; {\"ok\":true} when
+there is nothing else to say), and errors as {\"error\",\"kind\",\"exit\"} on stderr. For
+AI agents: /usr/share/dolphone/skills/phonectl/SKILL.md (docs/AGENTS.md).
 
 phone
   status                      modem, signal, operator
@@ -134,11 +136,26 @@ async fn main() -> Result<()> {
         return fake(&words[1..]).await;
     }
     let _ = JSON.set(json);
-    let conn = zbus::Connection::session().await.context("session bus")?;
-    if let Err(e) = run(&conn, &words, json).await {
-        let (code, msg) = failure(&e);
-        eprintln!("Error: {msg}");
-        std::process::exit(code);
+    let result = match zbus::Connection::session().await.context("session bus") {
+        Ok(conn) => run(&conn, &words, json).await,
+        Err(e) => Err(e),
+    };
+    match result {
+        Err(e) => {
+            let f = failure(&e);
+            if json {
+                // On stderr, so stdout holds only results: one object an agent can
+                // branch on without reading the words.
+                eprintln!("{}", serde_json::json!({"error": f.msg, "kind": f.kind, "exit": f.code}));
+            } else {
+                eprintln!("Error: {}", f.msg);
+            }
+            std::process::exit(f.code);
+        }
+        // A command with nothing to report still answers, so a script reading JSON
+        // always gets a line.
+        Ok(()) if json && !PRINTED.load(std::sync::atomic::Ordering::SeqCst) => println!(r#"{{"ok":true}}"#),
+        Ok(()) => {}
     }
     Ok(())
 }
@@ -146,35 +163,66 @@ async fn main() -> Result<()> {
 /// Whether --json was given, for the helpers that print a result.
 static JSON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
+/// Whether a result has been printed, so a silent success can say ok.
+static PRINTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A mistake in the command line itself, rather than something phoned refused.
+#[derive(Debug)]
+struct Usage(String);
+
+impl std::fmt::Display for Usage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Usage {}
+
+fn usage(msg: impl Into<String>) -> anyhow::Error {
+    Usage(msg.into()).into()
+}
+
+/// Why a command failed: its exit code, a word for scripts, and what to tell a
+/// person.
+#[derive(Debug, PartialEq)]
+struct Failure {
+    code: i32,
+    kind: &'static str,
+    msg: String,
+}
+
 /// An error's exit code and words. 2: not allowed (only Dolphone's apps, or no
 /// read grant); 3: a bad argument, or not something this phone does; 4: over a
 /// rate limit; 5: phoned is not running; 1: anything else (it was tried and failed).
-fn failure(e: &anyhow::Error) -> (i32, String) {
-    let named = |name: &str, msg: String| {
-        let code = match name {
-            "org.freedesktop.DBus.Error.AccessDenied" => 2,
-            "org.freedesktop.DBus.Error.InvalidArgs" | "org.freedesktop.DBus.Error.NotSupported" => 3,
-            "org.freedesktop.DBus.Error.LimitsExceeded" => 4,
-            "org.freedesktop.DBus.Error.ServiceUnknown" | "org.freedesktop.DBus.Error.NameHasNoOwner" => 5,
-            n if n.starts_with("org.freedesktop.DBus.Error.Spawn.") => 6,
-            _ => 1,
-        };
-        match code {
-            5 => (5, "phoned is not running".to_string()),
-            6 => (5, format!("phoned could not start: {msg}")),
-            _ => (code, msg),
+fn failure(e: &anyhow::Error) -> Failure {
+    let f = |code, kind, msg: String| Failure { code, kind, msg };
+    let named = |name: &str, msg: String| match name {
+        "org.freedesktop.DBus.Error.AccessDenied" => f(2, "not_allowed", msg),
+        "org.freedesktop.DBus.Error.InvalidArgs" => f(3, "bad_argument", msg),
+        "org.freedesktop.DBus.Error.NotSupported" => f(3, "not_supported", msg),
+        "org.freedesktop.DBus.Error.LimitsExceeded" => f(4, "rate_limited", msg),
+        "org.freedesktop.DBus.Error.ServiceUnknown" | "org.freedesktop.DBus.Error.NameHasNoOwner" => {
+            f(5, "not_running", "phoned is not running".into())
         }
+        n if n.starts_with("org.freedesktop.DBus.Error.Spawn.") => {
+            f(5, "not_running", format!("phoned could not start: {msg}"))
+        }
+        _ => f(1, "failed", msg),
     };
     match e.downcast_ref::<zbus::Error>() {
         Some(zbus::Error::MethodError(name, msg, _)) => {
             named(name.as_str(), msg.clone().unwrap_or_else(|| name.to_string()))
         }
-        Some(zbus::Error::FDO(f)) => {
-            let text = f.to_string();
+        Some(zbus::Error::FDO(fdo)) => {
+            let text = fdo.to_string();
             let (name, msg) = text.split_once(": ").unwrap_or((text.as_str(), text.as_str()));
             named(name, msg.to_string())
         }
-        _ => (1, format!("{e:#}")),
+        _ if e.chain().any(|c| c.is::<Usage>() || c.is::<std::num::ParseIntError>()) => {
+            f(3, "bad_argument", format!("{e:#}"))
+        }
+        _ if e.chain().any(|c| c.is::<tokio::time::error::Elapsed>()) => f(1, "timed_out", format!("{e:#}")),
+        _ => f(1, "failed", format!("{e:#}")),
     }
 }
 
@@ -191,6 +239,7 @@ fn state_word(s: MessageState) -> &'static str {
 /// Print as JSON.
 fn out<T: serde::Serialize>(v: &T) -> Result<()> {
     println!("{}", serde_json::to_string(v)?);
+    PRINTED.store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(())
 }
 
@@ -279,13 +328,13 @@ async fn run(conn: &zbus::Connection, w: &[&str], json: bool) -> Result<()> {
                 println!("{reply}")
             }
         }
-        ["modem", "setup"] => print_steps(&ModemProxy::new(conn).await?.setup().await?, json),
+        ["modem", "setup"] => print_steps(&ModemProxy::new(conn).await?.setup().await?, json)?,
         ["modem", "setup", "apply"] => {
             let (p, steps) = ModemProxy::new(conn).await?.apply_setup().await?;
             if p.pending != 0 {
                 placed("modem setup", p);
             } else {
-                print_steps(&steps, json);
+                print_steps(&steps, json)?;
             }
         }
         ["send", flag, rest @ ..] if *flag == "--wait" || flag.starts_with("--wait=") => {
@@ -297,19 +346,14 @@ async fn run(conn: &zbus::Connection, w: &[&str], json: bool) -> Result<()> {
                 (None, [n, more @ ..]) if short(n) && more.len() >= 2 => (n.parse()?, more),
                 (None, rest) => (60, rest),
             };
-            let [to, text @ ..] = rest else { bail!("send --wait [seconds] <to> <text...>") };
+            let [to, text @ ..] = rest else { return Err(usage("send --wait [seconds] <to> <text...>")) };
             if text.is_empty() {
-                bail!("send --wait [seconds] <to> <text...>");
+                return Err(usage("send --wait [seconds] <to> <text...>"));
             }
             send_and_wait(conn, to, &text.join(" "), secs, json).await?
         }
         ["send", to, text @ ..] if !text.is_empty() => {
-            let p = messages.send(to, &text.join(" ")).await?;
-            if json {
-                out(&p)?
-            } else {
-                placed("text", p)
-            }
+            placed("text", messages.send(to, &text.join(" ")).await?);
         }
         ["mms", to, rest @ ..] => {
             let mut files = Vec::new();
@@ -325,12 +369,7 @@ async fn run(conn: &zbus::Connection, w: &[&str], json: bool) -> Result<()> {
             }
             let to: Vec<&str> = to.split(',').collect();
             let files: Vec<&str> = files.iter().map(String::as_str).collect();
-            let p = messages.send_mms(&to, &text.join(" "), &files).await?;
-            if json {
-                out(&p)?
-            } else {
-                placed("message", p)
-            }
+            placed("message", messages.send_mms(&to, &text.join(" "), &files).await?);
         }
         ["retry", id] => messages.retry(id.parse()?).await?,
         ["otp", rest @ ..] => otp(conn, rest, &region, json).await?,
@@ -348,7 +387,11 @@ async fn run(conn: &zbus::Connection, w: &[&str], json: bool) -> Result<()> {
                 );
             }
         }
-        ["export"] => print!("{}", messages.export().await?),
+        // XML whatever --json says: it is a file for an Android app to restore.
+        ["export"] => {
+            print!("{}", messages.export().await?);
+            PRINTED.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         ["alerts"] | ["alerts", _] => {
             let list = messages.alerts(w.get(1).and_then(|n| n.parse().ok()).unwrap_or(20)).await?;
             if json {
@@ -434,18 +477,14 @@ async fn run(conn: &zbus::Connection, w: &[&str], json: bool) -> Result<()> {
         }
         ["device", "use", id] => set_setting(conn, "device_profile", id, json).await?,
         ["unlock", pin] => match ModemProxy::new(conn).await?.unlock(pin).await? {
+            0 if json => out(&serde_json::json!({"unlocked": true}))?,
             0 => println!("SIM unlocked"),
             n => bail!("wrong PIN; {n} {} left", if n == 1 { "try" } else { "tries" }),
         },
         ["grant", numbers, rest @ ..] if rest.len() <= 2 => {
             let per_hour = rest.first().map(|n| n.parse()).transpose()?.unwrap_or(10);
             let days = rest.get(1).map(|n| n.parse()).transpose()?.unwrap_or(30);
-            let p = SettingsProxy::new(conn).await?.request_grant(numbers, per_hour, days).await?;
-            if json {
-                out(&p)?
-            } else {
-                placed("grant", p)
-            }
+            placed("grant", SettingsProxy::new(conn).await?.request_grant(numbers, per_hour, days).await?);
         }
         ["grants"] => {
             let list = SettingsProxy::new(conn).await?.grants().await?;
@@ -477,8 +516,12 @@ async fn run(conn: &zbus::Connection, w: &[&str], json: bool) -> Result<()> {
             }
         }
         ["threads"] if json => out(&messages.threads().await?)?,
-        ["thread", peer] if json => {
-            out(&messages.conversation(&phone_core::number::canonical_peer(peer, &region)).await?)?
+        ["thread", peer] | ["read", peer] if json => {
+            let peer = phone_core::number::canonical_peer(peer, &region);
+            out(&messages.conversation(&peer).await?)?;
+            if w[0] == "read" {
+                messages.mark_read(&peer).await?;
+            }
         }
         ["pending"] if json => out(&ConfirmProxy::new(conn).await?.pending().await?)?,
         ["routes"] if json => out(&AudioProxy::new(conn).await?.routes().await?)?,
@@ -524,6 +567,7 @@ async fn run(conn: &zbus::Connection, w: &[&str], json: bool) -> Result<()> {
             }
         }
         ["messages", "lock"] => messages.lock().await?,
+        ["messages", "locked"] if json => out(&serde_json::json!({"locked": messages.locked().await?}))?,
         ["messages", "locked"] => println!("{}", if messages.locked().await? { "locked" } else { "open" }),
         ["wait", id, rest @ ..] if rest.len() <= 1 => {
             let id: u32 = id.parse().context("wait <request> [seconds]")?;
@@ -547,13 +591,14 @@ async fn run(conn: &zbus::Connection, w: &[&str], json: bool) -> Result<()> {
                 "speaker" => Route::Speaker,
                 "headset" | "wired" | "jack" => Route::Wired,
                 "bluetooth" | "bt" => Route::Bluetooth,
-                _ => bail!("speaker, headset or bluetooth"),
+                _ => return Err(usage("speaker, headset or bluetooth")),
             };
             AudioProxy::new(conn).await?.set_route(r as u8).await?;
         }
+        ["ringer"] if json => out(&serde_json::json!({"ringer": AudioProxy::new(conn).await?.ringer().await?}))?,
         ["ringer"] => println!("{}", AudioProxy::new(conn).await?.ringer().await?),
         ["ringer", mode] => AudioProxy::new(conn).await?.set_ringer(mode).await?,
-        ["bt", rest @ ..] => bluetooth(conn, rest).await?,
+        ["bt", rest @ ..] => bluetooth(conn, rest, json).await?,
         ["get", key] => {
             let value = SettingsProxy::new(conn).await?.get(key).await?;
             if json {
@@ -572,7 +617,7 @@ async fn run(conn: &zbus::Connection, w: &[&str], json: bool) -> Result<()> {
         }
         ["wipe"] => placed("wipe", SettingsProxy::new(conn).await?.wipe().await?),
         ["watch"] => watch(conn, json).await?,
-        _ => bail!("unknown command; phonectl help"),
+        _ => return Err(usage("unknown command; phonectl help")),
     }
     Ok(())
 }
@@ -580,14 +625,6 @@ async fn run(conn: &zbus::Connection, w: &[&str], json: bool) -> Result<()> {
 async fn contacts(conn: &zbus::Connection, w: &[&str], region: &str, json: bool) -> Result<()> {
     let book = ContactsProxy::new(conn).await?;
     let show = |n: &str| phone_core::number::display_peer(n, region);
-    let done = |p: Placed, what: &str| {
-        if json {
-            out(&p)
-        } else {
-            placed(what, p);
-            Ok(())
-        }
-    };
     match w {
         [] | ["list"] => {
             let all = book.list().await?;
@@ -601,13 +638,13 @@ async fn contacts(conn: &zbus::Connection, w: &[&str], region: &str, json: bool)
         }
         ["add", name, n] | ["add", name, n, _] => {
             let kind = w.get(3).unwrap_or(&"mobile").to_string();
-            done(book.add(name, vec![(kind, n.to_string())]).await?, "contact")?;
+            placed("contact", book.add(name, vec![(kind, n.to_string())]).await?);
         }
         ["edit", id, name, n] | ["edit", id, name, n, _] => {
             let kind = w.get(4).unwrap_or(&"mobile").to_string();
-            done(book.update(id, name, vec![(kind, n.to_string())]).await?, "contact")?;
+            placed("contact", book.update(id, name, vec![(kind, n.to_string())]).await?);
         }
-        ["remove", id] => done(book.remove(id).await?, "contact")?,
+        ["remove", id] => placed("contact", book.remove(id).await?),
         ["import", file] => {
             let text = if *file == "-" {
                 let mut s = String::new();
@@ -625,24 +662,28 @@ async fn contacts(conn: &zbus::Connection, w: &[&str], region: &str, json: bool)
                 println!("{} contacts added or updated", p.id);
             }
         }
-        _ => bail!("contacts [list] | add <name> <number> [kind] | edit <id> <name> <number> [kind] | remove <id> | import <file|->"),
+        _ => return Err(usage("contacts [list] | add <name> <number> [kind] | edit <id> <name> <number> [kind] | remove <id> | import <file|->")),
     }
     Ok(())
 }
 
-fn print_steps(steps: &[(String, String, String)], json: bool) {
-    for (name, state, detail) in steps {
-        if json {
-            println!("{}", serde_json::json!({ "step": name, "state": state, "detail": detail }));
-        } else {
-            println!("{name:<17} {state:<12} {detail}");
-        }
+fn print_steps(steps: &[(String, String, String)], json: bool) -> Result<()> {
+    if json {
+        let list: Vec<_> = steps
+            .iter()
+            .map(|(name, state, detail)| serde_json::json!({ "step": name, "state": state, "detail": detail }))
+            .collect();
+        return out(&list);
     }
+    for (name, state, detail) in steps {
+        println!("{name:<17} {state:<12} {detail}");
+    }
+    Ok(())
 }
 
 fn placed(what: &str, p: Placed) {
     if JSON.get().copied().unwrap_or(false) {
-        println!("{}", serde_json::json!({"what": what, "id": p.id, "pending": p.pending}));
+        let _ = out(&serde_json::json!({"what": what, "id": p.id, "pending": p.pending}));
         return;
     }
     if p.pending != 0 {
@@ -665,12 +706,15 @@ async fn pick(calls: &CallsProxy<'_>, ringing: bool) -> Result<u32> {
     found.map(|c| c.id).context(if ringing { "nothing is ringing" } else { "no call" })
 }
 
-async fn bluetooth(conn: &zbus::Connection, w: &[&str]) -> Result<()> {
+async fn bluetooth(conn: &zbus::Connection, w: &[&str], json: bool) -> Result<()> {
     let bt = BluetoothProxy::new(conn).await?;
     if !bt.available().await? {
         bail!("no Bluetooth adapter");
     }
     match w {
+        [] | ["devices"] if json => {
+            out(&serde_json::json!({"powered": bt.powered().await?, "devices": bt.devices().await?}))?
+        }
         [] | ["devices"] => {
             println!("powered {}", if bt.powered().await? { "on" } else { "off" });
             for d in bt.devices().await? {
@@ -691,7 +735,9 @@ async fn bluetooth(conn: &zbus::Connection, w: &[&str]) -> Result<()> {
         }
         ["scan"] => {
             bt.start_scan().await?;
-            println!("scanning for 30 s; phonectl bt devices to see what turns up");
+            if !json {
+                println!("scanning for 30 s; phonectl bt devices to see what turns up");
+            }
         }
         ["pair", a] => bt.pair(a).await?,
         ["connect", a] => bt.connect(a).await?,
@@ -699,7 +745,7 @@ async fn bluetooth(conn: &zbus::Connection, w: &[&str]) -> Result<()> {
         ["forget", a] => bt.forget(a).await?,
         ["on"] => bt.set_powered(true).await?,
         ["off"] => bt.set_powered(false).await?,
-        _ => bail!("bt devices|scan|pair|connect|disconnect|forget|on|off"),
+        _ => return Err(usage("bt devices|scan|pair|connect|disconnect|forget|on|off")),
     }
     Ok(())
 }
@@ -723,7 +769,10 @@ async fn watch(conn: &zbus::Connection, json: bool) -> Result<()> {
     // the masked copy everyone gets: then only ours count.
     let registered = SettingsProxy::new(conn).await?.register().await.unwrap_or(false);
     let other = |m: &zbus::Message| registered && m.header().destination().is_none();
-    if !json {
+    if json {
+        // Stopped with ctrl-c: the events were the output, so no "ok" after them.
+        PRINTED.store(true, std::sync::atomic::Ordering::SeqCst);
+    } else {
         println!("watching; ctrl-c to stop");
     }
     loop {
@@ -894,14 +943,10 @@ async fn wait_request(conn: &zbus::Connection, id: u32, secs: u64, json: bool) -
 /// the device.
 async fn set_setting(conn: &zbus::Connection, key: &str, value: &str, json: bool) -> Result<()> {
     let p = SettingsProxy::new(conn).await?.request_setting(key, value).await?;
-    if json {
-        out(&p)
-    } else {
-        if p.pending != 0 {
-            placed("setting", p);
-        }
-        Ok(())
+    if json || p.pending != 0 {
+        placed("setting", p);
     }
+    Ok(())
 }
 
 /// When phonectl started, for `otp --wait`: a code that arrives while it is still
@@ -918,7 +963,7 @@ async fn otp(conn: &zbus::Connection, w: &[&str], region: &str, json: bool) -> R
         match *a {
             "--from" => from = Some(phone_core::number::canonical(it.next().context("--from <number>")?, region)),
             "--wait" => secs = it.next().context("--wait <seconds>")?.parse()?,
-            _ => bail!("otp [--from <number>] [--wait <seconds>]"),
+            _ => return Err(usage("otp [--from <number>] [--wait <seconds>]")),
         }
     }
     let messages = MessagesProxy::new(conn).await?;
@@ -1102,4 +1147,37 @@ async fn fake(w: &[&str]) -> Result<()> {
         ),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn method_error(name: &str, msg: &str) -> anyhow::Error {
+        let m = zbus::Message::method_call("/", "Ping").build(&()).unwrap();
+        let reply = zbus::Message::error(&m.header(), name).build(&(msg,)).unwrap();
+        zbus::Error::from(reply).into()
+    }
+
+    #[test]
+    fn errors_have_a_word_and_a_code() {
+        let kind = |e: anyhow::Error| {
+            let f = failure(&e);
+            (f.code, f.kind)
+        };
+        assert_eq!(kind(method_error("org.freedesktop.DBus.Error.AccessDenied", "no")), (2, "not_allowed"));
+        assert_eq!(kind(method_error("org.freedesktop.DBus.Error.InvalidArgs", "no")), (3, "bad_argument"));
+        assert_eq!(kind(method_error("org.freedesktop.DBus.Error.NotSupported", "no")), (3, "not_supported"));
+        assert_eq!(kind(method_error("org.freedesktop.DBus.Error.LimitsExceeded", "no")), (4, "rate_limited"));
+        assert_eq!(kind(method_error("org.freedesktop.DBus.Error.ServiceUnknown", "no")), (5, "not_running"));
+        assert_eq!(kind(method_error("org.freedesktop.DBus.Error.Failed", "no")), (1, "failed"));
+        assert_eq!(kind(anyhow::anyhow!("sending failed")), (1, "failed"));
+    }
+
+    #[test]
+    fn a_mistyped_command_is_a_bad_argument_not_a_failure() {
+        assert_eq!(failure(&usage("unknown command; phonectl help")).code, 3);
+        let e: anyhow::Error = "x1".parse::<u32>().unwrap_err().into();
+        assert_eq!(failure(&e.context("wait <request> [seconds]")).kind, "bad_argument");
+    }
 }

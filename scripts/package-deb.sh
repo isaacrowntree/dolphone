@@ -63,6 +63,9 @@ install -m 0644 "$ROOT/dist/modemmanager/dolphone-debug.conf" "$PKG/usr/share/do
 install -m 0755 "$ROOT/dist/bin/dolphone-modem-access" "$PKG/usr/bin/"
 install -m 0644 "$ROOT/dist/polkit/io.github.isaacrowntree.Dolphone.policy" "$PKG/usr/share/polkit-1/actions/"
 install -m 0644 "$ROOT"/dist/devices/*.toml "$PKG/usr/share/dolphone/devices/"
+# How an AI agent uses phonectl (docs/AGENTS.md).
+d usr/share/dolphone/skills/phonectl
+install -m 0644 "$ROOT/dist/skills/phonectl/SKILL.md" "$PKG/usr/share/dolphone/skills/phonectl/"
 # The spare AT port rule does nothing until dolphone-modem-access port on.
 install -m 0644 "$ROOT/dist/udev/70-dolphone-modem-wakeup.rules" "$ROOT/dist/udev/70-dolphone-leds.rules" \
     "$ROOT/dist/udev/70-dolphone-at-port.rules" "$PKG/usr/lib/udev/rules.d/"
