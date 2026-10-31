@@ -37,7 +37,7 @@ Flipper's own buttons; in desktop mode it is a proper desktop app; from a shell 
 | **The panel** | FlipCTL apps under Apps > Phone that use every button the way FlipCTL means it: Run answers, Escape declines, PTT mutes (and held, switches the ringer), the touchpad taps the keypad, the motor has a vibration for each kind of news |
 | **Desktop mode** | A full desktop app with keyboard shortcuts, notifications with Answer / Decline / Reply, a tray icon, `tel:` and `sms:` links, and Copy for one-time codes |
 | **Your laptop** | KDE Connect (GSConnect on GNOME): texts and call alerts on a laptop on the same network, and replies from it, paired on the device |
-| **Scripts** | `phonectl` (with `--json`), a D-Bus API, standing grants ("this program may text these numbers, 4 an hour"), rules that run a command when a matching text arrives, an optional local SMS gateway (HTTP), texts when the uplink goes down, and an audit log of what programs asked for |
+| **Scripts** | `phonectl` (with `--json`), a D-Bus API, standing grants ("this program may text these numbers, 4 an hour"), rules that run a command when a matching text arrives, an optional local SMS gateway (HTTP), texts when the uplink goes down, an audit log of what programs asked for, and a skill for AI agents |
 | **Safety** | Premium numbers and short codes always need a press on the device; outside programs wait for one to dial, text, or change contacts, and cannot read messages, answer, or change settings unless you allow it; rate limits; blocked numbers; silence for unknown callers; a warning when the network forces 2G, and a switch to refuse it; a PIN for Messages; the message store can be encrypted, its key sealed to the machine |
 | **The phone's state** | SIM PIN on the keypad; a Today screen of missed calls and unread texts; stays awake for calls and catches up after sleep; follows the modem through resets; records which SIM each text and call went through |
 
@@ -67,7 +67,7 @@ disagree about a call. More in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 Everything above works against **fake-mm**, a stand-in ModemManager that `mmcli`
 itself accepts, and a second baresip playing the far end of SIP calls. The tests:
 
-- **254 end-to-end checks** (`scripts/e2e.sh`): phoned, the fake modem, a fake
+- **263 end-to-end checks** (`scripts/e2e.sh`): phoned, the fake modem, a fake
   mmsd-tng and phonectl playing through calls, texts, MMS, alerts, SIM PIN and SIM
   codes, an emergency call with the SIM locked, SIP, service codes, the modem's
   setup, grants, rules, contacts, the encrypted store, serial call audio through
@@ -79,7 +79,7 @@ itself accepts, and a second baresip playing the far end of SIP calls. The tests
   step;
 - **10 KDE Connect checks** (`scripts/kdeconnect-e2e.sh`) against the real
   kdeconnectd: pairing, texts both ways, a ringing call;
-- **223 unit tests**, including every panel screen rendered and checked against the
+- **225 unit tests**, including every panel screen rendered and checked against the
   panel's fonts.
 
 The panel apps also run in the real FlipCTL (its browser view, in a VM).
@@ -159,6 +159,10 @@ for the device), 1 when tried and failed, 2 when not allowed, 3 for a bad
 argument or something this phone does not do, 4 over a rate limit, and 5 when
 phoned is not running. Everything it does is on the D-Bus API, which `busctl`
 and `gdbus` reach as well.
+
+An AI agent with a terminal uses phonectl the same way: every result and error
+comes as JSON, a skill tells it what it may do, and its calls and texts wait for
+your press like any script's ([AI agents](docs/AGENTS.md)).
 
 ## What is not done
 

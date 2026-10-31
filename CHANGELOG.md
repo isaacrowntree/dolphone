@@ -26,6 +26,11 @@ Features:
   desktop app and `phonectl contacts`.
 - Scripts: standing grants; rules on incoming texts; an audit log;
   `phonectl --json`, `watch` as NDJSON, `send --wait`, `otp --wait`.
+- AI agents: every phonectl command answers in JSON (`{"ok":true}` when there is
+  nothing to report), errors come as JSON on stderr with a word for each exit code,
+  a mistyped command exits 3, and a skill (`/usr/share/dolphone/skills/phonectl`)
+  tells an agent how to use it and to treat texts as data, never instructions
+  ([docs/AGENTS.md](docs/AGENTS.md)).
 - The desktop: Copy and "Copy code" for one-time codes (cleared after a minute);
   keyboard shortcuts; the alert card; every new setting.
 - Privacy: prefix blocking; silence for unknown callers.
@@ -72,7 +77,7 @@ Features:
   off. A program asking to change a setting (`phonectl set`, `phonectl device use`)
   waits for a press on the device, as texts and calls do; Delete phone data removes
   contacts too. The panel apps no longer link the database at all.
-- Tests: the end-to-end suite grew to 254 checks, with 10 more against the real KDE
+- Tests: the end-to-end suite grew to 263 checks, with 10 more against the real KDE
   Connect daemon; the four apps are driven live against phoned
   (`scripts/ui-e2e.sh`); CI runs in Debian 13 containers; the suite also passes
   with every CPU core busy.

@@ -5,6 +5,7 @@
 - [Install](install.md)
 - [Buttons](BUTTONS.md)
 - [Rules on incoming texts](RULES.md)
+- [AI agents](AGENTS.md)
 - [Architecture](ARCHITECTURE.md)
 - [Audio](AUDIO.md)
 - [Devices](DEVICES.md)

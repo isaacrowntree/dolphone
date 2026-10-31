@@ -607,6 +607,19 @@ sleep 0.3
 sleep 0.5
 kill "$WATCH" 2>/dev/null || true
 expect "watch --json is one object per event" "$(cat /tmp/dolphone-e2e-watch4.log)" '{"event":"message_added"'
+ringer=$("$P" ringer)
+out=$("$P" --json ringer silent)
+expect "a command with nothing to say answers ok" "$out" '{"ok":true}'
+"$P" ringer "$ringer"
+out=$("$P" --json modem setup)
+expect "the modem's setup is one list" "$out" '[{"detail":'
+code=0
+err=$("$P" --json frobnicate 2>&1 >/dev/null) || code=$?
+[ "$code" = 3 ] && pass "a mistyped command exits 3 (a bad argument)" || fail "a mistyped command exits 3" "$code $err"
+expect "and says so as JSON on stderr" "$err" '"kind":"bad_argument"'
+code=0
+"$P" wait x1 >/dev/null 2>&1 || code=$?
+[ "$code" = 3 ] && pass "so does a request id that is not a number" || fail "a bad request id exits 3" "$code"
 
 out=$("$P" dial 1900123456)
 expect "premium numbers are held even for our app" "$out" "waiting for confirmation"
@@ -790,6 +803,14 @@ expect "a script cannot confirm its own request" "$out" "only Dolphone's own app
 for id in $("$P" pending | awk '{print $1}'); do "$P" deny "$id"; done
 out=$("$P" pending)
 [ -z "$out" ] && pass "denied requests are gone" || fail "denied requests are gone" "$out"
+out=$("$P" --json send 0491570177 "As JSON")
+expect "a held text says so as JSON" "$out" '"what":"text"'
+refute "with the request to wait on" "$out" '"pending":0'
+"$P" deny "$(grep -o '"pending":[0-9]*' <<<"$out" | cut -d: -f2)"
+code=0
+err=$("$P" --json threads 2>&1 >/dev/null) || code=$?
+[ "$code" = 2 ] && pass "reading without a grant exits 2" || fail "reading without a grant exits 2" "$code $err"
+expect "and names it for a script: not_allowed" "$err" '"kind":"not_allowed"'
 out=$("$P" ussd '*100#' 2>&1 || true)
 expect "USSD is refused from a script" "$out" "only run from Dolphone's dialer"
 out=$("$P" ussd '**21*0491570198#' 2>&1 || true)
