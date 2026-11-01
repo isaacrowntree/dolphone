@@ -36,6 +36,3 @@ yourself. Pull requests that relay a tool's output unread will be closed.
 Dolphone is unofficial. Please do not open issues on Flipper's repositories about
 Dolphone; their contribution rules ask for discussion on Discord and for designs as
 comments on their "help wanted" tasks.
-## Conduct
-
-Be kind and assume good faith; see [CODE_OF_CONDUCT.md](https://github.com/isaacrowntree/dolphone/blob/main/CODE_OF_CONDUCT.md).
