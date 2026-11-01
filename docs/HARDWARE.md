@@ -2,9 +2,15 @@
 
 Everything in Dolphone runs against fake-mm. Whether it can be a phone on real
 hardware comes down to five gates. Run them on an **RK3576 board from Flipper's
-supported list** (or any arm64 Debian 13 machine) with a **Quectel RM520N-GL** in an
-M.2 Key-B to USB adapter and a SIM with VoLTE. Until a Flipper One exists, that board
-running Flipper OS is the target.
+supported list** (or any arm64 Debian 13 machine) with a modem in an M.2 Key-B to USB
+adapter and a SIM with VoLTE. Until a Flipper One exists, that board running Flipper
+OS is the target.
+
+**Which modem decides which gates apply.** Quectel says the **RM520N-GL** is
+data-only, with no voice: on it G3 (texts) is the test, and G1, G2 and G4 do not
+apply; Dolphone shows "texts only, no calls" and leaves the call setup alone. For
+calls, use a modem with voice and its call audio over USB ([MODEMS.md](MODEMS.md)).
+The Quectel commands below are for Quectel modems that have voice.
 
 | Gate | Question | Pass |
 |---|---|---|
@@ -129,8 +135,9 @@ Settings > Modem shows the same check, with **Set up** when there is something t
 
 ## G2: call audio (the deciding one)
 
-The RM520N-GL has no PCM pins (they are reserved on the GL variant; only the -EU
-variant has them), so call audio has to come over USB as a sound card.
+On a modem that can call, call audio has to come over USB: as a sound card (UAC, the
+Quectel way below), or as a serial PCM stream (SIMCom's, which ModemManager names
+and phoned bridges). The RM520N-GL has no voice at all (see above).
 
 1. Turn on UAC: `phonectl modem setup apply`, or by hand as Quectel's LTE Standard
    UAC Application Note describes: query `AT+QCFG="usbcfg"`, send the same values

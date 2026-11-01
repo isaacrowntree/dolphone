@@ -823,9 +823,23 @@ pub async fn lock_interfaces(conn: &Connection) {
 
 pub async fn unlock_interfaces(conn: &Connection, world: &Shared) {
     let s = conn.object_server();
-    let _ = s.at(MODEM, Voice { world: world.clone() }).await;
+    if world.lock().await.voice {
+        let _ = s.at(MODEM, Voice { world: world.clone() }).await;
+    }
     let _ = s.at(MODEM, Messaging { world: world.clone() }).await;
     let _ = s.at(MODEM, Ussd { world: world.clone() }).await;
     let _ = s.at(MODEM, CellBroadcast { world: world.clone() }).await;
+    let _ = announce_signal(conn).await;
+}
+
+/// Add or take away the Voice interface, as a voice-capable or a data-only module
+/// has it or not.
+pub async fn set_voice(conn: &Connection, world: &Shared, voice: bool) {
+    let s = conn.object_server();
+    if voice {
+        let _ = s.at(MODEM, Voice { world: world.clone() }).await;
+    } else {
+        let _ = s.remove::<Voice, _>(MODEM).await;
+    }
     let _ = announce_signal(conn).await;
 }

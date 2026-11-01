@@ -67,7 +67,7 @@ disagree about a call. More in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 Everything above works against **fake-mm**, a stand-in ModemManager that `mmcli`
 itself accepts, and a second baresip playing the far end of SIP calls. The tests:
 
-- **263 end-to-end checks** (`scripts/e2e.sh`): phoned, the fake modem, a fake
+- **273 end-to-end checks** (`scripts/e2e.sh`): phoned, the fake modem, a fake
   mmsd-tng and phonectl playing through calls, texts, MMS, alerts, SIM PIN and SIM
   codes, an emergency call with the SIM locked, SIP, service codes, the modem's
   setup, grants, rules, contacts, the encrypted store, serial call audio through
@@ -79,13 +79,27 @@ itself accepts, and a second baresip playing the far end of SIP calls. The tests
   step;
 - **10 KDE Connect checks** (`scripts/kdeconnect-e2e.sh`) against the real
   kdeconnectd: pairing, texts both ways, a ringing call;
-- **225 unit tests**, including every panel screen rendered and checked against the
+- **226 unit tests**, including every panel screen rendered and checked against the
   panel's fonts.
 
 The panel apps also run in the real FlipCTL (its browser view, in a VM).
 **Dolphone has not yet carried a real call**: that needs the hardware test in
-[docs/HARDWARE.md](docs/HARDWARE.md), whose deciding question is whether the
-RM520N-GL's USB audio gives Linux two-way call audio.
+[docs/HARDWARE.md](docs/HARDWARE.md), on a modem that can make calls.
+
+## Which modem
+
+What the phone can do depends on the modem in the M.2 slot, and then on the SIM:
+
+- **Texts and data, no mobile calls:** the Quectel RM520N-GL, which Quectel says is
+  data-only. The Dialer says "texts only, no calls"; texts, picture messages and
+  calls over SIP still work.
+- **Mobile calls:** a modem with voice and its call audio over USB, such as the
+  SIMCom SIM7600G-H-M2 (4G) or the Quectel EG25-G (4G, mPCIe). No M.2 5G module is
+  documented to do it yet.
+- **A data-only SIM is a different thing:** the modem could call, the plan cannot,
+  and that only shows when a call or text is refused.
+
+[docs/MODEMS.md](docs/MODEMS.md) has the sources and the catches.
 
 ## Install on the Flipper One
 

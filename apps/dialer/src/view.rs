@@ -199,6 +199,18 @@ fn browse(m: &Model, now: i64) -> View {
                     "SIM locked: type its PIN, then Unlock".to_string()
                 } else if m.status.state == "disabled" {
                     "Modem is off".to_string()
+                } else if !m.status.voice {
+                    // The modem itself cannot call (a data-only module), whatever the
+                    // SIM's plan: say so, rather than "Emergency calls only".
+                    let op = match (m.status.registered, m.status.operator.as_str()) {
+                        (true, "") | (false, _) => "Searching",
+                        (true, op) => op,
+                    };
+                    if m.status.sip == "registered" {
+                        format!("{op} - texts; calls over SIP")
+                    } else {
+                        format!("{op} - texts only, no calls")
+                    }
                 } else if m.status.emergency_only && m.status.sip == "registered" {
                     "No mobile signal; calls over SIP".to_string()
                 } else if m.status.emergency_only {

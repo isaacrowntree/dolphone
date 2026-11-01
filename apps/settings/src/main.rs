@@ -782,7 +782,7 @@ fn detail(m: &Model) -> Vec<DetailRow> {
                 row(
                     "Voice calls",
                     if !s.voice {
-                        "No"
+                        "Not on this modem"
                     } else if s.emergency_only {
                         "Emergency only"
                     } else {

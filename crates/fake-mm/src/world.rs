@@ -81,6 +81,9 @@ pub struct World {
     pub ussd_state: u32,
     /// The SIM wants its PIN; Voice and Messaging are hidden until it gets it.
     pub locked: bool,
+    /// The modem has a Voice interface at all: off stands in for a data-only module
+    /// (the RM520N-GL, by Quectel's account), which can text but not call.
+    pub voice: bool,
     pub pin: String,
     pub pin_retries: u32,
     /// The modem is powered up (ModemManager "enabled").
@@ -178,6 +181,7 @@ impl World {
             ussd_reply: "Your balance is $12.34. Expires 30/11.".into(),
             ussd_state: 1,
             locked: false,
+            voice: true,
             pin: "1234".into(),
             pin_retries: 3,
             enabled: true,

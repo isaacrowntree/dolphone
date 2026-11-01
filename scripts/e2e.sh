@@ -481,6 +481,29 @@ expect "contacts as JSON" "$out" '"name":"Alex Example"'
 out=$("$P" contacts import-phone AA:BB 2>&1 || true)
 expect "a bad command is explained" "$out" "contacts [list]"
 
+echo "a modem that cannot call (data-only, as Quectel says of the RM520N-GL)"
+"$P" fake voice off
+out=$(until_has "no voice" "$P" status)
+expect "status says the modem has no voice" "$out" "no voice"
+code=0
+out=$("$P" dial 0491570156 2>&1) || code=$?
+[ "$code" = 3 ] && pass "a call exits 3: not something this modem does" || fail "a call on a data-only modem exits 3" "$code $out"
+expect "and says it is the modem, not the plan" "$out" "this modem cannot make calls (texts and data only)"
+out=$("$P" dial 000 2>&1 || true)
+expect "000 says plainly to call from another phone" "$out" "cannot call 000: call from another phone"
+out=$("$P" send --wait 10 0491570199 "Texts still go")
+expect "texts still go out" "$out" "sent "
+"$P" fake sms 0491570199 "And come in" >/dev/null
+out=$(until_has "And come in" "$P" thread 0491570199)
+expect "and come in" "$out" "< And come in"
+out=$("$P" modem setup)
+expect "the setup says calls are skipped" "$out" "this modem cannot make calls"
+refute "and leaves VoLTE alone" "$out" "volte"
+refute "and USB call audio" "$out" "usb audio"
+"$P" fake voice on
+for _ in $(seq 1 100); do out=$("$P" status); grep -q "no voice" <<<"$out" || break; sleep 0.1; done
+refute "with voice back, calls are back" "$out" "no voice"
+
 echo "calls over SIP"
 if [ -n "${DOLPHONE_E2E_SIP:-}" ]; then
     "$P" set sip_password "not-a-real-password"

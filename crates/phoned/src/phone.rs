@@ -283,7 +283,13 @@ impl Phone {
         }
         let modem = self.modem().await?;
         if !modem.voice {
-            return Err(zbus::fdo::Error::NotSupported("this modem has no voice support".into()));
+            // The modem itself, not the SIM's plan: a data-only module has no
+            // Voice interface at all, so nothing can be dialled through it.
+            return Err(zbus::fdo::Error::NotSupported(if class == Class::Emergency {
+                format!("this modem cannot make calls, so it cannot call {canonical}: call from another phone")
+            } else {
+                "this modem cannot make calls (texts and data only)".into()
+            }));
         }
         if let Some(hide) = clir_once.filter(|_| class != Class::Emergency) {
             self.clir_for_one_call(&modem, hide).await;

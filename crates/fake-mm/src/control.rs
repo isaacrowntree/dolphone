@@ -151,6 +151,12 @@ impl Control {
         }
     }
 
+    /// A modem with no voice support (texts and data only), or one with it again.
+    async fn set_voice(&self, voice: bool, #[zbus(connection)] conn: &Connection) {
+        self.world.lock().await.voice = voice;
+        modem::set_voice(conn, &self.world, voice).await;
+    }
+
     /// Power the modem down, as a fresh boot or a user leaves it.
     async fn set_enabled(&self, enabled: bool, #[zbus(connection)] conn: &Connection) {
         self.world.lock().await.enabled = enabled;

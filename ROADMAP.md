@@ -8,8 +8,10 @@ This is what is left, and why.
 Everything has been tested against stand-ins: fake-mm for ModemManager, fake-mmsd
 for mmsd-tng, a second baresip for SIP, a pty for a SIM7600's serial audio.
 [docs/HARDWARE.md](https://isaacrowntree.com/dolphone/HARDWARE.html) is the go/no-go test on the hardware; its
-deciding question is whether the RM520N-GL's USB audio gives Linux two-way call
-audio. What only a board can confirm:
+deciding question is whether a modem that can call gives Linux two-way call audio.
+Quectel says the RM520N-GL is data-only, so it can test texts and data but not calls
+([docs/MODEMS.md](https://isaacrowntree.com/dolphone/MODEMS.html) lists the
+candidates for calls). What only a board can confirm:
 
 - **The Quectel commands.** `phonectl modem setup` checks USB audio
   (`AT+QCFG="usbcfg"`), VoLTE (`AT+QCFG="ims"`) and the carrier profile

@@ -9,6 +9,7 @@
 - [Architecture](ARCHITECTURE.md)
 - [Audio](AUDIO.md)
 - [Devices](DEVICES.md)
+- [Choosing a modem](MODEMS.md)
 - [Hardware bring-up](HARDWARE.md)
 - [Developing](DEVELOPING.md)
 - [Security](security.md)

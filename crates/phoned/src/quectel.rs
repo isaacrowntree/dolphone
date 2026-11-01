@@ -136,15 +136,26 @@ pub async fn setup(system: &Connection, apply: bool, usb_audio: bool) -> Vec<Ste
         )];
     }
     let mut checks: Vec<(&str, Judge)> = Vec::new();
-    if usb_audio {
+    // A data-only module (no Voice interface) texts without either: its call
+    // audio and VoLTE are left alone, and only the carrier profile is checked.
+    if usb_audio && found.voice {
         checks.push(("AT+QCFG=\"usbcfg\"", uac_step));
     }
-    checks.push(("AT+QCFG=\"ims\"", ims_step));
+    if found.voice {
+        checks.push(("AT+QCFG=\"ims\"", ims_step));
+    }
     checks.push(("AT+QMBNCFG=\"AutoSel\"", autosel_step));
     let mut out = vec![
         step("modem", "ok", format!("{manufacturer} {model}")),
         step("at commands", "ok", crate::atport::route().await.describe()),
     ];
+    if !found.voice {
+        out.push(step(
+            "calls",
+            "unsupported",
+            "this modem cannot make calls (texts and data only), so call setup is skipped",
+        ));
+    }
     let mut changed = false;
     for (query, judge) in checks {
         let answer = match mm::at(system, &path, query).await {

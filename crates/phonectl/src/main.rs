@@ -110,6 +110,7 @@ fake modem (the far end, against fake-mm)
   fake autoanswer <ms> | fake sendfails <on|off> | fake atdebug <on|off> | fake ussd <reply...> | fake dump
   fake atport                 the modem's spare AT port (a pty), for phonectl set at_port
   fake broadcast <channel> <text...> | fake lock <on|off> | fake enable <on|off>
+  fake voice <on|off>         off: a data-only modem, which texts but cannot call
   fake mms <from> [--to <n,n>] [--file <f>]... [text...] | fake mms dump | fake mms fails <on|off>
                               (against fake-mmsd, mmsd-tng's stand-in)
   fake uplink <on|off>        the network link (fake-mm stands in for NetworkManager)
@@ -1142,8 +1143,9 @@ async fn fake(w: &[&str]) -> Result<()> {
         ["lock", s] => drop(p.call_method("SetLocked", &(on(s),)).await?),
         ["uplink", s] => drop(p.call_method("SetUplink", &(on(s),)).await?),
         ["enable", s] => drop(p.call_method("SetEnabled", &(on(s),)).await?),
+        ["voice", s] => drop(p.call_method("SetVoice", &(on(s),)).await?),
         _ => bail!(
-            "fake ring|sms|answer|hangup|busy|signal|register|roam|autoanswer|sendfails|atdebug|atport|ussd|broadcast|lock|enable|dump"
+            "fake ring|sms|answer|hangup|busy|signal|register|roam|autoanswer|sendfails|atdebug|atport|ussd|broadcast|lock|enable|voice|dump"
         ),
     }
     Ok(())

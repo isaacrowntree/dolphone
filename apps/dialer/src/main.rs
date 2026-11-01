@@ -631,6 +631,7 @@ mod tests {
         m.connected = true;
         m.status.present = true;
         m.status.registered = true;
+        m.status.voice = true;
         m.status.operator = "Fakecom AU".into();
         m.routes = vec![RouteInfo { route: 0, name: "Speaker".into(), available: true, active: true }];
         m
@@ -671,6 +672,31 @@ mod tests {
         let mut m = model();
         m.number = "000".into();
         shot("keypad-emergency", &m);
+    }
+
+    /// The keypad's status line, as text.
+    fn status_line(m: &Model) -> String {
+        match view::view(m, 1_793_000_000, 0).body {
+            view::Body::Canvas { texts, .. } => texts.first().map(|t| t.text.clone()).unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+
+    #[test]
+    fn a_modem_that_cannot_call_says_so() {
+        // A data-only module (no Voice interface): the modem's limit, not the plan's.
+        let mut m = model();
+        m.status.voice = false;
+        assert_eq!(status_line(&m), "Fakecom AU - texts only, no calls");
+        shot("keypad-texts-only", &m);
+        m.status.sip = "registered".into();
+        assert_eq!(status_line(&m), "Fakecom AU - texts; calls over SIP");
+        // Out of signal it is still not "Emergency calls only": it cannot call those either.
+        m.status.sip = String::new();
+        m.status.registered = false;
+        m.status.emergency_only = true;
+        assert_eq!(status_line(&m), "Searching - texts only, no calls");
+        assert_eq!(status_line(&model()), "Fakecom AU");
     }
 
     #[test]

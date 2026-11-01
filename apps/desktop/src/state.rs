@@ -991,13 +991,14 @@ impl App {
         ui.set_modem_text(
             match &self.status {
                 Some(s) if s.present => format!(
-                    "{} on {}, signal {}%, {}{}. Voice calls {}. Number {}.",
+                    "{} on {}, signal {}%, {}{}. {} Number {}.",
                     if s.operator.is_empty() { "No operator" } else { &s.operator },
                     s.tech,
                     s.quality,
                     if s.registered { "registered" } else { "not registered" },
                     if s.roaming { " (roaming)" } else { "" },
-                    if s.voice { "supported" } else { "not supported" },
+                    // The modem's own limit (a data-only module), not the SIM's plan.
+                    if s.voice { "Calls and texts." } else { "This modem cannot make calls: texts and data only." },
                     if s.own_number.is_empty() {
                         "unknown".to_string()
                     } else {
