@@ -102,7 +102,7 @@ conversation is one thread, named after everyone on it; a reply goes to all of t
 | ON/OFF rows | toggle | toggle | | | up a page |
 | `< value >` rows | step | step | | | up a page |
 | Pages (Call audio, Bluetooth, Laptops, Calls, Calls over the internet, Texts, Emergency alerts, Privacy, Modem, About) | Right opens | open | | | up a page |
-| Typed rows (voicemail number, SIP account, password, proxy) | | open the keyboard | open the keyboard | | up a page |
+| Typed rows (voicemail number, SIP username, password, server, proxy) | | open the keyboard | open the keyboard | | up a page |
 | Bluetooth device | | pair / connect / disconnect | forget | copy contacts (a paired phone) | |
 | Blocked number | | unblock | unblock | | |
 | A program allowed to text | | revoke | revoke | | |

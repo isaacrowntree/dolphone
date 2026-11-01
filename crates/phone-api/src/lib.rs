@@ -290,7 +290,7 @@ pub struct ModemStatus {
     /// when there is no modem.
     pub state: String,
     /// The SIP account: "" when off, "registering", "registered", or what went
-    /// wrong ("failed: 403 Forbidden").
+    /// wrong ("failed: wrong username or password").
     pub sip: String,
 }
 

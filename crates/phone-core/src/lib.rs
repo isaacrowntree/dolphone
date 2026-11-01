@@ -8,12 +8,14 @@
 //!   encrypted when phoned is given a key); only with the `db` feature.
 //! - [`model`]: call and message state as both ends of the bus see it.
 //! - [`guard`]: the rate limit on outgoing texts and calls.
+//! - [`sip`]: a SIP account as username, password and server.
 
 pub mod contacts;
 pub mod guard;
 pub mod model;
 pub mod number;
 pub mod paths;
+pub mod sip;
 pub mod ss;
 #[cfg(feature = "db")]
 pub mod store;

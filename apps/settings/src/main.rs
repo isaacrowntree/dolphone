@@ -607,23 +607,34 @@ pub fn items(m: &Model) -> (Vec<ListItem>, String, [&'static str; 5]) {
                 .iter()
                 .map(|r| match r {
                     SipRow::Enabled => toggle("Calls over SIP", m.flag(phone_api::keys::SIP_ENABLED)),
-                    SipRow::Account => item(
-                        "Account",
-                        &if m.sip_account.is_empty() { "Not set".into() } else { font::fit(&m.sip_account, 110) },
+                    SipRow::User => item(
+                        "Username",
+                        &if m.sip_user.is_empty() { "Not set".into() } else { font::fit(&m.sip_user, 110) },
+                    ),
+                    SipRow::Server => item(
+                        "Server",
+                        &if m.sip_server.is_empty() { "Not set".into() } else { font::fit(&m.sip_server, 110) },
                     ),
                     SipRow::Password => item("Password", if m.sip_password_set { "Set" } else { "Not set" }),
                     SipRow::Proxy => item(
-                        "Proxy",
+                        "Outbound proxy",
                         &if m.sip_proxy.is_empty() { "None".into() } else { font::fit(&m.sip_proxy, 110) },
                     ),
                     SipRow::Use => adjust("Use it", if m.sip_use == "always" { "Always" } else { "No signal" }),
+                    // What went wrong gets the whole line: it is what to fix.
                     SipRow::Status => ListItem {
                         dim: true,
-                        ..item("Status", &font::fit(if status.is_empty() { "Off" } else { &status }, 120))
+                        ..match status.strip_prefix("failed: ") {
+                            Some(why) => item(&font::fit(why, 210), ""),
+                            None => item("Status", &font::fit(if status.is_empty() { "Off" } else { &status }, 120)),
+                        }
                     },
                 })
                 .collect();
-            let edit = matches!(SIP[m.sel().min(SIP.len() - 1)], SipRow::Account | SipRow::Password | SipRow::Proxy);
+            let edit = matches!(
+                SIP[m.sel().min(SIP.len() - 1)],
+                SipRow::User | SipRow::Password | SipRow::Server | SipRow::Proxy
+            );
             (rows, "> Calls over the internet".into(), ["Back", "", "", if edit { "Edit" } else { "" }, "Select"])
         }
         Page::Laptops => {
@@ -1055,7 +1066,7 @@ mod tests {
         shot("texts", &m);
         m.page = Page::Sip;
         m.flags.insert("sip_enabled", true);
-        m.sip_account = "sip:me@voip.example.net".into();
+        (m.sip_user, m.sip_server) = ("me".into(), "voip.example.net".into());
         m.sip_password_set = true;
         if let Some(s) = m.status.as_mut() {
             s.sip = "registered".into();

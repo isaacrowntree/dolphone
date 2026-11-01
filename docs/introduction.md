@@ -79,7 +79,7 @@ itself accepts, and a second baresip playing the far end of SIP calls. The tests
   step;
 - **10 KDE Connect checks** (`scripts/kdeconnect-e2e.sh`) against the real
   kdeconnectd: pairing, texts both ways, a ringing call;
-- **226 unit tests**, including every panel screen rendered and checked against the
+- **228 unit tests**, including every panel screen rendered and checked against the
   panel's fonts.
 
 The panel apps also run in the real FlipCTL (its browser view, in a VM).
@@ -93,9 +93,10 @@ What the phone can do depends on the modem in the M.2 slot, and then on the SIM:
 - **Texts and data, no mobile calls:** the Quectel RM520N-GL, which Quectel says is
   data-only. The Dialer says "texts only, no calls"; texts, picture messages and
   calls over SIP still work.
-- **Mobile calls:** a modem with voice and its call audio over USB, such as the
-  SIMCom SIM7600G-H-M2 (4G) or the Quectel EG25-G (4G, mPCIe). No M.2 5G module is
-  documented to do it yet.
+- **Mobile calls, M.2 with no adapter:** the SIMCom SIM7600G-H-M2 (4G), whose
+  call audio comes over USB. The Quectel EM12-G (4G) and Fibocom FM160-EAU (5G) are
+  certified by Telstra for VoLTE, but put their call audio on the slot's audio
+  pins, which Flipper has not said are wired.
 - **A data-only SIM is a different thing:** the modem could call, the plan cannot,
   and that only shows when a call or text is refused.
 

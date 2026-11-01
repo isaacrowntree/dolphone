@@ -481,7 +481,9 @@ impl App {
                 } else if k == "sip_enabled" {
                     self.ui.set_sip_enabled(v == "true");
                 } else if k == "sip_account" {
-                    self.ui.set_sip_account(v.into());
+                    let (user, server) = phone_core::sip::split(&v);
+                    self.ui.set_sip_user(user.into());
+                    self.ui.set_sip_server(server.into());
                 } else if k == "sip_proxy" {
                     self.ui.set_sip_proxy(v.into());
                 } else if k == "sip_password" {
@@ -918,7 +920,11 @@ impl App {
         ui.set_sip_password_set(self.sip_password_set);
         ui.set_hold_index(HOLDS.iter().position(|h| *h == self.hold_ms).unwrap_or(1) as i32);
         ui.set_sip_always(self.sip_always);
-        ui.set_sip_status(self.status.as_ref().map(|s| s.sip.as_str()).unwrap_or("").into());
+        let sip = self.status.as_ref().map(|s| s.sip.as_str()).unwrap_or("");
+        ui.set_sip_status(match sip.strip_prefix("failed: ") {
+            Some(why) => format!("Not connected: {why}").into(),
+            None => sip.into(),
+        });
         match self.waiting_alerts.current() {
             Some(a) => {
                 ui.set_alert_visible(true);
@@ -1662,10 +1668,13 @@ pub fn wire(ui: &AppWindow) {
             }
         })
     });
-    ui.on_save_sip(|account, password, proxy, always| {
+    ui.on_save_sip(|user, password, server, proxy, always| {
         with_app(|a| {
-            let (account, password, proxy) =
-                (account.trim().to_string(), password.to_string(), proxy.trim().to_string());
+            let Some(account) = phone_core::sip::join(&user, &server) else {
+                a.say("Fill in the username and the server your provider gave you");
+                return;
+            };
+            let (password, proxy) = (password.to_string(), proxy.trim().to_string());
             a.sip_always = always;
             a.ui.set_sip_password("".into());
             if !password.is_empty() {
@@ -1679,6 +1688,8 @@ pub fn wire(ui: &AppWindow) {
                     c.settings.set("sip_proxy", &proxy).await?;
                     c.settings.set("sip_use", if always { "always" } else { "fallback" }).await?;
                     c.settings.set("sip_account", &account).await?;
+                    // Saving an account is asking to use it.
+                    c.settings.set("sip_enabled", "true").await?;
                     Ok(vec![Event::Notice("SIP account saved".into())])
                 });
             }

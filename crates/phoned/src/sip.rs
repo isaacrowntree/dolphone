@@ -348,7 +348,7 @@ pub async fn run(phone: Arc<Phone>, changed: Arc<tokio::sync::Notify>) {
         let account = phone.setting(phone_api::keys::SIP_ACCOUNT);
         if !enabled || !valid_account(&account) {
             phone.sip.stop();
-            let s = if enabled { "failed: no valid account" } else { "" };
+            let s = if enabled { "failed: needs a username and server" } else { "" };
             if phone.sip.status() != s {
                 phone.sip.set_status(s);
                 phone.status_changed().await;
@@ -472,7 +472,7 @@ async fn follow(phone: &Arc<Phone>, pid: u32) {
                         phone.status_changed().await;
                     }
                     "REGISTER_FAIL" => {
-                        phone.sip.set_status(&format!("failed: {}", a.param.chars().take(60).collect::<String>()));
+                        phone.sip.set_status(&format!("failed: {}", phone_core::sip::explain(a.param)));
                         phone.status_changed().await;
                     }
                     _ => {

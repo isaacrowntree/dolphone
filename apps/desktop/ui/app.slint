@@ -524,7 +524,8 @@ export component AppWindow inherits Window {
     in-out property <string> uplink-to;
     in-out property <string> uplink-iface;
     in property <bool> sip-enabled;
-    in-out property <string> sip-account;
+    in-out property <string> sip-user;
+    in-out property <string> sip-server;
     in-out property <string> sip-password;
     in-out property <string> sip-proxy;
     in property <bool> sip-always;
@@ -615,7 +616,7 @@ export component AppWindow inherits Window {
     callback copy(string, bool);
     callback set-voicemail(string);
     callback save-uplink(string, string);
-    callback save-sip(string, string, string, bool);
+    callback save-sip(string, string, string, string, bool);
     callback revoke(int);
     callback unpair-laptop(int);
     callback dismiss-alert();
@@ -956,10 +957,11 @@ export component AppWindow inherits Window {
 
                     Text { text: "Calls over the internet (SIP)"; font-size: 15px; font-weight: 700; color: Palette.foreground; }
                     CheckBox { text: "Use a SIP account for calls"; checked: root.sip-enabled; toggled => { root.set-flag("sip_enabled", self.checked); } }
+                    Text { text: "The three things your provider gives you. Saving switches it on."; color: Brand.muted; font-size: 12px; }
                     HorizontalLayout {
                         spacing: 12px;
-                        Text { text: "Account"; width: 180px; vertical-alignment: center; color: Palette.foreground; }
-                        LineEdit { text <=> root.sip-account; accessible-label: "SIP account"; placeholder-text: "sip:you@voip.example.net"; }
+                        Text { text: "Username"; width: 180px; vertical-alignment: center; color: Palette.foreground; }
+                        LineEdit { text <=> root.sip-user; accessible-label: "SIP username"; placeholder-text: "Often your VoIP number"; }
                     }
                     HorizontalLayout {
                         spacing: 12px;
@@ -970,6 +972,11 @@ export component AppWindow inherits Window {
                             input-type: InputType.password;
                             placeholder-text: root.sip-password-set ? "Saved; type to change" : "The account's password";
                         }
+                    }
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Text { text: "Server"; width: 180px; vertical-alignment: center; color: Palette.foreground; }
+                        LineEdit { text <=> root.sip-server; accessible-label: "SIP server"; placeholder-text: "voip.example.net"; }
                     }
                     HorizontalLayout {
                         spacing: 12px;
@@ -988,7 +995,7 @@ export component AppWindow inherits Window {
                             vertical-alignment: center;
                             horizontal-stretch: 1;
                         }
-                        Button { text: "Save account"; clicked => { root.save-sip(root.sip-account, root.sip-password, root.sip-proxy, sip-always-box.checked); } }
+                        Button { text: "Save account"; clicked => { root.save-sip(root.sip-user, root.sip-password, root.sip-server, root.sip-proxy, sip-always-box.checked); } }
                     }
                     Text { text: "Emergency calls always go over the mobile network."; color: Brand.muted; font-size: 12px; }
 

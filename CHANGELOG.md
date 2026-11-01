@@ -18,7 +18,10 @@ Features:
   "hold to decline"; the TTY relay hint for 106; a roaming note.
 - Telephony: call waiting on and off; conference (hold Ok to merge); the region from
   the SIM; the country's busy, congestion and ringback tones.
-- Calls over the internet: SIP through baresip, with the same screens, routes and log.
+- Calls over the internet: SIP through baresip, with the same screens, routes and log;
+  set up with the username, password and server a provider gives (as Android's SIP
+  settings asked), switched on once complete, and a failure said in words ("wrong
+  username or password").
 - Messaging: emergency alerts (cell broadcast) full screen; delivery reports;
   resending a failed text; emoji joiners kept.
 - Contacts: copied from a paired phone over Bluetooth (PBAP) or imported from a vCard

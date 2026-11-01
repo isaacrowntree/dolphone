@@ -80,8 +80,12 @@ Phone Settings > Modem shows **Turn on** when it is off, with a password prompt.
   names and numbers are kept.
 - **Voicemail**: Phone Settings > Calls > Voicemail number (some carriers' numbers
   are known and filled in from the SIM).
-- **Calls over the internet**: Phone Settings > Calls over the internet, with your
-  SIP provider's address, password and (if they give one) proxy.
+- **Calls over the internet**: type the username, password and server your SIP
+  provider gave you into Phone Settings > Calls over the internet, or into the
+  desktop app's Settings, where there is a full keyboard. It switches on once both
+  username and server are in, and Status says Registered or what to fix ("wrong
+  username or password", "no answer from the server"). A proxy only if the provider
+  gives one.
 - **Board audio**: if the speaker or the jack stays silent, the profile's mixer
   controls do not match your board; see [Devices](DEVICES.md) and [Audio](AUDIO.md).
 - **Modem setup**: Phone Settings > Modem says whether the modem is set up for calls

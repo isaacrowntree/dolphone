@@ -90,7 +90,8 @@ pub enum Action {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Field {
     Voicemail,
-    SipAccount,
+    SipUser,
+    SipServer,
     SipPassword,
     SipProxy,
     UplinkTo,
@@ -104,7 +105,7 @@ impl Field {
     pub fn key(self) -> &'static str {
         match self {
             Self::Voicemail => keys::VOICEMAIL.0,
-            Self::SipAccount => keys::SIP_ACCOUNT.0,
+            Self::SipUser | Self::SipServer => keys::SIP_ACCOUNT.0,
             Self::SipPassword => keys::SIP_PASSWORD.0,
             Self::SipProxy => keys::SIP_PROXY.0,
             Self::UplinkTo => keys::UPLINK_ALERT_TO.0,
@@ -116,9 +117,10 @@ impl Field {
     pub fn title(self) -> &'static str {
         match self {
             Self::Voicemail => "Voicemail number",
-            Self::SipAccount => "SIP address (sip:you@provider)",
+            Self::SipUser => "SIP username",
+            Self::SipServer => "SIP server (voip.example.net)",
             Self::SipPassword => "SIP password",
-            Self::SipProxy => "Proxy (sip:host), or empty",
+            Self::SipProxy => "Outbound proxy, or empty",
             Self::UplinkTo => "Text this number when the link drops",
             Self::UplinkIface => "Interface to watch (eth0), or empty",
             Self::Pin => "New Messages PIN, 4 to 12 digits",
@@ -140,19 +142,21 @@ pub fn valid_pin(t: &str) -> bool {
 /// How long Messages stays open after its PIN, in seconds: 1, 5 or 15 minutes.
 pub const OPEN_FOR: [&str; 3] = ["60", "300", "900"];
 
-/// The SIP page's rows.
+/// The SIP page's rows: the username, password and server a provider gives, in
+/// the order Android's own SIP settings asked for them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SipRow {
     Enabled,
-    Account,
+    User,
     Password,
+    Server,
     Proxy,
     Use,
     Status,
 }
 
-pub const SIP: [SipRow; 6] =
-    [SipRow::Enabled, SipRow::Account, SipRow::Password, SipRow::Proxy, SipRow::Use, SipRow::Status];
+pub const SIP: [SipRow; 7] =
+    [SipRow::Enabled, SipRow::User, SipRow::Password, SipRow::Server, SipRow::Proxy, SipRow::Use, SipRow::Status];
 
 pub const RINGER: [&str; 3] = ["ring", "vibrate", "silent"];
 /// How long a hold is, in milliseconds: up to three seconds, for hands that press
@@ -258,7 +262,9 @@ pub struct Model {
     /// The ON/OFF settings, by key.
     pub flags: HashMap<&'static str, bool>,
     pub voicemail: String,
-    pub sip_account: String,
+    /// The account's two parts; one typed before the other waits here.
+    pub sip_user: String,
+    pub sip_server: String,
     pub sip_proxy: String,
     pub sip_password_set: bool,
     pub sip_use: String,
@@ -301,7 +307,8 @@ impl Default for Model {
             ringer: "ring".into(),
             flags: all_flags().map(|(k, d)| (k, d == "true")).collect(),
             voicemail: String::new(),
-            sip_account: String::new(),
+            sip_user: String::new(),
+            sip_server: String::new(),
             sip_proxy: String::new(),
             sip_password_set: false,
             sip_use: "fallback".into(),
@@ -351,7 +358,7 @@ impl Model {
             return true;
         }
         match key {
-            k if k == keys::SIP_ACCOUNT.0 => self.sip_account = value.to_string(),
+            k if k == keys::SIP_ACCOUNT.0 => (self.sip_user, self.sip_server) = phone_core::sip::split(value),
             k if k == keys::SIP_PROXY.0 => self.sip_proxy = value.to_string(),
             k if k == keys::SIP_PASSWORD.0 => self.sip_password_set = value == "set",
             k if k == keys::SIP_USE.0 => self.sip_use = value.to_string(),
@@ -377,7 +384,8 @@ impl Model {
     pub fn field_text(&self, f: Field) -> String {
         match f {
             Field::Voicemail => self.voicemail.clone(),
-            Field::SipAccount => self.sip_account.clone(),
+            Field::SipUser => self.sip_user.clone(),
+            Field::SipServer => self.sip_server.clone(),
             Field::SipProxy => self.sip_proxy.clone(),
             Field::UplinkTo => self.uplink_to.clone(),
             Field::UplinkIface => self.uplink_iface.clone(),
@@ -575,7 +583,8 @@ impl Model {
                 let open = matches!(input, Input::Run | Input::Ok | Input::Edit);
                 match SIP[self.sel().min(SIP.len() - 1)] {
                     SipRow::Enabled if toggle => self.toggle(keys::SIP_ENABLED),
-                    SipRow::Account if open => vec![Action::EditText(Field::SipAccount)],
+                    SipRow::User if open => vec![Action::EditText(Field::SipUser)],
+                    SipRow::Server if open => vec![Action::EditText(Field::SipServer)],
                     SipRow::Password if open => vec![Action::EditText(Field::SipPassword)],
                     SipRow::Proxy if open => vec![Action::EditText(Field::SipProxy)],
                     SipRow::Use if toggle => {
@@ -784,11 +793,20 @@ impl Model {
                 self.voicemail = n.clone();
                 vec![Action::Set(keys::VOICEMAIL.0, n)]
             }
-            Field::SipAccount => {
-                // A bare user@host is a SIP address too.
-                let a = if t.is_empty() || t.starts_with("sip") { t } else { format!("sip:{t}") };
-                self.sip_account = a.clone();
-                vec![Action::Set(keys::SIP_ACCOUNT.0, a)]
+            Field::SipUser | Field::SipServer => {
+                if f == Field::SipUser {
+                    self.sip_user = t;
+                } else {
+                    self.sip_server = t;
+                }
+                let Some(a) = phone_core::sip::join(&self.sip_user, &self.sip_server) else { return Vec::new() };
+                (self.sip_user, self.sip_server) = phone_core::sip::split(&a);
+                let mut out = vec![Action::Set(keys::SIP_ACCOUNT.0, a)];
+                // Filling in an account is asking to use it.
+                if !self.flag(keys::SIP_ENABLED) {
+                    out.extend(self.toggle(keys::SIP_ENABLED));
+                }
+                out
             }
             Field::SipProxy => {
                 let p = if t.is_empty() || t.starts_with("sip") { t } else { format!("sip:{t}") };
@@ -1052,18 +1070,32 @@ mod tests {
     fn sip_account_from_the_panel() {
         let mut m = Model::default();
         m.page = Page::Sip;
-        assert_eq!(m.key(Input::Run), vec![Action::Set("sip_enabled", "true".into())]);
         m.key(Input::Down);
-        assert_eq!(m.key(Input::Run), vec![Action::EditText(Field::SipAccount)]);
+        assert_eq!(m.key(Input::Run), vec![Action::EditText(Field::SipUser)]);
+        assert!(m.written(Field::SipUser, Some("0291234567".into())).is_empty(), "waits for the server");
+        m.key(Input::Down);
+        m.key(Input::Down);
+        assert_eq!(m.key(Input::Run), vec![Action::EditText(Field::SipServer)]);
         assert_eq!(
-            m.written(Field::SipAccount, Some("me@voip.example.net".into())),
-            vec![Action::Set("sip_account", "sip:me@voip.example.net".into())]
+            m.written(Field::SipServer, Some("voip.example.net".into())),
+            vec![
+                Action::Set("sip_account", "sip:0291234567@voip.example.net".into()),
+                Action::Set("sip_enabled", "true".into())
+            ],
+            "the account is saved and switched on"
         );
+        assert_eq!(
+            m.written(Field::SipUser, Some("me@other.example.net".into())),
+            vec![Action::Set("sip_account", "sip:me@other.example.net".into())],
+            "a whole address pasted as the username; already on"
+        );
+        assert_eq!(m.field_text(Field::SipServer), "other.example.net");
         assert_eq!(m.field_text(Field::SipPassword), "", "a password is never shown back");
         m.key(Input::Down);
         m.key(Input::Down);
-        m.key(Input::Down);
         assert_eq!(m.key(Input::Right), vec![Action::Set("sip_use", "always".into())]);
+        m.setting("sip_account", "sip:alex@voip.example.net;transport=tls");
+        assert_eq!((m.sip_user.as_str(), m.sip_server.as_str()), ("alex", "voip.example.net;transport=tls"));
     }
 
     #[test]

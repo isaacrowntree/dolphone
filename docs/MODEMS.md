@@ -22,12 +22,29 @@ services; only a modem that can call does.
 
 ## Which modem for what
 
+For a whole phone (calls, texts and data) in Australia, a modem has to do VoLTE, be
+accepted by the carrier, and get its call audio to Linux. Telstra publishes the
+modules it has certified, and which of them it certified for VoLTE ([Telstra's
+list](https://www.telstra.com.au/content/dam/shared-component-assets/tecom/iot/capabilities/certified-devices/telstra-m2m-certified-devices-modules.pdf),
+28 October 2026); Optus and Vodafone publish no such list.
+
+These fit the Flipper One's slot with no adapter (Key B; 2242, 3042 or 3052; single-sided,
+[Flipper's specs](https://docs.flipper.net/one/general/tech-specs)):
+
 | You want | Buy | Why, and the catch |
 |---|---|---|
-| **Texts and data, no mobile calls** | Quectel **RM520N-GL** (5G, M.2) | Quectel's staff say it is "data-only" and will not get voice ([forum](https://forums.quectel.com/t/quectel-rm520n-gl-and-volte/32316), [forum](https://forums.quectel.com/t/voice-call-with-the-rm520n-gl/34404)). A user reports texts work on it (same thread; not confirmed by Quectel). Add a SIP account for calls. |
-| **Mobile calls, in an M.2 slot** | SIMCom **SIM7600G-H-M2** (4G, M.2 Key B) | SIMCom's specification lists VoLTE and USB audio; its call audio is raw PCM on a serial port, which Dolphone bridges to PipeWire (the uConsole profile does this) ([SIMCom USB audio note](https://files.waveshare.com/upload/8/8e/SIM7100_SIM7500_SIM7600_Series_USB_AUDIO_Application_Note_V1.03.pdf), [Waveshare](https://waveshare.com/wiki/SIM7600G-H-M.2)). Nobody has published a working Australian VoLTE call on it, and a ModemManager bug report says its in-call audio sometimes fails to set up ([issue 797](https://gitlab.freedesktop.org/mobile-broadband/ModemManager/-/issues/797)). |
-| **Mobile calls with a USB sound card** | Quectel **EG25-G** (4G, mPCIe) | The PinePhone's modem. A user reports its USB sound card (UAC) works after a firmware update ([forum](https://forums.quectel.com/t/eg25-and-uac-for-audio/31663)). VoLTE is reported working on ALDI Mobile and Amaysim, but not on Telstra directly, and Quectel says it is not Telstra-certified ([forum](https://forums.quectel.com/t/eg25-g-firmware-request-volte-not-registering-on-australian-carriers/56633), [Pine64 forum](https://forum.pine64.org/showthread.php?tid=12560)). It is mPCIe, so an M.2 slot needs an adapter, which nobody has tried on a Flipper One. |
-| **5G and mobile calls** | Nothing confirmed yet | No M.2 5G module was found that is documented to do calls with its audio over USB. The RM520N-EU has voice by Quectel's account, but only in its region ([forum](https://forums.quectel.com/t/which-5g-m-2-modules-support-voice-calls/47294)); the RM500U is said to do VoLTE (same thread), but has PCM pins rather than USB audio ([spec](https://mm.digikey.com/Volume0/opasdata/d220001/medias/docus/7133/Quectel_RM500U_Series_5G_Module_Specification_V1.6.pdf)). |
+| **Texts and data, no mobile calls** | Quectel **RM520N-GL** (5G, M.2 3052) | Quectel's staff say it is "data-only" and will not get voice ([forum](https://forums.quectel.com/t/quectel-rm520n-gl-and-volte/32316), [forum](https://forums.quectel.com/t/voice-call-with-the-rm520n-gl/34404)); Telstra lists it without VoLTE. A user reports texts work on it (same thread; not confirmed by Quectel). Add a SIP account for calls. |
+| **Calls, with nothing asked of the Flipper but USB** | SIMCom **SIM7600G-H-M2** (4G, M.2 3042) | Its call audio comes over USB as raw PCM on a serial port, which Dolphone bridges to PipeWire (the uConsole profile does this) ([SIMCom USB audio note](https://files.waveshare.com/upload/8/8e/SIM7100_SIM7500_SIM7600_Series_USB_AUDIO_Application_Note_V1.03.pdf), [Waveshare](https://waveshare.com/wiki/SIM7600G-H-M.2)). Telstra certified the SIM7600G-H for VoLTE, as a chip and as a mini PCIe card; the M.2 card is not named, so ask SIMCom for the Telstra-certified firmware. Nobody has published an Australian VoLTE call on it, and a ModemManager bug report says its in-call audio sometimes fails to set up ([issue 797](https://gitlab.freedesktop.org/mobile-broadband/ModemManager/-/issues/797)). |
+| **Calls, certified as an M.2 card** | Quectel **EM12-G** (4G Cat 12, M.2 3042), its voice ("Telematics") version | Telstra certified it for VoLTE by name. But its call audio is PCM on M.2 pins 20, 22, 24 and 28 at 1.8 V, not USB (Quectel lists voice over USB as not yet supported) ([hardware design](https://www.quectel.com/content/uploads/2024/02/Quectel_EM12-G_Hardware_Design_V1.3-2.pdf)). Those are the pins the Flipper One's pinout calls GPIO_5 to GPIO_8, and its slot lists "Serial Audio" ([pinout](https://docs.flipper.net/one/hardware/m2-port)); whether they reach the Flipper's audio interface is not published. Buy it only once Flipper says they do. |
+| **5G and calls** | Fibocom **FM160-EAU** (M.2 3052) | Telstra certified it for VoLTE; Fibocom lists VoLTE and VoNR. Its call audio is I2S/PCM on the slot's pins, so the same question as the EM12-G; its bands include B28, n28 and n78 but not Telstra's n26 ([4G LTE Mall](https://www.4gltemall.com/fibocom-fm160-eau.html), [M2M Germany](https://www.m2mgermany.de/shop/produkt/fm160-eau-01-00-5g-m.2-modul-usb-version)). No M.2 5G module documented to put call audio on USB was found. |
+
+With an mPCIe adapter there is also the Quectel **EG25-G**, the PinePhone's modem: a
+user reports its USB sound card works after a firmware update
+([forum](https://forums.quectel.com/t/eg25-and-uac-for-audio/31663)), and VoLTE is
+reported working on ALDI Mobile and Amaysim
+([forum](https://forums.quectel.com/t/eg25-g-firmware-request-volte-not-registering-on-australian-carriers/56633),
+[Pine64 forum](https://forum.pine64.org/showthread.php?tid=12560)). Telstra certified
+the EG25-GL, not the EG25-G. Nobody has tried an adapter in a Flipper One.
 
 **Not for calls**, by their makers' or certifiers' accounts: Quectel EM05-G
 ([forum](https://forums.quectel.com/t/can-the-em05-g-support-volte-calls/53006)),
@@ -38,9 +55,10 @@ SIM8200EA-M2 ([Waveshare](https://www.waveshare.com/wiki/SIM8200EA-M2_5G_HAT)). 
 RM500Q and RM502Q register VoLTE for some but calls fail
 ([forum](https://forums.quectel.com/t/voice-over-usb-volte-rm502q-gl/27890)).
 
-Whether the Flipper One's M.2 slot carries a modem's PCM pins is not published, so
-this page assumes it does not: a modem's call audio has to come over USB, as a sound
-card or as a serial PCM stream.
+A modem with its call audio on the slot's pins would also need the Flipper One
+profile changed: it sends the RM520N-GL's `AT+QPCMV=1,2`, which moves Quectel call
+audio to USB, and it would need the codec's voice path instead of a bridge, as the
+PinePhone's profile has.
 
 If you try one, run [the hardware test](HARDWARE.md) and say what passed: it is how a
 row here goes from "reported" to "tested".
