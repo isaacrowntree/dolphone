@@ -13,6 +13,13 @@ Quectel says the RM520N-GL is data-only, so it can test texts and data but not c
 ([docs/MODEMS.md](https://isaacrowntree.com/dolphone/MODEMS.html) lists the
 candidates for calls). What only a board can confirm:
 
+- **Whether the M.2 slot's audio pins are wired.** The two modems Telstra certifies
+  for VoLTE that fit the slot as they are, the Quectel EM12-G and the Fibocom
+  FM160-EAU, put call audio on pins 20, 22, 24 and 28, which the Flipper One's
+  pinout calls GPIO_5 to GPIO_8. If Flipper joins them to the SoC's audio interface,
+  the profile gets a voice path through the codec instead of a USB bridge; if not,
+  the SIMCom SIM7600G-H-M2, whose call audio comes over USB, is the M.2 choice.
+
 - **The Quectel commands.** `phonectl modem setup` checks USB audio
   (`AT+QCFG="usbcfg"`), VoLTE (`AT+QCFG="ims"`) and the carrier profile
   (`AT+QMBNCFG="AutoSel"`), and the Flipper One profile sends `AT+QPCMV=1,2` at

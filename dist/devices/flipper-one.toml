@@ -3,7 +3,10 @@
 # that watches the jack and the headset button, and an M.2 Key-B slot for a modem.
 # A modem that can call sends its audio over USB (a UAC sound card, or SIMCom's
 # serial PCM), bridged by phoned; a data-only one such as the Quectel RM520N-GL
-# (no voice, by Quectel's account) texts but cannot call (docs/MODEMS.md).
+# (no voice, by Quectel's account) texts but cannot call (docs/MODEMS.md). Modems
+# with call audio on the slot's PCM pins (pins 20/22/24/28, GPIO_5-8 in Flipper's
+# pinout; the Quectel EM12-G, the Fibocom FM160-EAU) need those pins wired to the
+# SoC's audio interface, which Flipper has not published, and modem_at emptied.
 id = "flipper-one"
 name = "Flipper One"
 status = "expected"

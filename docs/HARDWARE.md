@@ -9,7 +9,9 @@ OS is the target.
 **Which modem decides which gates apply.** Quectel says the **RM520N-GL** is
 data-only, with no voice: on it G3 (texts) is the test, and G1, G2 and G4 do not
 apply; Dolphone shows "texts only, no calls" and leaves the call setup alone. For
-calls, use a modem with voice and its call audio over USB ([MODEMS.md](MODEMS.md)).
+calls, use a modem with voice whose call audio reaches Linux: over USB (the SIMCom
+SIM7600G-H-M2), or on the slot's audio pins if Flipper wires them (the Quectel EM12-G,
+the Fibocom FM160-EAU) ([MODEMS.md](MODEMS.md)).
 The Quectel commands below are for Quectel modems that have voice.
 
 | Gate | Question | Pass |
@@ -135,9 +137,17 @@ Settings > Modem shows the same check, with **Set up** when there is something t
 
 ## G2: call audio (the deciding one)
 
-On a modem that can call, call audio has to come over USB: as a sound card (UAC, the
-Quectel way below), or as a serial PCM stream (SIMCom's, which ModemManager names
-and phoned bridges). The RM520N-GL has no voice at all (see above).
+On a modem that can call, call audio comes over USB, as a sound card (UAC, the
+Quectel way below) or as a serial PCM stream (SIMCom's, which ModemManager names
+and phoned bridges), or on the M.2 slot's PCM pins (20, 22, 24 and 28, at 1.8 V, on
+the Quectel EM12-G). The RM520N-GL has no voice at all (see above).
+
+The pins only help if the board joins them to its audio interface: the Flipper One's
+pinout calls them GPIO_5 to GPIO_8 and its interface list includes "Serial Audio",
+but where they go is not published. Through them, the pass is two-way audio through
+the NAU8822 codec, and the profile then needs `modem_at` emptied (`AT+QPCMV=1,2`
+would move a Quectel's audio to USB) and the codec's voice path, as the PinePhone's
+profile has.
 
 1. Turn on UAC: `phonectl modem setup apply`, or by hand as Quectel's LTE Standard
    UAC Application Note describes: query `AT+QCFG="usbcfg"`, send the same values
