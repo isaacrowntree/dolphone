@@ -55,6 +55,13 @@ pub struct Config {
     pub speaker_commands: Vec<Vec<String>>,
     /// Commands that send it to the 3.5 mm jack.
     pub wired_commands: Vec<Vec<String>>,
+    /// Commands that switch the codec's microphone to a headset's, run when a call
+    /// is on the jack and the jack reports a microphone (`SW_MICROPHONE_INSERT`),
+    /// and the ones that switch it back to the built-in microphone, run on every
+    /// other route. Empty: the microphone is left alone, for a codec that has one
+    /// input or switches it itself.
+    pub headset_mic_commands: Vec<Vec<String>>,
+    pub internal_mic_commands: Vec<Vec<String>>,
     /// Commands that send it to the earpiece, on a phone that has one. A machine
     /// with these offers the Earpiece route, and calls start there.
     pub earpiece_commands: Vec<Vec<String>>,
@@ -90,6 +97,8 @@ impl Default for Config {
         Self {
             speaker_commands: Vec::new(),
             wired_commands: Vec::new(),
+            headset_mic_commands: Vec::new(),
+            internal_mic_commands: Vec::new(),
             earpiece_commands: Vec::new(),
             codec_sink: String::new(),
             mic_source: String::new(),
@@ -533,6 +542,8 @@ struct Inner {
     /// Chosen by the user during this call, so a jack event does not override it.
     pinned: bool,
     wired: bool,
+    /// The jack reports a microphone: a headset, not plain headphones.
+    headset_mic: bool,
     /// The downlink and the uplink.
     legs: [Option<Child>; 2],
     /// The plan in effect: what each leg runs, to restart one that died or the
@@ -635,6 +646,7 @@ impl Audio {
                 shown: Arc::new(AtomicU8::new(Route::Speaker as u8)),
                 pinned: false,
                 wired: false,
+                headset_mic: false,
                 legs: [None, None],
                 plan: Vec::new(),
                 in_call: false,
@@ -730,6 +742,20 @@ impl Audio {
                 i.route
             };
             apply_route(&mut i, to, None);
+        }
+    }
+
+    /// The jack's microphone came or went (a headset, not headphones). A call on
+    /// the jack moves to it, or back to the built-in microphone.
+    pub fn set_headset_mic(&self, present: bool) {
+        let Some(mut i) = self.lock() else { return };
+        if i.headset_mic == present {
+            return;
+        }
+        i.headset_mic = present;
+        tracing::info!(present, "headset microphone");
+        if i.route == Route::Wired {
+            run_all(mic_commands(&i, Route::Wired));
         }
     }
 
@@ -1048,6 +1074,16 @@ fn idle_commands(i: &Inner) -> &[Vec<String>] {
     }
 }
 
+/// The microphone for a route: the headset's on the jack when it has one, the
+/// built-in one otherwise (plain headphones have no microphone).
+fn mic_commands(i: &Inner, route: Route) -> &[Vec<String>] {
+    if route == Route::Wired && i.headset_mic {
+        &i.cfg.headset_mic_commands
+    } else {
+        &i.cfg.internal_mic_commands
+    }
+}
+
 fn route_commands(cfg: &Config, route: Route) -> &[Vec<String>] {
     match route {
         Route::Speaker => &cfg.speaker_commands,
@@ -1115,6 +1151,7 @@ fn start_call(s: &Shared, audio_port: &str, rate: u32) {
         // The ringer may have switched the codec to the speaker: put it where the
         // call is.
         run_all(route_commands(&i.cfg, i.route));
+        run_all(mic_commands(&i, i.route));
     }
     i.port = audio_port.to_string();
     i.rate = rate;
@@ -1172,6 +1209,7 @@ fn check_call(s: &Shared) {
 
 fn apply_route(i: &mut Inner, route: Route, dump: Option<Dump>) {
     run_all(route_commands(&i.cfg, route));
+    run_all(mic_commands(i, route));
     let changed = i.route != route;
     i.set_route(route);
     if changed && i.in_call {
@@ -2359,6 +2397,32 @@ mod tests {
         assert!(audio.lock().unwrap().in_call, "and a start after a stop");
         audio.stop_call();
         assert!(!audio.lock().unwrap().in_call);
+    }
+
+    /// The Flipper One's codec has a built-in microphone and the jack's, each with
+    /// its own switch: a headset's is used on the jack, plain headphones keep the
+    /// built-in one, and every other route uses the built-in one.
+    #[test]
+    fn microphone_follows_the_headset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("mixer");
+        let say = |w: &str| vec![vec!["sh".to_string(), "-c".into(), format!("echo {w} >> {}", log.display())]];
+        let audio = Audio::new(Config {
+            headset_mic_commands: say("headset"),
+            internal_mic_commands: say("internal"),
+            ..Config::default()
+        });
+        let last = || std::fs::read_to_string(&log).unwrap_or_default().lines().last().unwrap_or("").to_string();
+        audio.set_headset_mic(true);
+        assert_eq!(last(), "", "nothing switches while the call is not on the jack");
+        audio.set_wired(true);
+        assert_eq!(last(), "headset");
+        audio.set_headset_mic(false);
+        assert_eq!(last(), "internal", "headphones without a microphone");
+        audio.set_headset_mic(true);
+        assert_eq!(last(), "headset");
+        audio.set_wired(false);
+        assert_eq!(last(), "internal", "out of the jack, back to the built-in one");
     }
 
     #[test]

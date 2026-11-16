@@ -3,11 +3,14 @@
 # group the trigger and brightness on "add", and on "change": the kernel sends a
 # change uevent each time an LED's trigger is set (__led_trigger_set in
 # drivers/leds/led-triggers.c), after creating the trigger's own files, which is
-# when the timer trigger's delay_on and delay_off appear. The same chgrp in a udev
-# RUN is how brightnessctl's rules open LEDs to a group.
+# when the timer trigger's delay_on and delay_off appear, and the netdev trigger's
+# files when phoned gives an LED back to it: Flipper's image points the network LEDs
+# at their interfaces (99-network-leds.rules), and the kernel forgets that when
+# the trigger changes, so phoned writes device_name and the modes back. The same
+# chgrp in a udev RUN is how brightnessctl's rules open LEDs to a group.
 #
 # udev expands $ itself, so the shell's $f is written $$f (udevadm verify checks it).
 #
 # Another machine's LEDs: copy this file to /etc/udev/rules.d/, change KERNEL to
 # match the names in the device profile's ring_leds, and reload the rules.
-ACTION=="add|change", SUBSYSTEM=="leds", KERNEL=="flipper-one:*", RUN+="/bin/sh -c 'cd /sys%p && for f in trigger brightness delay_on delay_off; do [ -e $$f ] && chgrp dolphone $$f && chmod g+w $$f; done; true'"
+ACTION=="add|change", SUBSYSTEM=="leds", KERNEL=="flipper-one:*", RUN+="/bin/sh -c 'cd /sys%p && for f in trigger brightness delay_on delay_off device_name interval link link_10 link_100 link_1000 link_2500 link_5000 link_10000 half_duplex full_duplex rx tx rx_err tx_err; do [ -e $$f ] && chgrp dolphone $$f && chmod g+w $$f; done; true'"

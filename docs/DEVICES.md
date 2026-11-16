@@ -24,7 +24,7 @@ Phone Settings > About shows it on the panel too.
 
 | Profile | Recognised by | Status | Notes |
 |---|---|---|---|
-| `flipper-one` | device tree model "Flipper One" | expected | The reference. NAU8822 codec switched with amixer (`Speaker`, `Headphone`, from the kernel driver's controls); the modem's USB audio bridged by phoned. The board's device-tree strings are not published yet, so detection is assumed: choose it by hand if it misses. |
+| `flipper-one` | `flipper,one-rev-*`, or the model "Flipper One" | expected | The reference, from Flipper's kernel sources. The NAU8822 card's pin switches (speaker, headphones, headset and built-in microphones) set with amixer; the RP2350's headset input device for the jack; the modem's USB audio bridged by phoned. A modem on the M.2 slot's PCM pins needs the overlay in `dist/dts/` (HARDWARE.md). |
 | `clockworkpi-uconsole` | `dtoverlay=clockworkpi-uconsole` in config.txt | untested | The 4G extension is a SIMCom SIM7600G-H, which sends call audio as serial PCM. ModemManager's SIMCom plugin turns it on (`AT+CPCMREG=1`) once a call connects and names the port; phoned bridges that port (or `/dev/ttyUSB4`) to PipeWire at the call's rate, 8 or 16 kHz (SIMCom USB AUDIO Application Note V1.03). Needs you in the `dialout` group for the port. |
 | `raspberry-pi` | device tree model "Raspberry Pi" | untested | Any modem ModemManager supports. Mobile call audio needs a modem with a USB sound card; use a USB headset for the speaker and microphone. |
 | `pinephone` | `pine64,pinephone` | untested | The EG25-G is wired to the codec; ALSA UCM's Voice Call verb connects it (`call_start_commands`); calls start on the earpiece. |
@@ -80,6 +80,8 @@ codec_sink = ""                       # PipeWire node names; empty for the defau
 mic_source = ""
 speaker_commands = [["amixer", "-q", "sset", "Speaker", "unmute"]]
 wired_commands = [["amixer", "-q", "sset", "Headphone", "unmute"]]
+headset_mic_commands = []             # a headset's microphone, on the jack route
+internal_mic_commands = []            # the built-in one, on every other route
 modem_match = ["Quectel"]             # how to spot the modem's USB audio nodes
 call_start_commands = []              # a UCM verb, an AT command, an amplifier
 call_stop_commands = []
@@ -124,7 +126,10 @@ port once udev has tagged it.
 ### Flashing LEDs for a ringing call
 
 A profile's `ring_leds` names LEDs under `/sys/class/leds` to flash while a call
-rings (the `flash_on_ring` setting, on by default). Their files belong to root, so the package's
+rings (the `flash_on_ring` setting, on by default). Afterwards each gets back its
+trigger, and for the `netdev` trigger the interface and modes it had, since the
+kernel drops those when the trigger changes (Flipper's image points its four LEDs at
+the network interfaces that way). Their files belong to root, so the package's
 `/usr/lib/udev/rules.d/70-dolphone-leds.rules` gives them to the `dolphone` group,
 for the Flipper One's LEDs (`flipper-one:*`). Join the group once:
 

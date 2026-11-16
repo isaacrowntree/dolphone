@@ -5,16 +5,26 @@
 # serial PCM), bridged by phoned; a data-only one such as the Quectel RM520N-GL
 # (no voice, by Quectel's account) texts but cannot call (docs/MODEMS.md). Modems
 # with call audio on the slot's PCM pins (pins 20/22/24/28, GPIO_5-8 in Flipper's
-# pinout; the Quectel EM12-G, the Fibocom FM160-EAU) need those pins wired to the
-# SoC's audio interface, which Flipper has not published, and modem_at emptied.
+# pinout; the Quectel EM12-G, the Fibocom FM160-EAU) reach the SoC's SAI0, which
+# Flipper's device tree enables as "Serial audio for M.2 WWAN", but no sound card
+# is built on it yet: they need one (docs/HARDWARE.md), and modem_at emptied.
+#
+# Everything below is from Flipper's own sources, branch flipper-devel of
+# github.com/flipperdevices/flipper-linux-kernel: the board's device tree
+# (arch/arm64/boot/dts/rockchip/rk3576-flipper-one*.dts*), its MCU drivers
+# (drivers/input/misc/flipper-one-input.c, drivers/leds/rgb/leds-flipper-one.c)
+# and the NAU8822's (sound/soc/codecs/nau8822.c).
 id = "flipper-one"
 name = "Flipper One"
 status = "expected"
-source = "Flipper One docs (hardware, M.2 port, MCU firmware architecture); mixer controls from sound/soc/codecs/nau8822.c (Speaker Playback Switch, Headphone Playback Switch); LED names from flipctl-slint's Network LEDs test app"
-notes = "Flipper has not published the board's device tree yet, so the strings below are assumed; if detection misses, choose it with phonectl device use flipper-one. The jack is reported by the RP2350, so how it reaches Linux is part of docs/HARDWARE.md."
+source = "Flipper's kernel (branch flipper-devel): the board's device tree (compatible, model, the NAU8822 card and its pin switches, SAI0 for the M.2 slot), its MCU input driver (the jack) and LED driver (names); sound/soc/codecs/nau8822.c (Speaker Playback Switch, Headphone Playback Switch); the RM520N-GL's ports from Flipper's test page (docs.flipper.net, testing/RM520N-GL)"
+notes = "Not yet run on a board. The device tree names each revision (flipper,one-rev-f0b0c1, flipper,one-rev-f0b1c2); a later one is still found by its model, Flipper One rev. .... The RP2350 reports the jack as the input device Flipper One Headset (SW_HEADPHONE_INSERT, SW_MICROPHONE_INSERT, KEY_PLAYPAUSE). The mixer commands assume ALSA calls the card NAU8822, the last word of its name On-board Analog NAU8822: check with aplay -l."
 front_ends = ["flipctl", "desktop"]
-# The four RGB LEDs along the top (Flipper's Network LEDs test app). They show the
-# network interfaces' carrier; they flash while a call rings and then go back.
+# The four RGB LEDs along the top (leds-flipper-one.c). Flipper's image has them show
+# the network interfaces' carrier with the netdev trigger (99-network-leds.rules);
+# they flash while a call rings and then go back, interface and all. They are the
+# MCU's "Link" group, whose brightness FlipCTL can set to Off: then they cannot
+# flash, and phoned logs it.
 # A Quectel modem with voice forgets where call audio goes when it restarts:
 # AT+QPCMV=1,2 sends it to the USB sound card (Quectel LTE Standard UAC Application Note §3;
 # reported working on the RM520N on Quectel's forum). phoned sends it each time the
@@ -24,13 +34,35 @@ modem_at = ["AT+QPCMV=1,2"]
 ring_leds = ["flipper-one:rgb:eth0", "flipper-one:rgb:eth1", "flipper-one:rgb:wifi", "flipper-one:rgb:link"]
 
 [match]
-dt_compatible = ["flipperdevices,flipper-one"]
+dt_compatible = ["flipper,one-rev-f0b0c1", "flipper,one-rev-f0b1c2"]
 dt_model = ["Flipper One"]
 priority = 100
 
+# The board's sound card is a simple-audio-card named "On-board Analog NAU8822",
+# with a pin switch for each end: "Headphones", "Speaker", "Headset Microphone"
+# (the jack's, on the codec's RMICP) and "Internal Microphone" (LMICP/LMICN). A pin
+# switched off is powered down. The codec's own playback switches are turned on as
+# well, in case they start muted. Exact control names (cset), since amixer's simple
+# "Speaker" would be both the pin switch and the codec's switch.
 [audio]
-speaker_commands = [["amixer", "-q", "sset", "Speaker", "unmute"], ["amixer", "-q", "sset", "Headphone", "mute"]]
-wired_commands = [["amixer", "-q", "sset", "Speaker", "mute"], ["amixer", "-q", "sset", "Headphone", "unmute"]]
+speaker_commands = [
+  ["amixer", "-q", "-c", "NAU8822", "cset", "name=Speaker Playback Switch", "on"],
+  ["amixer", "-q", "-c", "NAU8822", "cset", "name=Speaker Switch", "on"],
+  ["amixer", "-q", "-c", "NAU8822", "cset", "name=Headphones Switch", "off"],
+]
+wired_commands = [
+  ["amixer", "-q", "-c", "NAU8822", "cset", "name=Headphone Playback Switch", "on"],
+  ["amixer", "-q", "-c", "NAU8822", "cset", "name=Headphones Switch", "on"],
+  ["amixer", "-q", "-c", "NAU8822", "cset", "name=Speaker Switch", "off"],
+]
+headset_mic_commands = [
+  ["amixer", "-q", "-c", "NAU8822", "cset", "name=Headset Microphone Switch", "on"],
+  ["amixer", "-q", "-c", "NAU8822", "cset", "name=Internal Microphone Switch", "off"],
+]
+internal_mic_commands = [
+  ["amixer", "-q", "-c", "NAU8822", "cset", "name=Internal Microphone Switch", "on"],
+  ["amixer", "-q", "-c", "NAU8822", "cset", "name=Headset Microphone Switch", "off"],
+]
 modem_match = ["Quectel", "RM520", "RM500"]
 
 # A spare AT port, so the commands above need no ModemManager debug mode. The
@@ -39,8 +71,11 @@ modem_match = ["Quectel", "RM520", "RM500"]
 # ModemManager uses only as its secondary (Quectel's UMTS/LTE/5G Linux USB Driver
 # User Guide V3.1, Table 1; ModemManager's 77-mm-quectel-port-types.rules); the
 # RM500Q (0800) is laid out the same. phoned takes 3, and only once udev tells
-# ModemManager to ignore it: sudo dolphone-modem-access port on. Not yet tried on
-# a real RM520N.
+# ModemManager to ignore it: sudo dolphone-modem-access port on. Flipper's own
+# RM520N-GL test (firmware RM520NGLAAR03A04M4G) found the same: interface 3 is the
+# secondary AT port, ignoring it with ID_MM_PORT_IGNORE costs ModemManager "almost
+# nothing" (it keeps interface 2 and QMI), and Flipper recommends it for programs
+# that need AT all the time.
 [at_port]
 usb_vendor = "2c7c"
 usb_products = ["0801", "0800"]

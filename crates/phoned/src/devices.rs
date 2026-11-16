@@ -315,6 +315,11 @@ mod tests {
             "pinephone"
         );
         assert_eq!(pick(dt(&["purism,librem5r4", "purism,librem5", "fsl,imx8mq"], "Purism Librem 5r4")), "librem5");
+        // As Flipper's device tree names the board (rk3576-flipper-one-rev-*.dts),
+        // and a later revision by its model alone.
+        assert_eq!(pick(dt(&["flipper,one-rev-f0b1c2", "rockchip,rk3576"], "Flipper One rev. F0B1C2")), "flipper-one");
+        assert_eq!(pick(dt(&["flipper,one-rev-f0b0c1", "rockchip,rk3576"], "Flipper One rev. F0B0C1")), "flipper-one");
+        assert_eq!(pick(dt(&["flipper,one-rev-f1b0c0", "rockchip,rk3576"], "Flipper One rev. F1B0C0")), "flipper-one");
         assert_eq!(
             pick(dt(&["raspberrypi,5-model-b", "brcm,bcm2712"], "Raspberry Pi 5 Model B Rev 1.0")),
             "raspberry-pi"
@@ -338,6 +343,7 @@ mod tests {
         let p = built_in().into_iter().find(|p| p.id == "flipper-one").unwrap();
         let c = audio_config(&p);
         assert!(!c.speaker_commands.is_empty(), "the Flipper One switches its codec with amixer");
+        assert!(!c.headset_mic_commands.is_empty() && !c.internal_mic_commands.is_empty(), "and its two microphones");
         assert_eq!(p.at_port.usb_interface, "03", "the RM520N's modem port, not ModemManager's primary");
         let g = built_in().into_iter().find(|p| p.id == "generic").unwrap();
         assert!(audio_config(&g).speaker_commands.is_empty(), "generic touches no mixer controls");

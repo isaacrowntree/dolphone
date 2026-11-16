@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: MIT
+/*
+ * A sound card on the Flipper One's M.2 serial audio, for a modem that puts its
+ * call audio on the slot's PCM pins (20, 22, 24, 28) instead of USB: the Quectel
+ * EM12-G, the Fibocom FM160-EAU. UNTESTED on a board: it applies cleanly to
+ * Flipper's rev. F0B1C2 device tree with fdtoverlay, and nothing more is known.
+ *
+ * Flipper's device tree already routes those pins to the RK3576's SAI0 and enables
+ * it ("Serial audio for M.2 WWAN", sai0m2 pins, in rk3576-flipper-one.dtsi on
+ * branch flipper-devel of flipperdevices/flipper-linux-kernel), but builds no
+ * sound card on it. This adds one: SAI0 against the kernel's generic PCM codec
+ * (bt-sco, 8 kHz on DAI 0 and 8 or 16 kHz on DAI 1, 16-bit mono), with the modem
+ * driving the clocks, as Quectel's modules do by default (primary PCM: short
+ * frame sync, 2048 kHz clock, 8 kHz). PipeWire then shows "M.2 Modem PCM" as a
+ * sound card, and phoned bridges it like a USB modem's with
+ * "modem_match": ["M.2 Modem PCM"] in audio.json (docs/HARDWARE.md).
+ *
+ * Before use, check:
+ *  - the kernel has CONFIG_SND_SOC_BT_SCO (Flipper's kernel does not enable it
+ *    today; CONFIG_SND_SIMPLE_CARD and CONFIG_SND_SOC_ROCKCHIP_SAI are modules);
+ *  - the pins' voltage: Flipper's pinout and the F0B0C1 M.2 schematic give
+ *    GPIO_5-8 as 0/1.8 V, as the EM12-G's PCM is; the SoC side (GPIO1_A0, A1,
+ *    A7, B2) is not on a published sheet;
+ *  - the modem's PCM settings (Quectel: AT+QDAI) match format, rate and clock
+ *    master here.
+ *
+ * Build: dtc -@ -I dts -O dtb -o rk3576-flipper-one-m2-pcm.dtbo rk3576-flipper-one-m2-pcm.dtso
+ */
+
+/dts-v1/;
+/plugin/;
+
+&{/} {
+	m2_pcm_codec: m2-pcm-codec {
+		compatible = "linux,bt-sco";
+		#sound-dai-cells = <1>;
+	};
+
+	m2-pcm-sound {
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "M.2 Modem PCM";
+		simple-audio-card,format = "dsp_a";
+		simple-audio-card,bitclock-master = <&m2_pcm_modem>;
+		simple-audio-card,frame-master = <&m2_pcm_modem>;
+
+		simple-audio-card,cpu {
+			sound-dai = <&sai0>;
+		};
+
+		m2_pcm_modem: simple-audio-card,codec {
+			sound-dai = <&m2_pcm_codec 0>;
+		};
+	};
+};

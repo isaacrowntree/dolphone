@@ -7,6 +7,13 @@ in the real FlipCTL; not yet on a real modem.
 
 Features:
 
+- The Flipper One's profile from Flipper's own kernel sources: its device-tree
+  strings, its sound card's pin switches (speaker, headphones, and the headset's and
+  built-in microphones, switched with the jack's microphone switch), and an untested
+  overlay for a sound card on the M.2 slot's PCM pins (SAI0); ring LEDs on the
+  netdev trigger get back their interface after a ring, and phoned says when the
+  Flipper's LED group brightness keeps them dark.
+
 - It rings: a logind inhibitor while a call exists; catching up after resume; the
   modem allowed to wake the board (udev); ModemManager's signals instead of polling;
   calls adopted after a restart in any state; SIM PIN entry on the keypad; a

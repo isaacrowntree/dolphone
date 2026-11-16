@@ -105,6 +105,7 @@ fn scan(
             }
             if is_jack {
                 phone.audio.set_wired(false);
+                phone.audio.set_headset_mic(false);
             }
             // Look again now, not at the next minute's poll: a device that went
             // is often one coming straight back (a driver rebinding).
@@ -182,6 +183,8 @@ fn names_event_device(buf: &[u8]) -> bool {
 
 fn read(mut dev: Device, phone: &Arc<Phone>, rt: &tokio::runtime::Handle) {
     if let Ok(state) = dev.get_switch_state() {
+        // The microphone first, so the route the jack brings picks the right one.
+        phone.audio.set_headset_mic(state.contains(SwitchCode::SW_MICROPHONE_INSERT));
         phone.audio.set_wired(state.contains(SwitchCode::SW_HEADPHONE_INSERT));
     }
     loop {
@@ -189,6 +192,7 @@ fn read(mut dev: Device, phone: &Arc<Phone>, rt: &tokio::runtime::Handle) {
         for ev in events {
             match ev.destructure() {
                 EventSummary::Switch(_, SwitchCode::SW_HEADPHONE_INSERT, v) => phone.audio.set_wired(v != 0),
+                EventSummary::Switch(_, SwitchCode::SW_MICROPHONE_INSERT, v) => phone.audio.set_headset_mic(v != 0),
                 EventSummary::Key(_, code, 1) if BUTTONS.contains(&code) => {
                     let phone = phone.clone();
                     rt.spawn(async move { button(&phone).await });

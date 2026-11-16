@@ -82,7 +82,11 @@ interface 3, the "modem" port, which takes AT commands too and which ModemManage
 uses only as its secondary (Quectel's UMTS/LTE/5G Linux USB Driver User Guide V3.1,
 Table 1; ModemManager's `77-mm-quectel-port-types.rules`). Dolphone can tell
 ModemManager to ignore interface 3 (the `ID_MM_PORT_IGNORE` udev tag) and send its
-commands there itself. Nobody has tried it on a real RM520N yet, so check it here:
+commands there itself. Flipper's own
+[RM520N-GL test](https://docs.flipper.net/one/testing/RM520N-GL) (firmware
+`RM520NGLAAR03A04M4G`) found the same layout, ignored interface 3 the same way, and
+reports that ModemManager loses "almost nothing" without it, keeping interface 2 and
+QMI. Dolphone's own use of the port is untested, so check it here:
 
 ```sh
 ls -d /sys/bus/usb/devices/*/ttyUSB*           # which ttyUSB is which interface (…:1.3 is 3)
@@ -142,12 +146,27 @@ Quectel way below) or as a serial PCM stream (SIMCom's, which ModemManager names
 and phoned bridges), or on the M.2 slot's PCM pins (20, 22, 24 and 28, at 1.8 V, on
 the Quectel EM12-G). The RM520N-GL has no voice at all (see above).
 
-The pins only help if the board joins them to its audio interface: the Flipper One's
-pinout calls them GPIO_5 to GPIO_8 and its interface list includes "Serial Audio",
-but where they go is not published. Through them, the pass is two-way audio through
-the NAU8822 codec, and the profile then needs `modem_at` emptied (`AT+QPCMV=1,2`
-would move a Quectel's audio to USB) and the codec's voice path, as the PinePhone's
-profile has.
+The Flipper One joins those pins to the RK3576's SAI0: its [device tree](https://github.com/flipperdevices/flipper-linux-kernel/blob/flipper-devel/arch/arm64/boot/dts/rockchip/rk3576-flipper-one.dtsi) enables SAI0 on
+its `sai0m2` pins as "Serial audio for M.2 WWAN". It builds no sound card on it,
+though, so a modem there has nowhere to send its audio yet.
+[`dist/dts/rk3576-flipper-one-m2-pcm.dtso`](https://github.com/isaacrowntree/dolphone/blob/main/dist/dts/rk3576-flipper-one-m2-pcm.dtso)
+(installed to `/usr/share/dolphone/dts/`) is an untested overlay that adds one,
+"M.2 Modem PCM", with the modem driving the clocks. Before trying it:
+
+- the kernel needs `CONFIG_SND_SOC_BT_SCO`, the generic PCM codec, which Flipper's
+  kernel does not enable today;
+- the EM12-G's PCM is 1.8 V, and Flipper's pinout and F0B0C1 M.2 schematic give
+  GPIO_5 to GPIO_8 as 0/1.8 V too; the SoC side (GPIO1_A0, A1, A7 and B2) is not on
+  a published sheet, so measure a pin before trusting it;
+- the modem's PCM format (Quectel: `AT+QDAI`) must match the overlay's (DSP A,
+  8 kHz, 16-bit mono, the modem as clock master).
+
+Then `aplay -l` shows the card, and phoned bridges it to the codec like a USB modem's
+with `~/.config/dolphone/audio.json` holding `"modem_match": ["M.2 Modem PCM"]`, and
+the profile's `modem_at` emptied (`AT+QPCMV=1,2` would move a Quectel's audio to USB):
+it is a profile setting, so copy `flipper-one.toml` to `~/.config/dolphone/devices/`,
+where it replaces the built-in one, and empty it there. The pass is two-way audio through
+the NAU8822.
 
 1. Turn on UAC: `phonectl modem setup apply`, or by hand as Quectel's LTE Standard
    UAC Application Note describes: query `AT+QCFG="usbcfg"`, send the same values
@@ -238,9 +257,17 @@ ModemManager where it finds one.
 lists the cells the firmware reports; whether the RM520N-GL fills in the 5G NR
 fields is unconfirmed, so note what it shows.
 
-On the Flipper One, `ls /sys/class/leds` shows the LEDs' real names: if they are
-not the `flipper-one:*` names in the profile's `ring_leds`, note them (and the udev
-rule's match).
+On the Flipper One, the profile's `ring_leds` are the four RGB LEDs that Flipper's
+LED driver names `flipper-one:rgb:link`, `wifi`, `eth1` and `eth0`, which Flipper's
+image points at the network interfaces. Ring it and check that they flash, and that
+afterwards each shows its interface's link again
+(`cat /sys/class/leds/flipper-one:rgb:eth0/device_name` names it). If they stay dark,
+FlipCTL's Settings > LED Brightness > Link may be Off.
+
+The mixer commands assume ALSA names the codec's card `NAU8822` (`aplay -l`), and use
+its pin switches (`amixer -c NAU8822 contents`); note any that fail in
+`journalctl --user -u phoned`, and whether a headset's microphone is heard on a
+call through the jack (the profile switches to it when the jack reports one).
 
 ## Report back
 

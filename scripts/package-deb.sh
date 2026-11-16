@@ -63,6 +63,10 @@ install -m 0644 "$ROOT/dist/modemmanager/dolphone-debug.conf" "$PKG/usr/share/do
 install -m 0755 "$ROOT/dist/bin/dolphone-modem-access" "$PKG/usr/bin/"
 install -m 0644 "$ROOT/dist/polkit/io.github.isaacrowntree.Dolphone.policy" "$PKG/usr/share/polkit-1/actions/"
 install -m 0644 "$ROOT"/dist/devices/*.toml "$PKG/usr/share/dolphone/devices/"
+# The source of a device-tree overlay for a modem with call audio on the M.2 slot's
+# PCM pins (docs/HARDWARE.md), to build and apply by hand; never applied by itself.
+d usr/share/dolphone/dts
+install -m 0644 "$ROOT"/dist/dts/*.dtso "$PKG/usr/share/dolphone/dts/"
 # How an AI agent uses phonectl (docs/AGENTS.md).
 d usr/share/dolphone/skills/phonectl
 install -m 0644 "$ROOT/dist/skills/phonectl/SKILL.md" "$PKG/usr/share/dolphone/skills/phonectl/"
